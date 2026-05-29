@@ -105,6 +105,8 @@ func main() {
 	idxP := flag.String("idx", "/tmp/openalex-records.idx", "output record offset index")
 	ftsr := flag.String("ftsr", "/tmp/openalex.ftsr", "temp FTSR index")
 	limit := flag.Int("limit", 0, "max works to load (0 = all)")
+	stream := flag.Bool("stream", false, "two-pass streaming build (constant source memory; for corpora too large to load whole)")
+	tmpRec := flag.String("tmprec", "/tmp/openalex-rec.tmp", "temp record file used by the streaming build")
 	flag.Parse()
 
 	files, err := filepath.Glob(*in)
@@ -116,6 +118,13 @@ func main() {
 	}
 	sort.Strings(files)
 	log.Printf("matched %d input files", len(files))
+
+	if *stream {
+		if err := streamBuild(files, *rrs, *facetsPath, *binP, *idxP, *ftsr, *tmpRec, *limit); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	items := loadWorks(files, *limit)
 	log.Printf("loaded %d works", len(items))
