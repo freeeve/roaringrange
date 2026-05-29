@@ -1,0 +1,964 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenAlex — static in-browser search</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #f7f8fa;
+        --panel: #ffffff;
+        --ink: #1a1d24;
+        --ink-soft: #5b6472;
+        --ink-faint: #8b94a3;
+        --line: #e4e7ec;
+        --line-soft: #eef0f3;
+        --accent: #3b5bdb;
+        --accent-soft: #edf0fd;
+        --accent-ink: #2b44a8;
+        --badge-bg: #fff4e6;
+        --badge-ink: #b35309;
+        --focus: #3b5bdb;
+        --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        --radius: 12px;
+        --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+      }
+
+      * { box-sizing: border-box; }
+
+      html, body { margin: 0; padding: 0; }
+
+      body {
+        font-family: "Inter", system-ui, -apple-system, sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      :focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+        border-radius: 4px;
+      }
+
+      /* ---- header ---- */
+      header.site {
+        background: var(--panel);
+        border-bottom: 1px solid var(--line);
+        padding: 22px 0 18px;
+      }
+      .wrap { max-width: 1160px; margin: 0 auto; padding: 0 24px; }
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .howlink {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--ink);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 9px 14px;
+        box-shadow: var(--shadow);
+        white-space: nowrap;
+      }
+      .howlink:hover { border-color: #cfd6e4; color: var(--accent-ink); text-decoration: none; }
+      .brand { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+      .brand h1 {
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        margin: 0;
+      }
+      .brand .mark {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px; height: 30px;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 700;
+        font-size: 15px;
+        flex: none;
+      }
+      .tagline {
+        margin: 6px 0 0;
+        color: var(--ink-soft);
+        font-size: 13.5px;
+      }
+      .tagline code {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--accent-ink);
+        background: var(--accent-soft);
+        padding: 1px 6px;
+        border-radius: 5px;
+      }
+
+      /* ---- search bar ---- */
+      .searchrow {
+        margin-top: 18px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .searchbox {
+        position: relative;
+        flex: 1 1 380px;
+        min-width: 240px;
+      }
+      .searchbox svg {
+        position: absolute;
+        left: 14px; top: 50%;
+        transform: translateY(-50%);
+        width: 18px; height: 18px;
+        color: var(--ink-faint);
+        pointer-events: none;
+      }
+      #q {
+        width: 100%;
+        font-size: 16px;
+        font-family: inherit;
+        color: var(--ink);
+        padding: 12px 16px 12px 42px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        transition: border-color 0.12s, box-shadow 0.12s;
+      }
+      #q:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+        outline: none;
+      }
+      .btn {
+        font-family: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        padding: 12px 20px;
+        border-radius: var(--radius);
+        border: 1px solid transparent;
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+        transition: background 0.12s, transform 0.04s;
+      }
+      .btn:hover { background: var(--accent-ink); }
+      .btn:active { transform: translateY(1px); }
+      .btn:disabled { opacity: 0.5; cursor: default; }
+
+      /* fuzz segmented toggle */
+      .fuzz {
+        display: inline-flex;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+        overflow: hidden;
+        box-shadow: var(--shadow);
+      }
+      .fuzz input { position: absolute; opacity: 0; pointer-events: none; }
+      .fuzz label {
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--ink-soft);
+        padding: 11px 16px;
+        cursor: pointer;
+        user-select: none;
+        white-space: nowrap;
+      }
+      .fuzz label + label { border-left: 1px solid var(--line); }
+      .fuzz input:checked + label {
+        background: var(--accent-soft);
+        color: var(--accent-ink);
+        font-weight: 600;
+      }
+      .fuzz input:focus-visible + label { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+      /* ---- perf bar ---- */
+      .perfbar {
+        margin-top: 14px;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-soft);
+        background: #0f1422;
+        color: #c7d0e0;
+        border-radius: 10px;
+        padding: 10px 14px;
+        display: flex;
+        gap: 18px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .perfbar .stat { display: inline-flex; gap: 6px; align-items: baseline; }
+      .perfbar .stat b { color: #fff; font-weight: 500; }
+      .perfbar .lbl { color: #6b7689; }
+      .perfbar .summary { color: #7fe1b0; font-weight: 500; margin-left: auto; }
+
+      /* ---- main layout ---- */
+      main { padding: 26px 0 60px; }
+      .layout {
+        display: grid;
+        grid-template-columns: 264px 1fr;
+        gap: 28px;
+        align-items: start;
+      }
+
+      /* ---- facet sidebar ---- */
+      aside.facets {
+        position: sticky;
+        top: 18px;
+        max-height: calc(100vh - 36px);
+        overflow-y: auto;
+        padding-right: 4px;
+      }
+      .fgroup {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        margin-bottom: 14px;
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+      .fgroup > h3 {
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--ink-soft);
+        margin: 0;
+        padding: 13px 14px 9px;
+      }
+      .fgroup .ffilter {
+        margin: 0 14px 8px;
+        width: calc(100% - 28px);
+        font-size: 12px;
+        font-family: inherit;
+        padding: 7px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--bg);
+      }
+      .fgroup .ffilter:focus { border-color: var(--accent); outline: none; }
+      .flist { max-height: 240px; overflow-y: auto; padding: 0 6px 8px; }
+      .flist.scroll { border-top: 1px solid var(--line-soft); padding-top: 6px; }
+      .fitem {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 5px 8px;
+        border-radius: 7px;
+        cursor: pointer;
+        font-size: 13px;
+        color: var(--ink);
+      }
+      .fitem:hover { background: var(--line-soft); }
+      .fitem input { accent-color: var(--accent); width: 15px; height: 15px; flex: none; cursor: pointer; }
+      .fitem .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .fitem .cnt {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--ink-faint);
+        flex: none;
+      }
+      .fitem.on { color: var(--accent-ink); font-weight: 500; }
+      .fmore {
+        font-size: 11.5px;
+        color: var(--ink-faint);
+        padding: 7px 8px 3px;
+        font-style: italic;
+      }
+      .clearfilters {
+        display: none;
+        margin-bottom: 14px;
+        width: 100%;
+        font-family: inherit;
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--accent-ink);
+        background: var(--accent-soft);
+        border: 1px solid transparent;
+        border-radius: var(--radius);
+        padding: 9px;
+        cursor: pointer;
+      }
+      .clearfilters:hover { background: #e2e8fb; }
+      .clearfilters.show { display: block; }
+
+      /* ---- results ---- */
+      .results-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+        flex-wrap: wrap;
+      }
+      .results-head .count { font-size: 14px; color: var(--ink-soft); }
+      .results-head .count b { color: var(--ink); font-weight: 600; }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 16px 18px;
+        margin-bottom: 12px;
+        box-shadow: var(--shadow);
+        transition: border-color 0.12s, box-shadow 0.12s;
+      }
+      .card:hover { border-color: #cfd6e4; }
+      .card .title {
+        font-size: 16px;
+        font-weight: 600;
+        line-height: 1.35;
+        letter-spacing: -0.005em;
+        margin: 0 0 6px;
+      }
+      .card .title a { color: var(--ink); }
+      .card .title a:hover { color: var(--accent); }
+      .card .meta {
+        font-size: 13px;
+        color: var(--ink-soft);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 10px;
+        align-items: center;
+      }
+      .card .meta .sep { color: var(--line); }
+      .card .meta .authors { color: var(--ink); }
+      .card .meta .amore { background: none; border: none; padding: 0; margin-left: 5px; color: var(--accent); font: inherit; font-size: .9em; cursor: pointer; }
+      .card .meta .amore:hover { text-decoration: underline; }
+      .card .meta .venue { font-style: italic; }
+      .card .cites {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-family: var(--mono);
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--badge-ink);
+        background: var(--badge-bg);
+        border-radius: 20px;
+        padding: 2px 10px;
+        margin-top: 9px;
+      }
+
+      .skeleton .title, .skeleton .meta {
+        background: linear-gradient(90deg, var(--line-soft) 25%, #f3f4f7 37%, var(--line-soft) 63%);
+        background-size: 400% 100%;
+        animation: shimmer 1.3s ease infinite;
+        color: transparent;
+        border-radius: 5px;
+      }
+      .skeleton .title { height: 18px; width: 70%; margin-bottom: 10px; }
+      .skeleton .meta { height: 13px; width: 45%; }
+      @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+      .empty {
+        text-align: center;
+        color: var(--ink-faint);
+        padding: 60px 20px;
+        font-size: 15px;
+      }
+      .empty svg { width: 40px; height: 40px; opacity: 0.4; margin-bottom: 12px; }
+
+      /* ---- pagination ---- */
+      .pager {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        margin-top: 22px;
+      }
+      .pager button {
+        font-family: inherit;
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--ink);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 9px 18px;
+        cursor: pointer;
+        box-shadow: var(--shadow);
+      }
+      .pager button:hover:not(:disabled) { border-color: #cfd6e4; }
+      .pager button:disabled { opacity: 0.4; cursor: default; }
+      .pager .pginfo { font-size: 13px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+
+      /* ---- responsive ---- */
+      .menutoggle { display: none; }
+
+      @media (max-width: 720px) {
+        .layout { grid-template-columns: 1fr; }
+        aside.facets {
+          position: static;
+          max-height: none;
+          display: none;
+        }
+        aside.facets.open { display: block; }
+        .menutoggle {
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          font-family: inherit;
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--ink);
+          background: var(--panel);
+          border: 1px solid var(--line);
+          border-radius: var(--radius);
+          padding: 9px 14px;
+          cursor: pointer;
+        }
+        .perfbar .summary { margin-left: 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="site">
+      <div class="wrap">
+        <div class="topbar">
+          <div class="brand">
+            <span class="mark" aria-hidden="true">OA</span>
+            <h1>OpenAlex — static in-browser search</h1>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <a class="howlink" href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.8 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.5-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
+              GitHub
+            </a>
+            <a class="howlink" href="how-it-works.html">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5v.2" stroke-linecap="round" /><circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none" />
+              </svg>
+              How it works
+            </a>
+          </div>
+        </div>
+        <p class="tagline">
+          no backend · range-fetched from S3 · powered by <code>roaringrange</code>
+        </p>
+
+        <div class="searchrow">
+          <div class="searchbox">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" stroke-linecap="round" />
+            </svg>
+            <input
+              id="q"
+              type="search"
+              value="machine learning"
+              placeholder="Search scholarly works…"
+              autocomplete="off"
+              aria-label="Search query"
+            />
+          </div>
+
+          <div class="fuzz" role="radiogroup" aria-label="Match mode">
+            <input type="radio" name="fuzz" id="fuzz-0" value="0" checked />
+            <label for="fuzz-0">Exact</label>
+            <input type="radio" name="fuzz" id="fuzz-1" value="1" />
+            <label for="fuzz-1">Tolerate 1</label>
+          </div>
+
+          <button class="btn" id="go" type="button">Search</button>
+        </div>
+
+        <div class="perfbar" id="perfbar" aria-live="polite">
+          <span class="stat"><span class="lbl">boot</span><b id="m-boot">—</b></span>
+          <span class="stat"><span class="lbl">search</span><b id="m-search">—</b></span>
+          <span class="stat"><span class="lbl">requests</span><b id="m-reqs">—</b></span>
+          <span class="stat"><span class="lbl">fetched</span><b id="m-kb">—</b></span>
+          <span class="summary" id="m-summary">booting…</span>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <div class="wrap">
+        <button class="menutoggle" id="menutoggle" type="button" aria-expanded="false">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M3 6h18M3 12h18M3 18h18" stroke-linecap="round" />
+          </svg>
+          Filters
+        </button>
+
+        <div class="layout">
+          <aside class="facets" id="facets" aria-label="Filters">
+            <button class="clearfilters" id="clearfilters" type="button">Clear all filters</button>
+            <div id="facetgroups"></div>
+          </aside>
+
+          <section aria-label="Results">
+            <div class="results-head">
+              <div class="count" id="resultcount"></div>
+            </div>
+            <div id="results"></div>
+            <nav class="pager" id="pager" aria-label="Pagination" hidden>
+              <button id="prev" type="button">◀ Prev</button>
+              <span class="pginfo" id="pginfo"></span>
+              <button id="next" type="button">Next ▶</button>
+            </nav>
+          </section>
+        </div>
+      </div>
+    </main>
+
+    <script type="module">
+      import init, { RrsIndex } from "./roaringrange_reader.js";
+
+      /* -------- byte/request accounting via fetch interception (from webtest) -------- */
+      const realFetch = self.fetch.bind(self);
+      let reqs = 0, bytes = 0;
+      self.fetch = (input, opts) => {
+        let range = null;
+        try {
+          if (input && input.headers && typeof input.headers.get === "function") range = input.headers.get("Range");
+          else if (opts && opts.headers) {
+            const h = opts.headers instanceof Headers ? opts.headers : new Headers(opts.headers);
+            range = h.get("Range");
+          }
+        } catch (_) {}
+        if (range) { reqs++; const m = /bytes=(\d+)-(\d+)/.exec(range); if (m) bytes += +m[2] - +m[1] + 1; }
+        return realFetch(input, opts);
+      };
+
+      /* -------- config & element handles -------- */
+      const RRS_URL = new URL("openalex.rrs", location.href).href;
+      const RRF_URL = new URL("openalex.rrf", location.href).href;
+      const IDX_URL = new URL("records.idx", location.href).href;
+      const BIN_URL = new URL("records.bin", location.href).href;
+      const PAGE = 25, GAP = 32;
+
+      const $ = (id) => document.getElementById(id);
+      const dec = new TextDecoder();
+      const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+      const fmt = (n) => n.toLocaleString("en-US");
+      const AUTHOR_SHOW = 5; // authors shown before the "+N more" expander
+
+      const els = {
+        q: $("q"), go: $("go"), results: $("results"), resultcount: $("resultcount"),
+        pager: $("pager"), prev: $("prev"), next: $("next"), pginfo: $("pginfo"),
+        facetgroups: $("facetgroups"), clearfilters: $("clearfilters"),
+        facets: $("facets"), menutoggle: $("menutoggle"),
+        mBoot: $("m-boot"), mSearch: $("m-search"), mReqs: $("m-reqs"), mKb: $("m-kb"), mSummary: $("m-summary"),
+      };
+
+      /* facet field display names + which groups get a scroll box + text filter */
+      const FIELD_LABELS = { year: "Year", type: "Type", oa: "Open Access", language: "Language", topic: "Topic" };
+      const FIELD_ORDER = ["year", "type", "oa", "language", "topic"];
+      const SCROLLABLE = new Set(["year", "language", "topic"]);
+      const FACET_CAP = 100;             // max categories rendered per field (real fields run to tens of thousands)
+
+      let idx = null, cur = null;
+      let offset = 0, lastPage = [], lastTotal = 0;
+      const activeFilters = new Set();   // "field\tcategory"
+      const recCache = new Map();        // docID -> record JSON
+      const countSpans = new Map();      // "field\tname" -> count <span> (live, updated per search)
+      let restoring = false;             // suppress URL writes while applying URL -> state
+
+      /* -------- deep-linking: keep the address bar in sync with the active search --------
+         Params: q (query), fuzz (maxMissing, omitted when 0), repeated f (each
+         "field\tcategory", the same tab format the cursor filters use), p (page offset). */
+      function currentFuzz() {
+        return parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
+      }
+      function syncUrl() {
+        if (restoring) return;
+        const q = els.q.value.trim();
+        const params = new URLSearchParams();
+        if (q) params.set("q", q);
+        const mm = currentFuzz();
+        if (mm) params.set("fuzz", String(mm));
+        for (const key of activeFilters) params.append("f", key);
+        if (offset > 0) params.set("p", String(offset));
+        const qs = params.toString();
+        history.replaceState(null, "", qs ? `?${qs}` : location.pathname);
+      }
+
+      /* Apply URL params to the inputs/checkboxes on load. Facet boxes must already be
+         rendered. Returns the parsed query and requested page offset, or null when no q. */
+      function applyUrlState() {
+        const params = new URLSearchParams(location.search);
+        const q = params.get("q");
+        if (!q) return null;
+        restoring = true;
+        try {
+          els.q.value = q;
+          const mm = parseInt(params.get("fuzz") || "0", 10) || 0;
+          const radio = document.querySelector(`input[name="fuzz"][value="${mm === 1 ? 1 : 0}"]`);
+          if (radio) radio.checked = true;
+
+          activeFilters.clear();
+          for (const raw of params.getAll("f")) {
+            const tab = raw.indexOf("\t");
+            if (tab < 0) continue;          // skip malformed values rather than crash
+            activeFilters.add(raw);          // applied as a filter even if not in the rendered top-100
+            const box = countSpans.get(raw); // check the box when it is rendered
+            if (box) {
+              const item = box.closest(".fitem");
+              const cb = item && item.querySelector("input");
+              if (cb) { cb.checked = true; item.classList.add("on"); }
+            }
+          }
+          updateClearButton();
+        } finally {
+          restoring = false;
+        }
+        const p = parseInt(params.get("p") || "0", 10);
+        return { q, offset: Number.isFinite(p) && p > 0 ? p : 0 };
+      }
+
+      /* -------- record fetch: run-coalesced HTTP Range reads (from webtest viaRuns) -------- */
+      function runs(ids) {
+        const r = [];
+        if (!ids.length) return r;
+        let s = ids[0], p = ids[0];
+        for (let k = 1; k < ids.length; k++) {
+          if (ids[k] - p <= GAP) p = ids[k]; else { r.push([s, p]); s = ids[k]; p = ids[k]; }
+        }
+        r.push([s, p]);
+        return r;
+      }
+      async function readRun(a, b, map) {
+        const ir = await realFetch(IDX_URL, { headers: { Range: `bytes=${a * 8}-${(b + 1) * 8 + 7}` } });
+        const idv = new DataView(await ir.arrayBuffer());
+        const o = (i) => Number(idv.getBigUint64((i - a) * 8, true));
+        const s = o(a), e = o(b + 1);
+        const rr = await realFetch(BIN_URL, { headers: { Range: `bytes=${s}-${e - 1}` } });
+        const buf = new Uint8Array(await rr.arrayBuffer());
+        for (let id = a; id <= b; id++) {
+          try { map.set(id, JSON.parse(dec.decode(buf.subarray(o(id) - s, o(id + 1) - s)))); } catch (_) {}
+        }
+      }
+      async function fetchRecords(ids) {
+        const map = new Map();
+        await Promise.all(runs(ids).map(([a, b]) => readRun(a, b, map)));
+        return map;
+      }
+
+      /* -------- perf bar -------- */
+      function setPerf({ boot, search, summary } = {}) {
+        if (boot !== undefined) els.mBoot.textContent = `${boot.toFixed(1)} ms`;
+        if (search !== undefined) {
+          els.mSearch.textContent = `${search.toFixed(2)} ms · ${(search * 1000).toFixed(0)} µs`;
+        }
+        els.mReqs.textContent = String(reqs);
+        els.mKb.textContent = `${(bytes / 1024).toFixed(1)} KB`;
+        if (summary !== undefined) els.mSummary.textContent = summary;
+      }
+
+      /* -------- facet rendering --------
+         Fields can have tens of thousands of categories, so each is sorted by count
+         descending and only the top FACET_CAP are rendered. Each rendered count <span>
+         is registered in countSpans so a later facetCountsJson() can update it in place. */
+      function renderFacets() {
+        let groups = [];
+        try { groups = JSON.parse(idx.facetsJson()) || []; } catch (_) { groups = []; }
+        const byField = new Map(groups.map((g) => [g.field, g]));
+        els.facetgroups.innerHTML = "";
+        countSpans.clear();
+
+        const fields = FIELD_ORDER.filter((f) => byField.has(f))
+          .concat(groups.map((g) => g.field).filter((f) => !FIELD_ORDER.includes(f)));
+
+        for (const field of fields) {
+          const g = byField.get(field);
+          if (!g || !g.cats || !g.cats.length) continue;
+          const wrap = document.createElement("div");
+          wrap.className = "fgroup";
+
+          const h = document.createElement("h3");
+          h.textContent = FIELD_LABELS[field] || field;
+          wrap.appendChild(h);
+
+          const sorted = g.cats.slice().sort((a, b) => (b.count || 0) - (a.count || 0));
+          const shown = sorted.slice(0, FACET_CAP);
+          const hidden = sorted.length - shown.length;
+
+          const scrollable = SCROLLABLE.has(field) || shown.length > 8;
+          if (scrollable) {
+            const filterInput = document.createElement("input");
+            filterInput.className = "ffilter";
+            filterInput.type = "text";
+            filterInput.placeholder = `Filter ${FIELD_LABELS[field] || field}…`;
+            filterInput.setAttribute("aria-label", `Filter ${FIELD_LABELS[field] || field} options`);
+            wrap.appendChild(filterInput);
+            filterInput.addEventListener("input", () => {
+              const needle = filterInput.value.trim().toLowerCase();
+              list.querySelectorAll(".fitem").forEach((it) => {
+                it.style.display = it.dataset.name.toLowerCase().includes(needle) ? "" : "none";
+              });
+            });
+          }
+
+          const list = document.createElement("div");
+          list.className = "flist" + (scrollable ? " scroll" : "");
+
+          for (const cat of shown) {
+            const key = `${field}\t${cat.name}`;
+            const item = document.createElement("label");
+            item.className = "fitem";
+            item.dataset.name = cat.name;
+            const checked = activeFilters.has(key);
+            if (checked) item.classList.add("on");
+            item.innerHTML =
+              `<input type="checkbox" ${checked ? "checked" : ""} />` +
+              `<span class="name" title="${esc(cat.name)}">${esc(cat.name)}</span>` +
+              `<span class="cnt">${fmt(cat.count || 0)}</span>`;
+            const cb = item.querySelector("input");
+            cb.addEventListener("change", () => {
+              if (cb.checked) { activeFilters.add(key); item.classList.add("on"); }
+              else { activeFilters.delete(key); item.classList.remove("on"); }
+              updateClearButton();
+              runSearch(false);
+            });
+            countSpans.set(key, item.querySelector(".cnt"));
+            list.appendChild(item);
+          }
+
+          if (hidden > 0) {
+            const more = document.createElement("div");
+            more.className = "fmore";
+            more.textContent = `+${fmt(hidden)} more (showing top ${FACET_CAP} by frequency)`;
+            list.appendChild(more);
+          }
+
+          wrap.appendChild(list);
+          els.facetgroups.appendChild(wrap);
+        }
+        updateClearButton();
+      }
+
+      /* Update rendered category counts to reflect the current query's results.
+         Categories not present in the filtered facet data show 0; checked boxes stay
+         checked regardless. Pass null to restore the full (unfiltered) index counts. */
+      function applyFacetCounts(json) {
+        let groups = null;
+        const src = json != null ? json : (idx ? idx.facetsJson() : null);
+        if (src == null) return;
+        try { groups = JSON.parse(src) || []; } catch (_) { return; }
+
+        const counts = new Map();
+        for (const g of groups) {
+          if (!g || !g.cats) continue;
+          for (const cat of g.cats) counts.set(`${g.field}\t${cat.name}`, cat.count || 0);
+        }
+        for (const [key, span] of countSpans) {
+          span.textContent = fmt(counts.get(key) || 0);
+        }
+      }
+
+      function updateClearButton() {
+        els.clearfilters.classList.toggle("show", activeFilters.size > 0);
+      }
+
+      /* -------- results rendering -------- */
+      function skeletons(n) {
+        let h = "";
+        for (let i = 0; i < n; i++) h += `<div class="card skeleton"><div class="title"></div><div class="meta"></div></div>`;
+        els.results.innerHTML = h;
+      }
+
+      function renderCards(map) {
+        if (!lastPage.length) {
+          els.results.innerHTML =
+            `<div class="empty">` +
+            `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">` +
+            `<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3" stroke-linecap="round"/></svg>` +
+            `<div>No matching works.${activeFilters.size ? " Try clearing some filters." : ""}</div></div>`;
+          return;
+        }
+        const frag = document.createDocumentFragment();
+        for (const id of lastPage) {
+          const r = map.get(id) || recCache.get(id) || {};
+          const card = document.createElement("article");
+          card.className = "card";
+
+          const titleText = r.t || "Untitled work";
+          const titleHtml = r.id
+            ? `<a href="https://openalex.org/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">${esc(titleText)}</a>`
+            : esc(titleText);
+
+          const meta = [];
+          if (r.a) {
+            const names = r.a.split("; ");
+            if (names.length <= AUTHOR_SHOW) {
+              meta.push(`<span class="authors">${esc(r.a)}</span>`);
+            } else {
+              const head = esc(names.slice(0, AUTHOR_SHOW).join(", "));
+              const rest = esc(", " + names.slice(AUTHOR_SHOW).join(", "));
+              meta.push(
+                `<span class="authors">${head}` +
+                `<span class="arest" hidden>${rest}</span>` +
+                `<button class="amore" type="button">+${fmt(names.length - AUTHOR_SHOW)} more</button></span>`
+              );
+            }
+          }
+          if (r.y) meta.push(`<span>${esc(r.y)}</span>`);
+          if (r.v) meta.push(`<span class="venue">${esc(r.v)}</span>`);
+          const metaHtml = meta.join(`<span class="sep" aria-hidden="true">·</span>`);
+
+          const cites = Number(r.c) || 0;
+          const citesHtml =
+            `<span class="cites" title="Cited by ${fmt(cites)}">` +
+            `<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">` +
+            `<path d="M7 7h4v6a3 3 0 0 1-3 3H7v-2h1a1 1 0 0 0 1-1v-1H7V7zm7 0h4v6a3 3 0 0 1-3 3h-1v-2h1a1 1 0 0 0 1-1v-1h-2V7z"/></svg>` +
+            `${fmt(cites)} citation${cites === 1 ? "" : "s"}</span>`;
+
+          card.innerHTML =
+            `<h2 class="title">${titleHtml}</h2>` +
+            `<div class="meta">${metaHtml}</div>` +
+            citesHtml;
+          frag.appendChild(card);
+        }
+        els.results.innerHTML = "";
+        els.results.appendChild(frag);
+      }
+
+      function updateResultsHead() {
+        const loaded = cur ? cur.loaded() : 0;
+        const total = lastTotal;
+        if (!total) { els.resultcount.textContent = ""; return; }
+        els.resultcount.innerHTML =
+          `<b>${fmt(total)}</b> result${total === 1 ? "" : "s"}` +
+          (loaded && loaded < total ? ` <span style="color:var(--ink-faint)">(${fmt(loaded)} ranked so far)</span>` : "");
+      }
+
+      function updatePager() {
+        const hasPrev = offset > 0;
+        const hasNext = lastPage.length === PAGE;
+        els.prev.disabled = !hasPrev;
+        els.next.disabled = !hasNext;
+        if (!lastTotal) { els.pager.hidden = true; return; }
+        els.pager.hidden = false;
+        const from = offset + 1, to = offset + lastPage.length;
+        els.pginfo.textContent = `${fmt(from)}–${fmt(to)} of ${fmt(lastTotal)}`;
+      }
+
+      /* -------- paging: pull a page of doc IDs, then fetch their records --------
+         extraMs folds an upstream cursor-open into the reported index-search latency
+         (record HTTP Range fetches are intentionally excluded from search ms). */
+      async function goPage(o, extraMs = 0) {
+        if (!cur) return;
+        offset = Math.max(0, o);
+        skeletons(Math.min(PAGE, 8));
+        const t0 = performance.now();
+        let ids;
+        try { ids = await cur.page(offset, PAGE); }
+        catch (e) { els.mSummary.textContent = `error: ${e}`; return; }
+        const searchMs = extraMs + (performance.now() - t0);
+        lastPage = Array.from(ids);
+        lastTotal = cur.loaded();
+
+        const missing = lastPage.filter((id) => !recCache.has(id));
+        const map = await fetchRecords(missing);
+        for (const [id, rec] of map) recCache.set(id, rec);
+
+        renderCards(recCache);
+        updateResultsHead();
+        updatePager();
+        syncUrl();
+        setPerf({
+          search: searchMs,
+          summary: lastTotal
+            ? `${fmt(lastTotal)} result${lastTotal === 1 ? "" : "s"} in ${searchMs.toFixed(1)} ms`
+            : "no results",
+        });
+      }
+
+      /* -------- run a query (resetPaging=true on new query / fuzz change) -------- */
+      async function runSearch(resetPaging = true) {
+        if (!idx) return;
+        const q = els.q.value.trim();
+        if (!q) {
+          els.results.innerHTML = `<div class="empty">Type a query to search OpenAlex works.</div>`;
+          els.resultcount.textContent = "";
+          els.pager.hidden = true;
+          applyFacetCounts(null);
+          syncUrl();
+          return;
+        }
+        reqs = 0; bytes = 0;
+        recCache.clear();
+        const mm = parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
+        const filters = Array.from(activeFilters);
+        const t0 = performance.now();
+        try { cur = await idx.searchCursorFiltered(q, mm, filters); }
+        catch (e) { els.mSummary.textContent = `error: ${e}`; return; }
+        const openMs = performance.now() - t0;
+        try { applyFacetCounts(cur.facetCountsJson()); } catch (_) {}
+        await goPage(resetPaging ? 0 : offset, openMs);
+      }
+
+      /* -------- boot -------- */
+      async function boot() {
+        reqs = 0; bytes = 0;
+        const t0 = performance.now();
+        try { idx = await RrsIndex.open(RRS_URL); }
+        catch (e) { els.mSummary.textContent = `failed to open index: ${e}`; return; }
+
+        try { await idx.openFacets(RRF_URL); }
+        catch (_) { /* facet sidecar optional */ }
+
+        const bootMs = performance.now() - t0;
+        setPerf({ boot: bootMs, summary: "ready" });
+        renderFacets();
+
+        const restored = applyUrlState();
+        if (restored) {
+          offset = restored.offset;
+          await runSearch(false);   // page to the restored offset rather than resetting
+        } else {
+          await runSearch(true);
+        }
+      }
+
+      /* -------- events -------- */
+      els.go.addEventListener("click", () => runSearch(true));
+      els.q.addEventListener("keydown", (e) => { if (e.key === "Enter") runSearch(true); });
+      document.querySelectorAll('input[name="fuzz"]').forEach((r) =>
+        r.addEventListener("change", () => runSearch(true)));
+      els.results.addEventListener("click", (e) => {
+        const btn = e.target.closest(".amore");
+        if (!btn) return;
+        const rest = btn.parentElement.querySelector(".arest");
+        if (rest) rest.hidden = false;
+        btn.remove();
+      });
+      els.prev.addEventListener("click", () => goPage(offset - PAGE));
+      els.next.addEventListener("click", () => goPage(offset + PAGE));
+      els.clearfilters.addEventListener("click", () => {
+        activeFilters.clear();
+        renderFacets();
+        runSearch(false);
+      });
+      els.menutoggle.addEventListener("click", () => {
+        const open = els.facets.classList.toggle("open");
+        els.menutoggle.setAttribute("aria-expanded", String(open));
+      });
+
+      init().then(boot).catch((e) => { els.mSummary.textContent = "init error: " + e; });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,22 @@
+# Rust / wasm-pack build output
+reader/target/
+reader/pkg/
+
+# Go binaries
+/openalexbuild
+*.test
+
+# index / data build artifacts (never commit large generated indexes)
+*.rrs
+*.rrf
+*.ftsr
+records.bin
+records.idx
+*.gz
+
+# DeepLibby-specific local dev harness (proprietary data domain)
+reader/webtest/
+
+# OS / editor
+.DS_Store
+*.swp

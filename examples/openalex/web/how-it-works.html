@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>How it works — OpenAlex static in-browser search</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #f7f8fa;
+        --panel: #ffffff;
+        --ink: #1a1d24;
+        --ink-soft: #5b6472;
+        --ink-faint: #8b94a3;
+        --line: #e4e7ec;
+        --line-soft: #eef0f3;
+        --accent: #3b5bdb;
+        --accent-soft: #edf0fd;
+        --accent-ink: #2b44a8;
+        --focus: #3b5bdb;
+        --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        --radius: 12px;
+        --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        font-family: "Inter", system-ui, -apple-system, sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+      }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+
+      /* ---- header ---- */
+      header.site {
+        background: var(--panel);
+        border-bottom: 1px solid var(--line);
+        padding: 22px 0 18px;
+      }
+      .wrap { max-width: 880px; margin: 0 auto; padding: 0 24px; }
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .brand { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+      .brand h1 {
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        margin: 0;
+      }
+      .brand .mark {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px; height: 30px;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 700;
+        font-size: 15px;
+        flex: none;
+      }
+      .backlink {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--ink);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 9px 14px;
+        box-shadow: var(--shadow);
+        white-space: nowrap;
+      }
+      .backlink:hover { border-color: #cfd6e4; color: var(--accent-ink); text-decoration: none; }
+      .tagline {
+        margin: 10px 0 0;
+        color: var(--ink-soft);
+        font-size: 13.5px;
+      }
+      .tagline code {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--accent-ink);
+        background: var(--accent-soft);
+        padding: 1px 6px;
+        border-radius: 5px;
+      }
+
+      /* ---- content ---- */
+      main { padding: 30px 0 64px; }
+      .intro {
+        font-size: 16px;
+        color: var(--ink-soft);
+        margin: 0 0 30px;
+        line-height: 1.6;
+      }
+      .intro b { color: var(--ink); font-weight: 600; }
+      .intro code {
+        font-family: var(--mono);
+        font-size: 13px;
+        color: var(--accent-ink);
+        background: var(--accent-soft);
+        padding: 1px 6px;
+        border-radius: 5px;
+      }
+
+      section.step { margin-bottom: 30px; }
+      section.step > h2 {
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: -0.005em;
+        margin: 0 0 14px;
+        display: flex;
+        align-items: center;
+        gap: 11px;
+      }
+      section.step > h2 .num {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px; height: 26px;
+        border-radius: 7px;
+        background: var(--accent-soft);
+        color: var(--accent-ink);
+        font-family: var(--mono);
+        font-size: 13px;
+        font-weight: 500;
+        flex: none;
+      }
+
+      figure.diagram {
+        margin: 0;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        padding: 22px 20px 16px;
+      }
+      figure.diagram img {
+        max-width: 100%;
+        height: auto;
+        display: block;
+        margin: 0 auto;
+        background: #fff;
+        border: 1px solid var(--line-soft);
+        border-radius: 10px;
+        padding: 14px;
+      }
+      figure.diagram figcaption {
+        margin: 16px auto 0;
+        max-width: 680px;
+        text-align: center;
+        font-size: 13.5px;
+        color: var(--ink-soft);
+        line-height: 1.55;
+      }
+
+      footer.foot {
+        border-top: 1px solid var(--line);
+        background: var(--panel);
+        padding: 22px 0;
+        text-align: center;
+        font-size: 13px;
+        color: var(--ink-faint);
+      }
+
+      @media (max-width: 720px) {
+        figure.diagram { padding: 16px 12px 12px; }
+        figure.diagram img { padding: 10px; }
+        .topbar { align-items: flex-start; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="site">
+      <div class="wrap">
+        <div class="topbar">
+          <div class="brand">
+            <span class="mark" aria-hidden="true">OA</span>
+            <h1>How it works</h1>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <a class="backlink" href="index.html">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+              Back to search
+            </a>
+            <a class="backlink" href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.8 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.5-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
+              GitHub
+            </a>
+          </div>
+        </div>
+        <p class="tagline">
+          OpenAlex — static in-browser search · powered by <code>roaringrange</code>
+        </p>
+      </div>
+    </header>
+
+    <main>
+      <div class="wrap">
+        <p class="intro">
+          This demo searches <b>~9.5M OpenAlex works</b> entirely in your browser, with
+          <b>no backend</b>. The index is one static file on S3, and a query fetches just a
+          few small byte-ranges over HTTP — never the whole file. It's powered by the
+          <code>roaringrange</code> library.
+        </p>
+
+        <section class="step">
+          <h2><span class="num" aria-hidden="true">1</span> The file format</h2>
+          <figure class="diagram">
+            <img src="format.svg" alt="RRS index file layout" />
+            <figcaption>
+              The index is one static file: a header, a small sparse index loaded once, a
+              key-sorted dictionary, then popularity-split postings. Doc IDs are assigned by
+              citation count, so the most-cited works sit in the "head" and top-K is free.
+            </figcaption>
+          </figure>
+        </section>
+
+        <section class="step">
+          <h2><span class="num" aria-hidden="true">2</span> Searching in the browser</h2>
+          <figure class="diagram">
+            <img src="search.svg" alt="In-browser search via HTTP range reads" />
+            <figcaption>
+              A query tokenizes into trigrams, fetches the matching dictionary blocks and head
+              postings as parallel HTTP Range requests, ANDs the roaring bitmaps, and reads the
+              page's records — a few KB–MB total. The multi-GB file is never downloaded whole.
+            </figcaption>
+          </figure>
+        </section>
+      </div>
+    </main>
+
+    <footer class="foot">
+      <div class="wrap">
+        no backend · range-fetched from S3 · <a href="index.html">back to search</a>
+      </div>
+    </footer>
+  </body>
+</html>

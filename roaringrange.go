@@ -1,0 +1,25 @@
+// Package roaringrange turns a roaringsearch (FTSR) index into a
+// range-fetchable static index (RRS, see FORMAT.md) that a browser can query
+// over HTTP Range requests with no backend.
+//
+// The layout puts the whole n-gram dictionary in one contiguous, key-sorted
+// block so a reader loads a sparse view in a single ranged GET, then fetches
+// each posting by absolute byte offset. Postings are byte-identical portable
+// RoaringBitmaps, so transcoding copies them verbatim and the Rust/WASM reader
+// deserializes them with the `roaring` crate. Optional faceting is layered on
+// via a companion sidecar (see FACETS.md).
+package roaringrange
+
+import "errors"
+
+// srcMagic is the roaringsearch on-disk magic (the transcode input).
+const srcMagic = "FTSR"
+
+var (
+	// ErrSrcMagic is returned when the source is not a roaringsearch (FTSR) index.
+	ErrSrcMagic = errors.New("roaringrange: source is not a roaringsearch (FTSR) index")
+	// ErrMagic is returned when an index does not start with the RRS magic.
+	ErrMagic = errors.New("roaringrange: bad RRS magic")
+	// ErrTruncated is returned when an index ends before its declared structure.
+	ErrTruncated = errors.New("roaringrange: truncated index")
+)

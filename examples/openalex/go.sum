@@ -1,0 +1,10 @@
+github.com/RoaringBitmap/roaring/v2 v2.14.4 h1:4aKySrrg9G/5oRtJ3TrZLObVqxgQ9f1znCRBwEwjuVw=
+github.com/RoaringBitmap/roaring/v2 v2.14.4/go.mod h1:oMvV6omPWr+2ifRdeZvVJyaz+aoEUopyv5iH0u/+wbY=
+github.com/bits-and-blooms/bitset v1.24.2 h1:M7/NzVbsytmtfHbumG+K2bremQPMJuqv1JD3vOaFxp0=
+github.com/bits-and-blooms/bitset v1.24.2/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
+github.com/freeeve/msgpck v0.3.2 h1:FN3zmWd5/oJO6okbvdwFXyO3PTZAPBpGLMuU5vZT8B0=
+github.com/freeeve/msgpck v0.3.2/go.mod h1:5z7KFctIOZV6bZIleuGOCOZxR9cX6Jc7ndqrDdTJDL8=
+github.com/freeeve/roaringsearch v0.5.9 h1:bSWnWMDYectC0rWAII2bS3+KAsIl3YXGTyf2xtqRDyU=
+github.com/freeeve/roaringsearch v0.5.9/go.mod h1:q386t8jn0slNYsQttf1jwf1oUg0SKgw3gGa8EYedeZg=
+github.com/mschoch/smat v0.2.0 h1:8imxQsjDm8yFEAVBe7azKmKSgzSkZXDuKkSq9374khM=
+github.com/mschoch/smat v0.2.0/go.mod h1:kc9mz7DoBKqDyiRL7VZN8KvXQMWeTaVnttLRXOlotKw=

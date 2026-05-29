@@ -1,0 +1,46 @@
+[package]
+name = "roaringrange_reader"
+version = "0.1.0"
+edition = "2021"
+description = "Browser-side reader for the RRS range-fetchable static search index"
+license = "MIT"
+repository = "https://github.com/freeeve/roaringrange"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+roaring = "0.11"
+# `join_all` (futures-util) drives the concurrent read waves; `executor`
+# provides `block_on` for the native tests. Default features are disabled to
+# keep the native build light: only the std combinators and the executor are
+# pulled in (no `async-await` macros).
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
+
+# All wasm deps stay behind the `wasm` feature; the crate builds and `cargo
+# test`s natively without it.
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+
+[dependencies.web-sys]
+version = "0.3"
+optional = true
+features = [
+    "Headers",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+]
+
+[features]
+# The `wasm` feature gates a fetch()-backed RangeFetch implementation and the
+# wasm-bindgen glue. The core crate builds and tests on the host target without
+# it. Build the browser reader with `wasm-pack build --target web --features wasm`.
+wasm = [
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:web-sys",
+]
