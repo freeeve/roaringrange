@@ -16,8 +16,6 @@ the Go writer and the Rust/WASM reader interoperate with zero re-encoding.
 - **OpenAlex** — [openalex.evefreeman.com](https://openalex.evefreeman.com): ~9.5M
   scholarly works, citation-ranked, faceted (year/type/open-access/language/topic),
   searched entirely client-side. (Reproducible — see [`examples/openalex/`](examples/openalex).)
-- **DeepLibby** — [dev.deeplibby.com](https://dev.deeplibby.com): ~9.6M library
-  titles. (Proprietary data; code not in this repo.)
 
 ## How it fits together
 
