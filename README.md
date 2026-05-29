@@ -25,9 +25,9 @@ build (Go):    corpus ─roaringsearch─▶ FTSR ─roaringrange.Transcode─�
 browser (Rust/WASM): .rrs on CDN ─HTTP Range─▶ reader ─▶ ranked doc IDs ─▶ record store
 ```
 
-Doc IDs are assigned at build time in descending popularity (citations, holdings,
+Doc IDs are assigned at build time in descending static rank (citations, holdings,
 …), so ascending doc ID = rank. Each posting is split into a **head** (the 65,536
-most-popular docs) and a **tail** (the rest); a query ANDs the small heads to get
+top-ranked docs) and a **tail** (the rest); a query ANDs the small heads to get
 the ranked top-K and only fetches a tail when paginating past it. See
 [`docs/format.svg`](docs/format.svg) and [`docs/search.svg`](docs/search.svg).
 
@@ -41,7 +41,7 @@ both deliver full-text search to static sites with no backend. lunr loads the
 whole index into memory; Pagefind pioneered fetching only the index shards a
 query needs. roaringrange pushes that "fetch only what you query" idea to
 *millions* of records by HTTP-Range-reading a single roaring-bitmap index file,
-trading query-time relevance ranking for a baked-in popularity order.
+trading query-time relevance ranking for a baked-in static rank.
 
 | | lunr.js | Pagefind | roaringrange |
 |---|---|---|---|
@@ -50,15 +50,15 @@ trading query-time relevance ranking for a baked-in popularity order.
 | typical scale | hundreds–few thousand docs | up to ~100k+ pages | millions–100M+ records |
 | per-query bytes | 0 after full load (load can be MBs+) | ~tens–hundreds KB | ~KB–few MB (≈ constant) |
 | matching | stemmed terms; wildcard, fuzzy, boosts | stemmed words; partial | trigram substring; fuzzy (tolerate-N) |
-| ranking | TF-IDF / BM25 relevance | BM25-like relevance | popularity, baked into doc-ID order — **no query-time relevance** |
+| ranking | TF-IDF / BM25 relevance | BM25-like relevance | **static rank** (query-independent importance) in doc-ID order — **no query-time relevance** |
 | facets / filters | fielded search (no facet counts) | filters + facet counts | facets + live counts (sidecar) |
 | build input | JS objects / prebuilt JSON | crawls built HTML pages | any records (via roaringsearch) |
 | sweet spot | embedding a search library in a JS app (you own the index) | static sites & docs, small to large | very large catalogs & datasets |
 
 In short: lunr.js when you want to embed a search *library* and control indexing
 in code; Pagefind for static-site search from small to large; roaringrange when
-you have *a lot* of records and want a single range-fetched file with popularity
-ranking and facets.
+you have *a lot* of records and want a single range-fetched file with static-rank
+ordering and facets.
 
 ## Repository layout
 
@@ -83,7 +83,7 @@ the guard that keeps all three byte-compatible.
 rr.Transcode(ftsrReader, rrsWriter)            // → .rrs
 rr.WriteFacets(rrfWriter, []rr.FacetField{...}) // → .rrf (optional)
 ```
-Assign doc IDs in descending popularity before indexing so top-K is free.
+Assign doc IDs in descending static rank before indexing so top-K is free.
 
 **Build the browser reader (Rust → WASM):**
 ```sh
