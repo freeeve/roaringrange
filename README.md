@@ -53,11 +53,12 @@ trading query-time relevance ranking for a baked-in popularity order.
 | ranking | TF-IDF / BM25 relevance | BM25-like relevance | popularity, baked into doc-ID order — **no query-time relevance** |
 | facets / filters | fielded search (no facet counts) | filters + facet counts | facets + live counts (sidecar) |
 | build input | JS objects / prebuilt JSON | crawls built HTML pages | any records (via roaringsearch) |
-| sweet spot | small sites | static doc sites / blogs | very large catalogs & datasets |
+| sweet spot | embedding a search library in a JS app (you own the index) | static sites & docs, small to large | very large catalogs & datasets |
 
-In short: lunr for small sites, Pagefind for static-site/page search, roaringrange
-when you have *a lot* of records and want a single range-fetched file with
-popularity ranking and facets.
+In short: lunr.js when you want to embed a search *library* and control indexing
+in code; Pagefind for static-site search from small to large; roaringrange when
+you have *a lot* of records and want a single range-fetched file with popularity
+ranking and facets.
 
 ## Repository layout
 
