@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: core tests
+        run: go test ./...
+      - name: conformance (roaringsearch ⇄ roaringrange)
+        working-directory: conformance
+        run: go test ./...
+      - name: example builds
+        working-directory: examples/openalex
+        run: go vet ./...
+      - name: gofmt
+        run: test -z "$(gofmt -l . | grep -v '^conformance/\|^examples/')"
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: test
+        working-directory: reader
+        run: cargo test
+      - name: fmt
+        working-directory: reader
+        run: cargo fmt --check
+      - name: clippy
+        working-directory: reader
+        run: cargo clippy --all-targets -- -D warnings
