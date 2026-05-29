@@ -111,7 +111,9 @@ impl<F: RangeFetch> FacetIndex<F> {
         if let (Some(first), Some(last)) = (cats.first(), cats.last()) {
             let blob_start = first.range.head_off;
             let blob_end = last.range.tail_off + last.range.tail_size as u64;
-            let blob = fetch.read(blob_start, (blob_end - blob_start) as usize).await?;
+            let blob = fetch
+                .read(blob_start, (blob_end - blob_start) as usize)
+                .await?;
             for c in &mut cats {
                 let s = (c.range.head_off - blob_start) as usize;
                 let e = s + c.range.head_size as usize;
@@ -145,7 +147,11 @@ impl<F: RangeFetch> FacetIndex<F> {
     {
         let mut by_field: BTreeMap<usize, Vec<CatRange>> = BTreeMap::new();
         for (fname, cname) in pairs {
-            if let Some((fi, field)) = self.fields.iter().enumerate().find(|(_, f)| &f.name == fname)
+            if let Some((fi, field)) = self
+                .fields
+                .iter()
+                .enumerate()
+                .find(|(_, f)| &f.name == fname)
             {
                 if let Some(c) = field.categories.iter().find(|c| &c.name == cname) {
                     by_field.entry(fi).or_default().push(c.range);

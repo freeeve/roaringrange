@@ -490,11 +490,14 @@ impl<F: RangeFetch> ResolvedFilter<F> {
                 flat.push((fi, range_of(c)));
             }
         }
-        let reads = flat.iter().map(|(_, (off, len))| self.fetch.read(*off, *len));
+        let reads = flat
+            .iter()
+            .map(|(_, (off, len))| self.fetch.read(*off, *len));
         let results = join_all(reads).await;
 
-        let mut per_field: Vec<RoaringBitmap> =
-            (0..self.fields.len()).map(|_| RoaringBitmap::new()).collect();
+        let mut per_field: Vec<RoaringBitmap> = (0..self.fields.len())
+            .map(|_| RoaringBitmap::new())
+            .collect();
         for ((fi, _), bytes) in flat.iter().zip(results) {
             per_field[*fi] |= deserialize(&bytes?)?;
         }

@@ -90,6 +90,18 @@ Boot and per-query cost stay ~constant as the corpus grows; size lives in the
 postings (≈0.4 bytes per trigram-document incidence — roaring is near-optimal),
 so the lever for a smaller index is indexing less text per doc, not the encoding.
 
+## Development
+
+Enable the formatting pre-commit hook (runs `gofmt` + `cargo fmt --check` on
+staged changes, matching CI):
+
+```sh
+git config core.hooksPath .githooks
+```
+
+CI runs `go test ./...`, the `conformance/` module, `go vet` on the example, and
+`cargo test` + `fmt` + `clippy` for the reader.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

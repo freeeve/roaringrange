@@ -429,13 +429,19 @@ fn facet_filtering_within_or_across_and() {
     assert_eq!(facets.fields.len(), 2);
     let fmt = facets.fields.iter().find(|f| f.name == "format").unwrap();
     assert_eq!(
-        fmt.categories.iter().find(|c| c.name == "ebook").unwrap().count,
+        fmt.categories
+            .iter()
+            .find(|c| c.name == "ebook")
+            .unwrap()
+            .count,
         4
     );
 
     let page = |pairs: &[(&str, &str)]| -> Vec<u32> {
-        let owned: Vec<(String, String)> =
-            pairs.iter().map(|(f, c)| (f.to_string(), c.to_string())).collect();
+        let owned: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(f, c)| (f.to_string(), c.to_string()))
+            .collect();
         let filter = facets.resolve(&owned);
         let mut cur = block_on(idx.search_cursor_filtered("abc", 0, Some(filter))).unwrap();
         block_on(cur.page(0, 100)).unwrap()

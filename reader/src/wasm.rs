@@ -271,9 +271,7 @@ impl RrsIndex {
                     .filter_map(|entry| {
                         let mut parts = entry.splitn(2, '\t');
                         match (parts.next(), parts.next()) {
-                            (Some(field), Some(cat)) => {
-                                Some((field.to_string(), cat.to_string()))
-                            }
+                            (Some(field), Some(cat)) => Some((field.to_string(), cat.to_string())),
                             _ => None,
                         }
                     })
