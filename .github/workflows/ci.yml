@@ -13,16 +13,26 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-      - name: core tests
-        run: go test ./...
-      - name: conformance (roaringsearch ⇄ roaringrange)
+      - name: Check formatting
+        run: |
+          if [ -n "$(gofmt -s -l .)" ]; then
+            echo "Code is not formatted. Run 'gofmt -s -w .'"
+            gofmt -s -d .
+            exit 1
+          fi
+      - name: Test with coverage
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Upload coverage to Coveralls
+        uses: coverallsapp/github-action@v2
+        with:
+          file: coverage.out
+          format: golang
+      - name: Conformance (roaringsearch ⇄ roaringrange)
         working-directory: conformance
         run: go test ./...
-      - name: example builds
+      - name: Example builds
         working-directory: examples/openalex
         run: go vet ./...
-      - name: gofmt
-        run: test -z "$(gofmt -l . | grep -v '^conformance/\|^examples/')"
 
   rust:
     runs-on: ubuntu-latest
@@ -31,12 +41,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: test
+      - name: Test
         working-directory: reader
         run: cargo test
-      - name: fmt
+      - name: Fmt
         working-directory: reader
         run: cargo fmt --check
-      - name: clippy
+      - name: Clippy
         working-directory: reader
         run: cargo clippy --all-targets -- -D warnings

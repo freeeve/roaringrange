@@ -1,5 +1,15 @@
 # roaringrange
 
+[![CI](https://github.com/freeeve/roaringrange/actions/workflows/ci.yml/badge.svg)](https://github.com/freeeve/roaringrange/actions/workflows/ci.yml)
+[![Coverage Status](https://coveralls.io/repos/github/freeeve/roaringrange/badge.svg?branch=main)](https://coveralls.io/github/freeeve/roaringrange?branch=main)
+[![Go Report Card](https://goreportcard.com/badge/github.com/freeeve/roaringrange)](https://goreportcard.com/report/github.com/freeeve/roaringrange)
+[![Go Reference](https://pkg.go.dev/badge/github.com/freeeve/roaringrange.svg)](https://pkg.go.dev/github.com/freeeve/roaringrange)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=freeeve_roaringrange&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=freeeve_roaringrange)
+[![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=freeeve_roaringrange&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=freeeve_roaringrange)
+[![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=freeeve_roaringrange&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=freeeve_roaringrange)
+[![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=freeeve_roaringrange&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=freeeve_roaringrange)
+[![Snyk](https://snyk.io/test/github/freeeve/roaringrange/badge.svg)](https://snyk.io/test/github/freeeve/roaringrange)
+
 Static, range-fetchable full-text search built on roaring bitmaps — query a
 multi-million-document trigram index **in the browser, over HTTP Range requests,
 with no backend.**
