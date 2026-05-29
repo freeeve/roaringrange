@@ -34,6 +34,31 @@ the ranked top-K and only fetches a tail when paginating past it. See
 This is the design trade-off: ranking is baked in up front (no query-time
 relevance scoring), in exchange for near-constant per-query fetch cost.
 
+## How it compares
+
+Inspired by [lunr.js](https://lunrjs.com) and [Pagefind](https://pagefind.app) —
+both deliver full-text search to static sites with no backend. lunr loads the
+whole index into memory; Pagefind pioneered fetching only the index shards a
+query needs. roaringrange pushes that "fetch only what you query" idea to
+*millions* of records by HTTP-Range-reading a single roaring-bitmap index file,
+trading query-time relevance ranking for a baked-in popularity order.
+
+| | lunr.js | Pagefind | roaringrange |
+|---|---|---|---|
+| backend | none | none | none |
+| index transport | whole index in memory | many shard files, per query | one file, HTTP Range |
+| typical scale | hundreds–few thousand docs | up to ~100k+ pages | millions–100M+ records |
+| per-query bytes | 0 after full load (load can be MBs+) | ~tens–hundreds KB | ~KB–few MB (≈ constant) |
+| matching | stemmed terms; wildcard, fuzzy, boosts | stemmed words; partial | trigram substring; fuzzy (tolerate-N) |
+| ranking | TF-IDF / BM25 relevance | BM25-like relevance | popularity, baked into doc-ID order — **no query-time relevance** |
+| facets / filters | fielded search (no facet counts) | filters + facet counts | facets + live counts (sidecar) |
+| build input | JS objects / prebuilt JSON | crawls built HTML pages | any records (via roaringsearch) |
+| sweet spot | small sites | static doc sites / blogs | very large catalogs & datasets |
+
+In short: lunr for small sites, Pagefind for static-site/page search, roaringrange
+when you have *a lot* of records and want a single range-fetched file with
+popularity ranking and facets.
+
 ## Repository layout
 
 | path | what |
@@ -77,7 +102,7 @@ Host the `.rrs`/`.rrf` (+ your record store) on anything that supports HTTP Rang
 
 ## Measured (full corpora, range-fetched)
 
-| | DeepLibby 9.6M | OpenAlex 9.5M (with abstracts) |
+| | library catalog 9.6M | OpenAlex 9.5M (with abstracts) |
 |---|---|---|
 | index size | 1.4 GB | 4.25 GB |
 | one-time boot | ~52 KB | ~210 KB |

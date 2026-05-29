@@ -111,3 +111,12 @@ Docs:
 - Snapshot: <https://developers.openalex.org/download-all-data/openalex-snapshot>
 - Format: <https://developers.openalex.org/download-all-data/snapshot-data-format>
 - Work object: <https://developers.openalex.org/api-entities/works/work-object>
+
+## Browser reader
+
+`web/roaringrange_reader.js` + `web/roaringrange_reader_bg.wasm` are the
+`wasm-pack` build of `../../reader`, committed so the demo runs as-is. Rebuild
+after changing the reader:
+
+    cd ../../reader && wasm-pack build --target web --features wasm
+    cp pkg/roaringrange_reader.js pkg/roaringrange_reader_bg.wasm ../examples/openalex/web/
