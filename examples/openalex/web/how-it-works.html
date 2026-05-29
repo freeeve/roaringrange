@@ -4,12 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>How it works — OpenAlex static in-browser search</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
+    <!-- system font stack; no external font CDN (avoids the SRI advisory) -->
     <style>
       :root {
         --bg: #f7f8fa;
@@ -23,7 +18,7 @@
         --accent-soft: #edf0fd;
         --accent-ink: #2b44a8;
         --focus: #3b5bdb;
-        --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
         --radius: 12px;
         --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
       }
@@ -31,7 +26,7 @@
       * { box-sizing: border-box; }
       html, body { margin: 0; padding: 0; }
       body {
-        font-family: "Inter", system-ui, -apple-system, sans-serif;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
         color: var(--ink);
         background: var(--bg);
         line-height: 1.5;

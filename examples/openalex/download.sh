@@ -25,8 +25,8 @@
 #   DEST=/data/oa ./download.sh   # custom destination
 #
 # After download, build the index with:
-#   cd /Users/efreeman/rr-e2e
-#   go run ./openalexbuild -in "/tmp/openalex/works/*/*.gz" -limit 2000000
+#   cd examples/openalex
+#   go run . -in "/tmp/openalex/works/*/*.gz" -limit 2000000
 #
 set -euo pipefail
 
@@ -55,7 +55,7 @@ mapfile -t parts < <(
     | head -n "$PARTITIONS"
 )
 
-if [ "${#parts[@]}" -eq 0 ]; then
+if [[ "${#parts[@]}" -eq 0 ]]; then
   echo "error: no partitions found under $SRC/ (is awscli configured for v2?)" >&2
   exit 1
 fi
@@ -76,8 +76,8 @@ echo "Done. Files under: $DEST"
 du -sh "$DEST" 2>/dev/null || true
 echo
 echo "Next: build the index"
-echo "  cd /Users/efreeman/rr-e2e"
-echo "  go run ./openalexbuild -in \"$DEST/*/*.gz\" -limit 2000000"
+echo "  cd examples/openalex"
+echo "  go run . -in \"$DEST/*/*.gz\" -limit 2000000"
 
 # -----------------------------------------------------------------------------
 # Pulling the FULL Works snapshot (disk: ~330 GB compressed, ~1.6 TB raw)

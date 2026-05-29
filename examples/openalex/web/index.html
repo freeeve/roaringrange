@@ -4,12 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpenAlex — static in-browser search</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
+    <!-- system font stack; no external font CDN (avoids the SRI advisory) -->
     <style>
       :root {
         --bg: #f7f8fa;
@@ -25,7 +20,7 @@
         --badge-bg: #fff4e6;
         --badge-ink: #b35309;
         --focus: #3b5bdb;
-        --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
         --radius: 12px;
         --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
       }
@@ -35,7 +30,7 @@
       html, body { margin: 0; padding: 0; }
 
       body {
-        font-family: "Inter", system-ui, -apple-system, sans-serif;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
         color: var(--ink);
         background: var(--bg);
         line-height: 1.5;
@@ -199,7 +194,6 @@
         margin-top: 14px;
         font-family: var(--mono);
         font-size: 12px;
-        color: var(--ink-soft);
         background: #0f1422;
         color: #c7d0e0;
         border-radius: 10px;
@@ -581,7 +575,7 @@
          Params: q (query), fuzz (maxMissing, omitted when 0), repeated f (each
          "field\tcategory", the same tab format the cursor filters use), p (page offset). */
       function currentFuzz() {
-        return parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
+        return Number.parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
       }
       function syncUrl() {
         if (restoring) return;
@@ -605,7 +599,7 @@
         restoring = true;
         try {
           els.q.value = q;
-          const mm = parseInt(params.get("fuzz") || "0", 10) || 0;
+          const mm = Number.parseInt(params.get("fuzz") || "0", 10) || 0;
           const radio = document.querySelector(`input[name="fuzz"][value="${mm === 1 ? 1 : 0}"]`);
           if (radio) radio.checked = true;
 
@@ -625,7 +619,7 @@
         } finally {
           restoring = false;
         }
-        const p = parseInt(params.get("p") || "0", 10);
+        const p = Number.parseInt(params.get("p") || "0", 10);
         return { q, offset: Number.isFinite(p) && p > 0 ? p : 0 };
       }
 
@@ -901,7 +895,7 @@
         }
         reqs = 0; bytes = 0;
         recCache.clear();
-        const mm = parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
+        const mm = Number.parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
         const filters = Array.from(activeFilters);
         const t0 = performance.now();
         try { cur = await idx.searchCursorFiltered(q, mm, filters); }
