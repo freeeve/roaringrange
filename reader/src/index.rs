@@ -435,15 +435,15 @@ impl<F: RangeFetch> Index<F> {
 
 /// One facet category's posting locations within the facet (`RRSF`) file.
 #[derive(Clone, Copy)]
-pub struct CatRange {
+pub(crate) struct CatRange {
     /// Absolute offset of the head posting (docs `[0, 65536)`).
-    pub head_off: u64,
+    pub(crate) head_off: u64,
     /// Head posting length in bytes.
-    pub head_size: u32,
+    pub(crate) head_size: u32,
     /// Absolute offset of the tail posting (`head_off + head_size`).
-    pub tail_off: u64,
+    pub(crate) tail_off: u64,
     /// Tail posting length in bytes.
-    pub tail_size: u32,
+    pub(crate) tail_size: u32,
 }
 
 /// A resolved facet filter: per selected field, the chosen categories' posting
@@ -459,7 +459,7 @@ pub struct ResolvedFilter<F: RangeFetch> {
 impl<F: RangeFetch> ResolvedFilter<F> {
     /// Builds a filter from a fetcher and per-field category ranges. An empty
     /// `fields` means "no constraint".
-    pub fn new(fetch: F, fields: Vec<Vec<CatRange>>) -> Self {
+    pub(crate) fn new(fetch: F, fields: Vec<Vec<CatRange>>) -> Self {
         Self { fetch, fields }
     }
 

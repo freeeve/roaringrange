@@ -31,7 +31,7 @@ the Go writer and the Rust/WASM reader interoperate with zero re-encoding.
 ```
 build (Go):   corpus ─roaringsearch─▶ FTSR ─roaringrange.Transcode─▶ RRS (.rrs) ─▶ S3/CDN
               (optional) facets ──────────────roaringrange.WriteFacets─▶ RRSF (.rrf) ─▶ S3/CDN
-build (Rust): corpus ──build::write_rrs / write_rrsf / write_records──▶ .rrs + .rrf + records
+build (Rust): corpus ──build::write_index / write_facets / write_records──▶ .rrs + .rrf + records
 browser (Rust/WASM): .rrs/.rrf/records on CDN ─HTTP Range─▶ Index + FacetIndex + RecordStore
 ```
 

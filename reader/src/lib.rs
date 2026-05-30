@@ -20,7 +20,7 @@ pub mod build;
 pub use catalog::{Catalog, SearchPage};
 pub use facet::FacetIndex;
 pub use fetch::{FetchError, MemoryFetch, RangeFetch};
-pub use index::{CatRange, Index, IndexError, ResolvedFilter};
+pub use index::{Index, IndexError, ResolvedFilter};
 pub use ngram::ngram_keys;
 pub use records::RecordStore;
 

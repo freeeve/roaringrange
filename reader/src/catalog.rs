@@ -144,7 +144,7 @@ impl<F: RangeFetch + Clone> Catalog<F> {
 mod tests {
     use super::*;
     use crate::build::{
-        split_posting, write_records, write_rrs, write_rrsf, FacetCatOut, FacetFieldOut,
+        split_posting, write_facets, write_index, write_records, FacetCategory, FacetField,
     };
     use crate::ngram::ngram_keys;
     use crate::MemoryFetch;
@@ -172,21 +172,21 @@ mod tests {
             })
             .collect();
         let mut out = Vec::new();
-        write_rrs(&mut out, 3, 2, posts).unwrap();
+        write_index(&mut out, 3, 2, posts).unwrap();
         MemoryFetch::new(out)
     }
 
     /// Builds an `RRSF` facet sidecar `MemoryFetch` from `(field, [(cat, bm)])`.
     fn rrsf(fields: &[(&str, Vec<(&str, RoaringBitmap)>)]) -> MemoryFetch {
-        let out_fields: Vec<FacetFieldOut> = fields
+        let out_fields: Vec<FacetField> = fields
             .iter()
-            .map(|(fname, cats)| FacetFieldOut {
+            .map(|(fname, cats)| FacetField {
                 name: fname.to_string(),
                 cats: cats
                     .iter()
                     .map(|(cname, b)| {
                         let (head, tail) = split_posting(b);
-                        FacetCatOut {
+                        FacetCategory {
                             name: cname.to_string(),
                             card: b.len() as u32,
                             head,
@@ -197,7 +197,7 @@ mod tests {
             })
             .collect();
         let mut out = Vec::new();
-        write_rrsf(&mut out, out_fields).unwrap();
+        write_facets(&mut out, out_fields).unwrap();
         MemoryFetch::new(out)
     }
 

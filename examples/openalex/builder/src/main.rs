@@ -30,9 +30,10 @@
 use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
+use roaringrange_reader::build::chunk::{merge_partials_to_rrs, write_partial};
 use roaringrange_reader::build::{
-    merge_partials_to_rrs, split_posting, write_partial, write_records, write_rrs, write_rrsf,
-    FacetCatOut, FacetFieldOut, DEFAULT_STRIDE,
+    split_posting, write_facets, write_index, write_records, FacetCategory, FacetField,
+    DEFAULT_STRIDE,
 };
 use roaringrange_reader::ngram_keys;
 use serde::Deserialize;
@@ -250,7 +251,7 @@ fn main() {
     let ngrams = entries.len();
     {
         let out = BufWriter::with_capacity(1 << 20, File::create(&rrs_path).expect("create rrs"));
-        write_rrs(out, GRAM as u16, DEFAULT_STRIDE, entries).expect("write rrs");
+        write_index(out, GRAM as u16, DEFAULT_STRIDE, entries).expect("write index");
     }
     eprintln!(
         "wrote RRS {} ({} ngrams, {} bytes) in {:.1}s",
@@ -262,17 +263,17 @@ fn main() {
 
     // Facets.
     let t4 = Instant::now();
-    let fields_out: Vec<FacetFieldOut> = facets
+    let fields_out: Vec<FacetField> = facets
         .into_iter()
         .enumerate()
         .map(|(fi, m)| {
             let map = m.into_inner().unwrap();
-            let mut cats: Vec<FacetCatOut> = map
+            let mut cats: Vec<FacetCategory> = map
                 .into_iter()
                 .map(|(val, bm)| {
                     let card = bm.len() as u32;
                     let (head, tail) = split_posting(&bm);
-                    FacetCatOut {
+                    FacetCategory {
                         name: val,
                         card,
                         head,
@@ -284,7 +285,7 @@ fn main() {
             // runs (HashMap iteration order is otherwise nondeterministic; the
             // reader resolves by name and the category table re-sorts by key).
             cats.sort_by(|a, b| a.name.cmp(&b.name));
-            FacetFieldOut {
+            FacetField {
                 name: FACET_FIELDS[fi].to_string(),
                 cats,
             }
@@ -293,7 +294,7 @@ fn main() {
     {
         let out =
             BufWriter::with_capacity(1 << 20, File::create(&facets_path).expect("create facets"));
-        write_rrsf(out, fields_out).expect("write facets");
+        write_facets(out, fields_out).expect("write facets");
     }
     eprintln!(
         "wrote facets {} ({} bytes) in {:.1}s",
@@ -647,16 +648,16 @@ fn build_chunked(
 
     // Facets from the unioned accumulators.
     let t4 = Instant::now();
-    let fields_out: Vec<FacetFieldOut> = facet_acc
+    let fields_out: Vec<FacetField> = facet_acc
         .into_iter()
         .enumerate()
         .map(|(fi, map)| {
-            let mut cats: Vec<FacetCatOut> = map
+            let mut cats: Vec<FacetCategory> = map
                 .into_iter()
                 .map(|(val, bm)| {
                     let card = bm.len() as u32;
                     let (head, tail) = split_posting(&bm);
-                    FacetCatOut {
+                    FacetCategory {
                         name: val,
                         card,
                         head,
@@ -668,7 +669,7 @@ fn build_chunked(
             // runs (HashMap iteration order is otherwise nondeterministic; the
             // reader resolves by name and the category table re-sorts by key).
             cats.sort_by(|a, b| a.name.cmp(&b.name));
-            FacetFieldOut {
+            FacetField {
                 name: FACET_FIELDS[fi].to_string(),
                 cats,
             }
@@ -677,7 +678,7 @@ fn build_chunked(
     {
         let out =
             BufWriter::with_capacity(1 << 20, File::create(facets_path).expect("create facets"));
-        write_rrsf(out, fields_out).expect("write facets");
+        write_facets(out, fields_out).expect("write facets");
     }
     eprintln!(
         "wrote facets {} ({} bytes) in {:.1}s",
