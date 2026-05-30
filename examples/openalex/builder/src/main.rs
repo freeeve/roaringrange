@@ -331,10 +331,7 @@ fn http_get(url: &str) -> std::io::Result<Box<dyn Read + Send + Sync>> {
             Err(e) => last = e.to_string(),
         }
     }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("GET {url}: {last}"),
-    ))
+    Err(std::io::Error::other(format!("GET {url}: {last}")))
 }
 
 /// Opens a source as a buffered line reader over its decompressed JSON Lines.

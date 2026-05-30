@@ -388,11 +388,7 @@ pub fn merge_partials_to_rrs(
     out.seek(SeekFrom::Start(postings_start))?;
     let mut off = postings_start;
 
-    loop {
-        let key = match cursors.iter().filter_map(|c| c.front_key()).min() {
-            Some(k) => k,
-            None => break,
-        };
+    while let Some(key) = cursors.iter().filter_map(|c| c.front_key()).min() {
         let mut merged = RoaringBitmap::new();
         for c in &mut cursors {
             if c.front_key() == Some(key) {
