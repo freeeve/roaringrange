@@ -35,3 +35,9 @@ consecutive ranks) is a contiguous slice.
 
 Written by `build::write_records`, read by `RecordStore` (the reader crate). The
 record *schema* is intentionally not part of the format — only the container is.
+
+## Future — optional compression
+Records are stored uncompressed today. Optional per-page/per-record **zstd with a
+shared dictionary** (inflated inside the `RecordStore` reader) is a planned,
+additive option — see [`tasks/001_record_compression.md`](tasks/001_record_compression.md).
+The index/facet formats are unaffected; the encoding stays the application's choice.
