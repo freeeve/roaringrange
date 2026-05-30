@@ -83,7 +83,7 @@ ordering and facets.
 
 The core Go module has **no dependency on roaringsearch** — it parses the `FTSR`
 byte format directly. The n-gram key derivation is reproduced independently in Go
-(here), Go (roaringsearch), and Rust (the reader); the `conformance/` module is
+(here), Go (roaringsearch), and Rust (the reader); the `go/conformance/` module is
 the guard that keeps all three byte-compatible.
 
 ## Quick start
@@ -133,8 +133,8 @@ staged changes, matching CI):
 git config core.hooksPath .githooks
 ```
 
-CI runs `go test ./...`, the `conformance/` module, `go vet` on the example, and
-`cargo test` + `fmt` + `clippy` for the reader.
+CI runs `go test ./...` in `go/`, the `go/conformance/` module, `go vet` on the
+example, and `cargo test` + `fmt` + `clippy` for the reader.
 
 ## License
 
