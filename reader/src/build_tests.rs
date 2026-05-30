@@ -471,6 +471,26 @@ fn facet_filtering_within_or_across_and() {
     );
 }
 
+#[test]
+fn facet_open_rejects_out_of_bounds_category_range() {
+    let mut rrsf = build_rrsf(&[
+        (
+            "format",
+            vec![("ebook", bm(&[1, 2])), ("audiobook", bm(&[3]))],
+        ),
+        ("language", vec![("en", bm(&[1])), ("es", bm(&[2]))]),
+    ]);
+    // Field 0's catCount lives at field_tab(24) + 12 = byte 36. Set it past the
+    // 4 categories so cat_start + cat_count exceeds cats_n: open must error, not
+    // panic on the out-of-bounds `cats[cat_start..cat_end]` slice.
+    rrsf[36..40].copy_from_slice(&u32::MAX.to_le_bytes());
+    let got = block_on(FacetIndex::open(MemoryFetch::new(rrsf)));
+    assert!(
+        matches!(&got, Err(crate::index::IndexError::Malformed(_))),
+        "expected Malformed error for an out-of-bounds category range"
+    );
+}
+
 /// Reads the exact `RRSR` bytes the Go writer emits (the golden layout asserted
 /// by roaringrange's Go `TestWriteRecordsGoldenLayout`) through the Rust
 /// [`RecordStore`]. This is the cross-language guard: it pins that Go-written

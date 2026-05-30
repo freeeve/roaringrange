@@ -72,14 +72,34 @@ impl<F: RangeFetch> FacetIndex<F> {
         let cats_n = read_u32(&header, 12) as usize;
         let str_bytes = read_u32(&header, 16) as usize;
 
+        // Lay out the meta region with checked arithmetic: on wasm32 (usize =
+        // 32-bit) attacker-controlled counts could otherwise overflow and wrap to
+        // a short read, then drive out-of-bounds indexing below.
         let field_tab = HEADER_SIZE;
-        let cat_tab = field_tab + fields_n * FIELD_ENTRY;
-        let str_blob = cat_tab + cats_n * CAT_ENTRY;
-        let meta_len = str_blob + str_bytes;
+        let cat_tab = fields_n
+            .checked_mul(FIELD_ENTRY)
+            .and_then(|x| x.checked_add(field_tab))
+            .ok_or(IndexError::Malformed("facet field table size overflow"))?;
+        let str_blob = cats_n
+            .checked_mul(CAT_ENTRY)
+            .and_then(|x| x.checked_add(cat_tab))
+            .ok_or(IndexError::Malformed("facet category table size overflow"))?;
+        let meta_len = str_blob
+            .checked_add(str_bytes)
+            .ok_or(IndexError::Malformed("facet meta size overflow"))?;
         let buf = fetch.read(0, meta_len).await?;
+        if buf.len() < meta_len {
+            return Err(IndexError::Malformed("facet meta region truncated"));
+        }
 
-        let name = |off: usize, len: usize| -> String {
-            String::from_utf8_lossy(&buf[str_blob + off..str_blob + off + len]).into_owned()
+        // Reads a display name from the string blob, rejecting an out-of-range
+        // (off, len) instead of panicking on the slice.
+        let read_name = |off: usize, len: usize| -> Result<String, IndexError> {
+            let end = off
+                .checked_add(len)
+                .filter(|&e| e <= str_bytes)
+                .ok_or(IndexError::Malformed("facet name out of string blob"))?;
+            Ok(String::from_utf8_lossy(&buf[str_blob + off..str_blob + end]).into_owned())
         };
 
         let mut cats: Vec<Category> = Vec::with_capacity(cats_n);
@@ -92,12 +112,12 @@ impl<F: RangeFetch> FacetIndex<F> {
             let name_off = read_u32(&buf, b + 28) as usize;
             let name_len = read_u16(&buf, b + 32) as usize;
             cats.push(Category {
-                name: name(name_off, name_len),
+                name: read_name(name_off, name_len)?,
                 count,
                 range: CatRange {
                     head_off,
                     head_size,
-                    tail_off: head_off + head_size as u64,
+                    tail_off: head_off.saturating_add(head_size as u64),
                     tail_size,
                 },
                 head: RoaringBitmap::new(),
@@ -107,16 +127,31 @@ impl<F: RangeFetch> FacetIndex<F> {
         // Load every category's head posting in one ranged read of the contiguous
         // postings region, so filtered counts are computed in memory. Categories
         // are stored in ascending head-offset order, so the region spans from the
-        // first head to the last tail.
+        // first head to the last tail. Offsets are untrusted, so derive the slice
+        // bounds with checked math.
         if let (Some(first), Some(last)) = (cats.first(), cats.last()) {
             let blob_start = first.range.head_off;
-            let blob_end = last.range.tail_off + last.range.tail_size as u64;
-            let blob = fetch
-                .read(blob_start, (blob_end - blob_start) as usize)
-                .await?;
+            let blob_end = last
+                .range
+                .tail_off
+                .saturating_add(last.range.tail_size as u64);
+            let blob_len = blob_end
+                .checked_sub(blob_start)
+                .ok_or(IndexError::Malformed(
+                    "facet postings region has end < start",
+                ))? as usize;
+            let blob = fetch.read(blob_start, blob_len).await?;
             for c in &mut cats {
-                let s = (c.range.head_off - blob_start) as usize;
-                let e = s + c.range.head_size as usize;
+                let s = c
+                    .range
+                    .head_off
+                    .checked_sub(blob_start)
+                    .ok_or(IndexError::Malformed("facet head offset precedes region"))?
+                    as usize;
+                let e = s
+                    .checked_add(c.range.head_size as usize)
+                    .filter(|&e| e <= blob.len())
+                    .ok_or(IndexError::Malformed("facet head posting out of region"))?;
                 c.head = RoaringBitmap::deserialize_from(&blob[s..e])
                     .map_err(|err| IndexError::Roaring(err.to_string()))?;
             }
@@ -129,9 +164,15 @@ impl<F: RangeFetch> FacetIndex<F> {
             let name_len = read_u16(&buf, b + 4) as usize;
             let cat_start = read_u32(&buf, b + 8) as usize;
             let cat_count = read_u32(&buf, b + 12) as usize;
+            let cat_end = cat_start
+                .checked_add(cat_count)
+                .filter(|&e| e <= cats_n)
+                .ok_or(IndexError::Malformed(
+                    "facet field category range out of bounds",
+                ))?;
             fields.push(Field {
-                name: name(name_off, name_len),
-                categories: cats[cat_start..cat_start + cat_count].to_vec(),
+                name: read_name(name_off, name_len)?,
+                categories: cats[cat_start..cat_end].to_vec(),
             });
         }
 

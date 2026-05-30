@@ -63,10 +63,10 @@ impl<F: RangeFetch> RecordStore<F> {
             .await?;
         let start = read_u64(&pair, 0);
         let end = read_u64(&pair, 8);
-        let bytes = self
-            .bin
-            .read(start, end.saturating_sub(start) as usize)
-            .await?;
+        if end < start {
+            return Err(IndexError::Malformed("record offset pair has end < start"));
+        }
+        let bytes = self.bin.read(start, (end - start) as usize).await?;
         Ok(Some(bytes))
     }
 
@@ -117,5 +117,26 @@ mod tests {
         let many = block_on(store.get_many(&[2, 0])).unwrap();
         assert_eq!(many[0].as_deref().unwrap(), b"third");
         assert_eq!(many[1].as_deref().unwrap(), br#"{"id":"A","c":9}"#);
+    }
+
+    #[test]
+    fn get_rejects_corrupt_offset_pair() {
+        let recs: Vec<Vec<u8>> = vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()];
+        let mut bin = Vec::new();
+        let mut idx = Vec::new();
+        write_records(&mut bin, &mut idx, &recs).unwrap();
+        // Doc 1's offset pair is (off[1], off[2]) at idx[24..40]; off[2] is the
+        // second u64 (idx[32..40]). Corrupt it to precede off[1] so end < start.
+        idx[32..40].copy_from_slice(&0u64.to_le_bytes());
+        let store = block_on(RecordStore::open(
+            MemoryFetch::new(idx),
+            MemoryFetch::new(bin),
+        ))
+        .unwrap();
+        let got = block_on(store.get(1));
+        assert!(
+            matches!(got, Err(IndexError::Malformed(_))),
+            "expected Malformed, got {got:?}"
+        );
     }
 }

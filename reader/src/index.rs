@@ -37,6 +37,9 @@ pub enum IndexError {
     BadVersion(u16),
     /// A roaring bitmap failed to deserialize.
     Roaring(String),
+    /// A header or offset field was internally inconsistent — out of bounds or
+    /// overflowing — as from a truncated or tampered file.
+    Malformed(&'static str),
 }
 
 impl fmt::Display for IndexError {
@@ -46,6 +49,7 @@ impl fmt::Display for IndexError {
             IndexError::BadMagic(m) => write!(f, "bad magic {m:?}, expected RRSI"),
             IndexError::BadVersion(v) => write!(f, "unsupported version {v}"),
             IndexError::Roaring(e) => write!(f, "roaring deserialize: {e}"),
+            IndexError::Malformed(m) => write!(f, "malformed index: {m}"),
         }
     }
 }
@@ -241,7 +245,7 @@ impl<F: RangeFetch> Index<F> {
         match self.lookup(key).await? {
             None => Ok(None),
             Some(rec) => {
-                let off = rec.head_offset + rec.head_size as u64;
+                let off = rec.head_offset.saturating_add(rec.head_size as u64);
                 let bytes = self.fetch.read(off, rec.tail_size as usize).await?;
                 Ok(Some(deserialize(&bytes)?))
             }
@@ -340,17 +344,19 @@ impl<F: RangeFetch> Index<F> {
         let tails = self
             .fetch_postings(&recs, |rec| {
                 (
-                    rec.head_offset + rec.head_size as u64,
+                    rec.head_offset.saturating_add(rec.head_size as u64),
                     rec.tail_size as usize,
                 )
             })
             .await?;
         if let Some(tail_and) = Self::intersect(tails) {
             for doc in tail_and.iter() {
+                if doc < HEAD_BOUNDARY as u32 {
+                    continue; // malformed tail; the head already covers sub-boundary docs
+                }
                 if out.len() >= limit {
                     break;
                 }
-                debug_assert!(doc >= HEAD_BOUNDARY as u32);
                 out.push(doc);
             }
         }
@@ -569,7 +575,7 @@ impl<F: RangeFetch> Cursor<F> {
             .iter()
             .map(|rec| {
                 (
-                    rec.head_offset + rec.head_size as u64,
+                    rec.head_offset.saturating_add(rec.head_size as u64),
                     rec.tail_size as usize,
                 )
             })

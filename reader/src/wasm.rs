@@ -85,7 +85,14 @@ impl RangeFetch for WasmFetch {
         if len == 0 {
             return Ok(Vec::new());
         }
-        let end = offset + len as u64 - 1;
+        let end = match offset.checked_add(len as u64) {
+            Some(sum) => sum - 1,
+            None => {
+                return Err(FetchError::Transport(format!(
+                    "range {offset}+{len} overflows u64"
+                )))
+            }
+        };
         let range = format!("bytes={offset}-{end}");
 
         let headers = Headers::new().map_err(|e| FetchError::Transport(js_err(&e)))?;
@@ -125,7 +132,18 @@ impl RangeFetch for WasmFetch {
         let array_buffer: ArrayBuffer = buf_value
             .dyn_into()
             .map_err(|_| FetchError::Transport("array_buffer was not an ArrayBuffer".into()))?;
-        Ok(Uint8Array::new(&array_buffer).to_vec())
+        let bytes = Uint8Array::new(&array_buffer).to_vec();
+        // The reader trusts RangeFetch to return exactly `len` bytes — every
+        // header/offset parser slices on that guarantee. A CDN/origin that ignores
+        // the Range header (200 full body, or a 206 that clamps/coalesces) would
+        // otherwise feed a wrong-length buffer into those parsers. Enforce it here.
+        if bytes.len() != len {
+            return Err(FetchError::Transport(format!(
+                "range {range} returned {} bytes, expected {len} (origin may not honor Range requests)",
+                bytes.len()
+            )));
+        }
+        Ok(bytes)
     }
 }
 
