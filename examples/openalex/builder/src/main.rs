@@ -267,7 +267,7 @@ fn main() {
         .enumerate()
         .map(|(fi, m)| {
             let map = m.into_inner().unwrap();
-            let cats = map
+            let mut cats: Vec<FacetCatOut> = map
                 .into_iter()
                 .map(|(val, bm)| {
                     let card = bm.len() as u32;
@@ -280,6 +280,10 @@ fn main() {
                     }
                 })
                 .collect();
+            // Sort by name so the string-blob byte layout is reproducible across
+            // runs (HashMap iteration order is otherwise nondeterministic; the
+            // reader resolves by name and the category table re-sorts by key).
+            cats.sort_by(|a, b| a.name.cmp(&b.name));
             FacetFieldOut {
                 name: FACET_FIELDS[fi].to_string(),
                 cats,
@@ -647,7 +651,7 @@ fn build_chunked(
         .into_iter()
         .enumerate()
         .map(|(fi, map)| {
-            let cats = map
+            let mut cats: Vec<FacetCatOut> = map
                 .into_iter()
                 .map(|(val, bm)| {
                     let card = bm.len() as u32;
@@ -660,6 +664,10 @@ fn build_chunked(
                     }
                 })
                 .collect();
+            // Sort by name so the string-blob byte layout is reproducible across
+            // runs (HashMap iteration order is otherwise nondeterministic; the
+            // reader resolves by name and the category table re-sorts by key).
+            cats.sort_by(|a, b| a.name.cmp(&b.name));
             FacetFieldOut {
                 name: FACET_FIELDS[fi].to_string(),
                 cats,
