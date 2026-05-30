@@ -50,3 +50,12 @@ jobs:
       - name: Clippy
         working-directory: reader
         run: cargo clippy --all-targets -- -D warnings
+      - name: Builder fmt
+        working-directory: examples/openalex/builder
+        run: cargo fmt --check
+      - name: Builder clippy
+        working-directory: examples/openalex/builder
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Builder build
+        working-directory: examples/openalex/builder
+        run: cargo build --release

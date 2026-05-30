@@ -29,9 +29,10 @@ the Go writer and the Rust/WASM reader interoperate with zero re-encoding.
 ## How it fits together
 
 ```
-build (Go):    corpus ─roaringsearch─▶ FTSR ─roaringrange.Transcode─▶ RRS (.rrs) ─▶ S3/CDN
-               (optional) facets ─────────────roaringrange.WriteFacets─▶ RRSF (.rrf) ─▶ S3/CDN
-browser (Rust/WASM): .rrs on CDN ─HTTP Range─▶ reader ─▶ ranked doc IDs ─▶ record store
+build (Go):   corpus ─roaringsearch─▶ FTSR ─roaringrange.Transcode─▶ RRS (.rrs) ─▶ S3/CDN
+              (optional) facets ──────────────roaringrange.WriteFacets─▶ RRSF (.rrf) ─▶ S3/CDN
+build (Rust): corpus ──build::write_rrs / write_rrsf / write_records──▶ .rrs + .rrf + records
+browser (Rust/WASM): .rrs/.rrf/records on CDN ─HTTP Range─▶ Index + FacetIndex + RecordStore
 ```
 
 Doc IDs are assigned at build time in descending static rank (citations, holdings,
@@ -61,7 +62,7 @@ trading query-time relevance ranking for a baked-in static rank.
 | matching | stemmed terms; wildcard, fuzzy, boosts | stemmed words; partial | trigram substring; fuzzy (tolerate-N) |
 | ranking | TF-IDF / BM25 relevance | BM25-like relevance | **static rank** (query-independent importance) in doc-ID order — **no query-time relevance** |
 | facets / filters | fielded search (no facet counts) | filters + facet counts | facets + live counts (sidecar) |
-| build input | JS objects / prebuilt JSON | crawls built HTML pages | any records (via roaringsearch) |
+| build input | JS objects / prebuilt JSON | crawls built HTML pages | any records (Go via roaringsearch, or the Rust builder) |
 | sweet spot | embedding a search library in a JS app (you own the index) | static sites & docs, small to large | very large catalogs & datasets |
 
 In short: lunr.js when you want to embed a search *library* and control indexing
@@ -74,10 +75,10 @@ ordering and facets.
 | path | what |
 |---|---|
 | `*.go` | core Go module: `Transcode` (FTSR→RRS), `Open`/`Index` reference reader, `WriteFacets`, `NgramKeys` |
-| `FORMAT.md`, `FACETS.md` | the frozen on-disk specs (`RRSI` index, `RRSF` facet sidecar) |
-| `reader/` | Rust crate `roaringrange_reader` → WASM browser reader (`wasm-pack`) |
+| `FORMAT.md`, `FACETS.md`, `RECORDS.md` | the frozen on-disk specs (`RRSI` index, `RRSF` facet sidecar, `RRSR` record store) |
+| `reader/` | Rust crate `roaringrange_reader`: WASM reader (`Index`/`FacetIndex`/`RecordStore`) + native `build` writers (`wasm-pack`) |
 | `conformance/` | cross-library test: roaringsearch build ⇄ roaringrange read must agree |
-| `examples/openalex/` | the OpenAlex demo: loader + `download.sh` + static web UI |
+| `examples/openalex/` | the OpenAlex demo: Go loader, parallel Rust `builder/`, `download.sh`, static web UI |
 | `docs/` | architecture diagrams (SVG) |
 
 The core Go module has **no dependency on roaringsearch** — it parses the `FTSR`
