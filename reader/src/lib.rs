@@ -6,6 +6,7 @@
 //! [`MemoryFetch`]) and a future WASM build with a `fetch()`-backed Range
 //! reader (behind the `wasm` feature). See `README.md` and `FORMAT.md`.
 
+pub mod catalog;
 pub mod facet;
 pub mod fetch;
 pub mod index;
@@ -16,6 +17,7 @@ pub mod records;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod build;
 
+pub use catalog::{Catalog, SearchPage};
 pub use facet::FacetIndex;
 pub use fetch::{FetchError, MemoryFetch, RangeFetch};
 pub use index::{CatRange, Index, IndexError, ResolvedFilter};

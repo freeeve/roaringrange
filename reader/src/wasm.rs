@@ -13,11 +13,12 @@
 //! index must support HTTP Range requests; pass the index URL to
 //! [`RrsIndex::open`].
 
-use crate::facet::FacetIndex;
+use crate::catalog::Catalog;
+use crate::facet::{FacetIndex, Field};
 use crate::fetch::{FetchError, RangeFetch};
 use crate::index::{Cursor, Index};
 use crate::records::RecordStore;
-use js_sys::{Array, ArrayBuffer, Reflect, Uint8Array};
+use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint32Array, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
@@ -423,4 +424,227 @@ impl RrsRecords {
         }
         Ok(out)
     }
+}
+
+/// Builds the facet-count JS value for a [`SearchPage`]: a JS `Array` of
+/// `{ field, cats: [{ name, count }, ...] }`, aligned with `fields`. The
+/// per-category `count`s come from `counts` (search-filtered). Returns `null`
+/// when no facet sidecar is attached (`counts` is `None`).
+fn facet_counts_to_js(fields: &[Field], counts: &Option<Vec<Vec<u64>>>) -> JsValue {
+    let Some(counts) = counts else {
+        return JsValue::NULL;
+    };
+    let out = Array::new_with_length(fields.len() as u32);
+    for (fi, field) in fields.iter().enumerate() {
+        let cats = Array::new_with_length(field.categories.len() as u32);
+        for (ci, cat) in field.categories.iter().enumerate() {
+            let obj = Object::new();
+            let _ = Reflect::set(&obj, &"name".into(), &cat.name.as_str().into());
+            let _ = Reflect::set(&obj, &"count".into(), &(counts[fi][ci] as f64).into());
+            cats.set(ci as u32, obj.into());
+        }
+        let obj = Object::new();
+        let _ = Reflect::set(&obj, &"field".into(), &field.name.as_str().into());
+        let _ = Reflect::set(&obj, &"cats".into(), &cats.into());
+        out.set(fi as u32, obj.into());
+    }
+    out.into()
+}
+
+/// A range-fetchable [`Catalog`] exposed to JavaScript: one object bundling the
+/// `RRS` index with an optional `RRSF` facet sidecar and `RRSR` record store, so
+/// the whole "search → ranked IDs + records + facet counts" flow is one call.
+/// Mirrors [`RrsIndex`]/[`RrsRecords`]; adopt it in place of wiring those three
+/// together by hand.
+#[wasm_bindgen]
+pub struct RrsCatalog {
+    /// Always `Some` between calls; held in an `Option` so the consuming
+    /// builder methods (`with_facets`/`with_records`) can `take` and replace it.
+    inner: Option<Catalog<WasmFetch>>,
+}
+
+#[wasm_bindgen]
+impl RrsCatalog {
+    /// Boots a catalog over the index at `index_url` alone (header + sparse
+    /// dictionary). Attach the optional sidecars with [`RrsCatalog::open_facets`]
+    /// and [`RrsCatalog::open_records`]. Returns a `Promise<RrsCatalog>`.
+    pub async fn open(index_url: String) -> Result<RrsCatalog, JsError> {
+        let inner = Catalog::open(WasmFetch::new(index_url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrsCatalog { inner: Some(inner) })
+    }
+
+    /// The wrapped catalog. Panics only if a previous builder call left `inner`
+    /// empty, which the builder methods never do (they always restore it).
+    fn cat(&self) -> &Catalog<WasmFetch> {
+        self.inner.as_ref().expect("catalog present")
+    }
+
+    /// Boots the catalog with all three resources at once: the index at
+    /// `index_url`, the facet sidecar at `facets_url`, and the record store
+    /// (`records_idx_url` offset index + `records_bin_url` blob). Returns a
+    /// `Promise<RrsCatalog>`.
+    #[wasm_bindgen(js_name = openAll)]
+    pub async fn open_all(
+        index_url: String,
+        facets_url: String,
+        records_idx_url: String,
+        records_bin_url: String,
+    ) -> Result<RrsCatalog, JsError> {
+        let inner = Catalog::open(WasmFetch::new(index_url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?
+            .with_facets(WasmFetch::new(facets_url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?
+            .with_records(
+                WasmFetch::new(records_idx_url),
+                WasmFetch::new(records_bin_url),
+            )
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrsCatalog { inner: Some(inner) })
+    }
+
+    /// Opens the facet sidecar at `url` and attaches it, enabling filtered search
+    /// and facet counts.
+    #[wasm_bindgen(js_name = openFacets)]
+    pub async fn open_facets(&mut self, url: String) -> Result<(), JsError> {
+        let prev = self.inner.take().expect("catalog present");
+        self.inner = Some(
+            prev.with_facets(WasmFetch::new(url))
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?,
+        );
+        Ok(())
+    }
+
+    /// Opens the record store (`idx_url` offset index + `bin_url` record blob)
+    /// and attaches it, so [`RrsCatalog::search`] returns record bytes.
+    #[wasm_bindgen(js_name = openRecords)]
+    pub async fn open_records(&mut self, idx_url: String, bin_url: String) -> Result<(), JsError> {
+        let prev = self.inner.take().expect("catalog present");
+        self.inner = Some(
+            prev.with_records(WasmFetch::new(idx_url), WasmFetch::new(bin_url))
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?,
+        );
+        Ok(())
+    }
+
+    /// Runs the full search flow and resolves to a JS object:
+    /// `{ ids: Uint32Array, records: Array<Uint8Array|null> | null,
+    /// facetCounts: Array<{field, cats:[{name, count}]}> | null }`.
+    ///
+    /// `filters_json` is a JSON array of `[field, category]` pairs (e.g.
+    /// `[["format","ebook"],["language","en"]]`); `null`, `""`, or `"[]"` means
+    /// no filter. Within a field categories OR, across fields they AND. The page
+    /// covers ranked doc IDs `[offset, offset+len)`; `max_missing` is the fuzzy
+    /// tolerance (0 = strict). `records`/`facetCounts` are `null` unless the
+    /// matching sidecar is attached.
+    pub async fn search(
+        &self,
+        query: String,
+        offset: usize,
+        len: usize,
+        max_missing: usize,
+        filters_json: Option<String>,
+    ) -> Result<JsValue, JsError> {
+        let filter = parse_filters_json(filters_json.as_deref());
+        let page = self
+            .cat()
+            .search(&query, offset, len, max_missing, &filter)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        let ids = Uint32Array::from(page.ids.as_slice());
+        let records = match page.records {
+            Some(recs) => {
+                let arr = Array::new_with_length(recs.len() as u32);
+                for (i, rec) in recs.into_iter().enumerate() {
+                    let value = match rec {
+                        Some(bytes) => Uint8Array::from(bytes.as_slice()).into(),
+                        None => JsValue::NULL,
+                    };
+                    arr.set(i as u32, value);
+                }
+                arr.into()
+            }
+            None => JsValue::NULL,
+        };
+        let facet_counts = facet_counts_to_js(self.cat().fields(), &page.facet_counts);
+
+        let out = Object::new();
+        Reflect::set(&out, &"ids".into(), &ids.into()).map_err(|e| JsError::new(&js_err(&e)))?;
+        Reflect::set(&out, &"records".into(), &records).map_err(|e| JsError::new(&js_err(&e)))?;
+        Reflect::set(&out, &"facetCounts".into(), &facet_counts)
+            .map_err(|e| JsError::new(&js_err(&e)))?;
+        Ok(out.into())
+    }
+
+    /// Returns the facet fields and their full-corpus category counts as a JSON
+    /// string `[{"field":"<name>","cats":[{"name":"<name>","count":<u32>},...]},...]`,
+    /// or `"[]"` when no facet sidecar is attached. Mirrors [`RrsIndex::facets_json`].
+    #[wasm_bindgen(js_name = facetsJson)]
+    pub fn facets_json(&self) -> String {
+        let fields = self.cat().fields();
+        let mut out = String::from("[");
+        for (fi, field) in fields.iter().enumerate() {
+            if fi > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"field\":\"");
+            out.push_str(&json_escape(&field.name));
+            out.push_str("\",\"cats\":[");
+            for (ci, cat) in field.categories.iter().enumerate() {
+                if ci > 0 {
+                    out.push(',');
+                }
+                out.push_str("{\"name\":\"");
+                out.push_str(&json_escape(&cat.name));
+                out.push_str("\",\"count\":");
+                out.push_str(&cat.count.to_string());
+                out.push('}');
+            }
+            out.push_str("]}");
+        }
+        out.push(']');
+        out
+    }
+
+    /// Number of n-grams in the index dictionary.
+    #[wasm_bindgen(js_name = ngramCount)]
+    pub fn ngram_count(&self) -> u32 {
+        self.cat().index().ngram_count()
+    }
+}
+
+/// Parses a JSON array of `[field, category]` string pairs into resolve input.
+/// Tolerant: a `None`, empty, or unparseable input yields no selections, and
+/// malformed entries are skipped. Avoids pulling in a JSON dependency by walking
+/// the value with `js_sys::JSON`.
+fn parse_filters_json(json: Option<&str>) -> Vec<(String, String)> {
+    let Some(json) = json else {
+        return Vec::new();
+    };
+    let trimmed = json.trim();
+    if trimmed.is_empty() || trimmed == "[]" {
+        return Vec::new();
+    }
+    let Ok(value) = js_sys::JSON::parse(trimmed) else {
+        return Vec::new();
+    };
+    let Ok(arr) = value.dyn_into::<Array>() else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(arr.length() as usize);
+    for entry in arr.iter() {
+        if let Ok(pair) = entry.dyn_into::<Array>() {
+            if let (Some(field), Some(cat)) = (pair.get(0).as_string(), pair.get(1).as_string()) {
+                out.push((field, cat));
+            }
+        }
+    }
+    out
 }
