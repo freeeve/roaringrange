@@ -1,4 +1,4 @@
-/* @ts-self-types="./roaringrange_reader.d.ts" */
+/* @ts-self-types="./roaringrange.d.ts" */
 
 /**
  * A range-fetchable [`Catalog`] exposed to JavaScript: one object bundling the
@@ -685,7 +685,7 @@ function __wbg_get_imports() {
     };
     return {
         __proto__: null,
-        "./roaringrange_reader_bg.js": import0,
+        "./roaringrange_bg.js": import0,
     };
 }
 
@@ -973,7 +973,7 @@ async function __wbg_init(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        module_or_path = new URL('roaringrange_reader_bg.wasm', import.meta.url);
+        module_or_path = new URL('roaringrange_bg.wasm', import.meta.url);
     }
     const imports = __wbg_get_imports();
 

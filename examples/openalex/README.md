@@ -133,9 +133,9 @@ Docs:
 
 ## Browser reader
 
-`web/roaringrange_reader.js` + `web/roaringrange_reader_bg.wasm` are the
-`wasm-pack` build of `../../reader`, committed so the demo runs as-is. Rebuild
-after changing the reader:
+`web/roaringrange.js` + `web/roaringrange_bg.wasm` are the
+`wasm-pack` build of `../../rust`, committed so the demo runs as-is. Rebuild
+after changing the crate:
 
-    cd ../../reader && wasm-pack build --target web --features wasm
-    cp pkg/roaringrange_reader.js pkg/roaringrange_reader_bg.wasm ../examples/openalex/web/
+    cd ../../rust && wasm-pack build --target web --features wasm
+    cp pkg/roaringrange.js pkg/roaringrange_bg.wasm ../examples/openalex/web/

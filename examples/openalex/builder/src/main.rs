@@ -30,12 +30,12 @@
 use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
-use roaringrange_reader::build::chunk::{merge_partials_to_rrs, write_partial};
-use roaringrange_reader::build::{
+use roaringrange::build::chunk::{merge_partials_to_rrs, write_partial};
+use roaringrange::build::{
     split_posting, write_facets, write_index, write_records, FacetCategory, FacetField,
     RecordWriter, DEFAULT_STRIDE,
 };
-use roaringrange_reader::ngram_keys;
+use roaringrange::ngram_keys;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;

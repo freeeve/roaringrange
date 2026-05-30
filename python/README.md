@@ -16,7 +16,7 @@ Range:
 | `index.rrf`  | `RRSF` | facet sidecar (field → category → doc-ID bitmap, with counts) |
 | `records.idx` / `records.bin` | `RRSR` | per-doc record bytes (your encoding) |
 
-Upload them to S3/CloudFront and point the [WASM reader](../reader) at the URLs.
+Upload them to S3/CloudFront and point the [WASM reader](../rust) at the URLs.
 
 ## Install (dev)
 

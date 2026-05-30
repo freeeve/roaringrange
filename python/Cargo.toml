@@ -6,8 +6,9 @@ description = "Python bindings for building roaringrange static, range-fetchable
 license = "MIT"
 repository = "https://github.com/freeeve/roaringrange"
 
-# Builds a Python extension module named `roaringrange`. The reader/build logic
-# is reused from the core Rust crate; this crate is only the PyO3 glue.
+# Builds a Python extension module named `roaringrange`. The build logic is
+# reused from the core Rust crate; this crate is only the PyO3 glue. The dep is
+# aliased to `roaringrange_core` so it doesn't clash with this lib's own name.
 [lib]
 name = "roaringrange"
 crate-type = ["cdylib"]
@@ -18,4 +19,4 @@ crate-type = ["cdylib"]
 # CPython 3.8+ instead of one per minor version.
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
 roaring = "0.11"
-roaringrange_reader = { path = "../reader" }
+roaringrange_core = { package = "roaringrange", path = "../rust" }

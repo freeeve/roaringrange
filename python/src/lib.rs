@@ -4,7 +4,7 @@
 //! four static files the WASM/Go reader serves over HTTP Range — the `RRS` text
 //! index, the `RRSF` facet sidecar, and the `RRSR` record store (`.idx`/`.bin`).
 //! The heavy lifting (posting layout, facet sidecar, record framing, n-gram key
-//! derivation) is reused from the core `roaringrange_reader` crate so the output
+//! derivation) is reused from the core `roaringrange` crate so the output
 //! is byte-identical to the Go and Rust builders.
 //!
 //! ```python
@@ -21,10 +21,10 @@
 use pyo3::exceptions::PyIOError;
 use pyo3::prelude::*;
 use roaring::RoaringBitmap;
-use roaringrange_reader::build::{
+use roaringrange_core::build::{
     split_posting, write_facets, write_index, write_records, FacetCategory, FacetField,
 };
-use roaringrange_reader::ngram_keys;
+use roaringrange_core::ngram_keys;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::Path;

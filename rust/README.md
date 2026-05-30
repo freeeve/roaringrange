@@ -1,4 +1,4 @@
-# roaringrange_reader
+# roaringrange
 
 Browser-side reader for the RRS (`RRSI`) range-fetchable static search index.
 See [`../FORMAT.md`](../FORMAT.md) for the frozen byte-layout contract.

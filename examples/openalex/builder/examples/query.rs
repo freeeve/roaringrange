@@ -6,7 +6,7 @@
 //!   cargo run --release --example query -- <rrs> <records.idx> <records.bin> <query> [limit]
 
 use futures::executor::block_on;
-use roaringrange_reader::{Index, MemoryFetch, RecordStore};
+use roaringrange::{Index, MemoryFetch, RecordStore};
 use std::fs;
 
 fn main() {

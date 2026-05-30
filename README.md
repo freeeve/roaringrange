@@ -78,7 +78,7 @@ ordering and facets.
 |---|---|
 | `go/` | core Go module (`github.com/freeeve/roaringrange`): `Transcode` (FTSR→RRS), `Open`/`Index` reference reader, `WriteFacets`, `NgramKeys` |
 | `FORMAT.md`, `FACETS.md`, `RECORDS.md` | the frozen on-disk specs (`RRSI` index, `RRSF` facet sidecar, `RRSR` record store) |
-| `reader/` | Rust crate `roaringrange_reader`: reader (`Catalog` over `Index`/`FacetIndex`/`RecordStore`) + native `build` writers; both exposed to WASM (`wasm-pack`) |
+| `rust/` | Rust crate `roaringrange`: reader (`Catalog` over `Index`/`FacetIndex`/`RecordStore`) + native `build` writers; both exposed to WASM (`wasm-pack`) |
 | `go/conformance/` | cross-library test: roaringsearch build ⇄ roaringrange(go) read must agree |
 | `examples/openalex/` | the OpenAlex demo: Go loader, parallel Rust `builder/`, `download.sh`, static web UI |
 | `docs/` | architecture diagrams (SVG) |
@@ -96,7 +96,7 @@ static rank first, so the head holds the top-K.
 *Rust (direct):* split each posting into head/tail, then write the index + an
 optional facet sidecar + record store:
 ```rust
-use roaringrange_reader::build::{write_index, write_facets, write_records, split_posting};
+use roaringrange::build::{write_index, write_facets, write_records, split_posting};
 let entries = postings.iter()
     .map(|(k, bm)| { let (h, t) = split_posting(bm); (*k, h, t) })
     .collect();
@@ -116,10 +116,10 @@ rr.WriteRecords(binW, idxW, records)            // → record store (optional)
 
 **Read it (Rust/WASM):** build the reader, then open a `Catalog` and search:
 ```sh
-cd reader && wasm-pack build --target web --features wasm
+cd rust && wasm-pack build --target web --features wasm
 ```
 ```js
-import init, { RrsCatalog } from "./roaringrange_reader.js";
+import init, { RrsCatalog } from "./roaringrange.js";
 await init();
 const cat = await RrsCatalog.openAll("index.rrs", "index.rrf", "records.idx", "records.bin");
 const page = await cat.search("query", 0, 25, 0, '[["type","article"]]');

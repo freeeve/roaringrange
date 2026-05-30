@@ -43,13 +43,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Test
-        working-directory: reader
+        working-directory: rust
         run: cargo test
       - name: Fmt
-        working-directory: reader
+        working-directory: rust
         run: cargo fmt --check
       - name: Clippy
-        working-directory: reader
+        working-directory: rust
         run: cargo clippy --all-targets -- -D warnings
       - name: Builder fmt
         working-directory: examples/openalex/builder

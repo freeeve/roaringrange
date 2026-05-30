@@ -248,21 +248,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "roaringrange-python"
-version = "0.1.0"
-dependencies = [
- "pyo3",
- "roaring",
- "roaringrange_reader",
-]
-
-[[package]]
-name = "roaringrange_reader"
+name = "roaringrange"
 version = "0.1.0"
 dependencies = [
  "futures",
  "roaring",
  "unicode-general-category",
+]
+
+[[package]]
+name = "roaringrange-python"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "roaring",
+ "roaringrange",
 ]
 
 [[package]]

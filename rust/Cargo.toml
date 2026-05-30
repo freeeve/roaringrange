@@ -1,8 +1,8 @@
 [package]
-name = "roaringrange_reader"
+name = "roaringrange"
 version = "0.1.0"
 edition = "2021"
-description = "Browser-side reader for the RRS range-fetchable static search index"
+description = "Static, range-fetchable full-text search on roaring bitmaps: reader, build writers, and WASM bindings"
 license = "MIT"
 repository = "https://github.com/freeeve/roaringrange"
 

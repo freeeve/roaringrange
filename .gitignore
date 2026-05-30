@@ -1,6 +1,6 @@
 # Rust / wasm-pack build output
-reader/target/
-reader/pkg/
+rust/target/
+rust/pkg/
 examples/openalex/builder/target/
 
 # Go binaries
@@ -17,7 +17,7 @@ records.idx
 *.gz
 
 # DeepLibby-specific local dev harness (proprietary data domain)
-reader/webtest/
+rust/webtest/
 
 # OS / editor
 .DS_Store
