@@ -10,11 +10,17 @@ pub mod facet;
 pub mod fetch;
 pub mod index;
 pub mod ngram;
+pub mod records;
+
+/// Native build-side writers for the `RRS`/`RRSF` formats (excluded from wasm).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod build;
 
 pub use facet::FacetIndex;
 pub use fetch::{FetchError, MemoryFetch, RangeFetch};
 pub use index::{CatRange, Index, IndexError, ResolvedFilter};
 pub use ngram::ngram_keys;
+pub use records::RecordStore;
 
 #[cfg(feature = "wasm")]
 mod wasm;
