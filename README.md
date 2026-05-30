@@ -16,9 +16,11 @@ with no backend.**
 The index is one static file on object storage (S3/CDN). The browser fetches a
 tiny sparse view once (~tens of KB), then each query pulls a few small byte
 ranges — independent of corpus size. The multi-GB index is never downloaded
-whole. Postings are portable RoaringBitmaps produced by
-[roaringsearch](https://github.com/freeeve/roaringsearch) and copied verbatim, so
-the Go writer and the Rust/WASM reader interoperate with zero re-encoding.
+whole. Postings are portable RoaringBitmaps, so writers and readers interoperate
+byte-for-byte with zero re-encoding: build an index **directly** with the Rust
+`build` module, or **transcode** an existing
+[roaringsearch](https://github.com/freeeve/roaringsearch) index with the Go
+writer — both emit the same files the Rust/WASM (or Go) reader reads.
 
 ## Live demos
 
@@ -32,7 +34,7 @@ the Go writer and the Rust/WASM reader interoperate with zero re-encoding.
 build (Go):   corpus ─roaringsearch─▶ FTSR ─roaringrange.Transcode─▶ RRS (.rrs) ─▶ S3/CDN
               (optional) facets ──────────────roaringrange.WriteFacets─▶ RRSF (.rrf) ─▶ S3/CDN
 build (Rust): corpus ──build::write_index / write_facets / write_records──▶ .rrs + .rrf + records
-browser (Rust/WASM): .rrs/.rrf/records on CDN ─HTTP Range─▶ Index + FacetIndex + RecordStore
+browser (Rust/WASM): .rrs/.rrf/records on CDN ─HTTP Range─▶ Catalog (= Index + FacetIndex + RecordStore)
 ```
 
 Doc IDs are assigned at build time in descending static rank (citations, holdings,
@@ -76,7 +78,7 @@ ordering and facets.
 |---|---|
 | `go/` | core Go module (`github.com/freeeve/roaringrange`): `Transcode` (FTSR→RRS), `Open`/`Index` reference reader, `WriteFacets`, `NgramKeys` |
 | `FORMAT.md`, `FACETS.md`, `RECORDS.md` | the frozen on-disk specs (`RRSI` index, `RRSF` facet sidecar, `RRSR` record store) |
-| `reader/` | Rust crate `roaringrange_reader`: WASM reader (`Index`/`FacetIndex`/`RecordStore`) + native `build` writers (`wasm-pack`) |
+| `reader/` | Rust crate `roaringrange_reader`: reader (`Catalog` over `Index`/`FacetIndex`/`RecordStore`) + native `build` writers; both exposed to WASM (`wasm-pack`) |
 | `go/conformance/` | cross-library test: roaringsearch build ⇄ roaringrange(go) read must agree |
 | `examples/openalex/` | the OpenAlex demo: Go loader, parallel Rust `builder/`, `download.sh`, static web UI |
 | `docs/` | architecture diagrams (SVG) |
@@ -88,28 +90,44 @@ the guard that keeps all three byte-compatible.
 
 ## Quick start
 
-**Build an index (Go):** build a roaringsearch index, save its `FTSR`, then
-```go
-rr.Transcode(ftsrReader, rrsWriter)            // → .rrs
-rr.WriteFacets(rrfWriter, []rr.FacetField{...}) // → .rrf (optional)
-```
-Assign doc IDs in descending static rank before indexing so top-K is free.
+**Build an index** — two paths to the same files. Assign doc IDs in descending
+static rank first, so the head holds the top-K.
 
-**Build the browser reader (Rust → WASM):**
+*Rust (direct):* split each posting into head/tail, then write the index + an
+optional facet sidecar + record store:
+```rust
+use roaringrange_reader::build::{write_index, write_facets, write_records, split_posting};
+let entries = postings.iter()
+    .map(|(k, bm)| { let (h, t) = split_posting(bm); (*k, h, t) })
+    .collect();
+write_index(rrs_w, 3, 0, entries)?;            // → .rrs
+write_facets(rrf_w, facet_fields)?;            // → .rrf  (optional)
+write_records(bin_w, idx_w, &records)?;        // → record store (optional)
+```
+For a corpus whose index exceeds RAM, build it in doc-ID-range chunks and fold
+them into one standard `.rrs` with `build::chunk::{write_partial, merge_partials_to_rrs}`.
+
+*Go (transcode a roaringsearch index):*
+```go
+rr.Transcode(ftsrReader, rrsWriter)             // FTSR → .rrs
+rr.WriteFacets(rrfWriter, []rr.FacetField{...}) // → .rrf  (optional)
+rr.WriteRecords(binW, idxW, records)            // → record store (optional)
+```
+
+**Read it (Rust/WASM):** build the reader, then open a `Catalog` and search:
 ```sh
 cd reader && wasm-pack build --target web --features wasm
 ```
 ```js
-import init, { RrsIndex } from "./roaringrange_reader.js";
+import init, { RrsCatalog } from "./roaringrange_reader.js";
 await init();
-const idx = await RrsIndex.open("index.rrs");
-await idx.openFacets("index.rrf");                  // optional
-const cur = await idx.searchCursorFiltered("query", 0, ["type\tarticle"]);
-const ids = await cur.page(0, 25);                  // ranked doc IDs
+const cat = await RrsCatalog.openAll("index.rrs", "index.rrf", "records.idx", "records.bin");
+const page = await cat.search("query", 0, 25, 0, '[["type","article"]]');
+// page.ids = ranked doc IDs · page.records · page.facetCounts
 ```
-
-Host the `.rrs`/`.rrf` (+ your record store) on anything that supports HTTP Range
-(S3 + CloudFront works well); point the reader at the URLs.
+`Catalog`/`Index`/`FacetIndex`/`RecordStore` (and `RrsIndex`/`RrsRecords`) stay
+available for advanced use. Host the files on anything that supports HTTP Range
+(S3 + CloudFront works well) and point the reader at the URLs.
 
 ## Measured (full corpora, range-fetched)
 
@@ -123,6 +141,11 @@ Host the `.rrs`/`.rrf` (+ your record store) on anything that supports HTTP Rang
 Boot and per-query cost stay ~constant as the corpus grows; size lives in the
 postings (≈0.4 bytes per trigram-document incidence — roaring is near-optimal),
 so the lever for a smaller index is indexing less text per doc, not the encoding.
+
+The Rust builder scales this to the full **47.8M-work** OpenAlex corpus: an
+11.5 GB index (30.3M unique trigrams) built in ~57 min at ~52 GB peak RAM, no
+swap — and **sublinearly** (≈half the naive linear projection), because the
+trigram vocabulary saturates and roaring absorbs the added postings.
 
 ## Development
 
