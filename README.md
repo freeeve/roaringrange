@@ -77,7 +77,7 @@ ordering and facets.
 | `go/` | core Go module (`github.com/freeeve/roaringrange`): `Transcode` (FTSR→RRS), `Open`/`Index` reference reader, `WriteFacets`, `NgramKeys` |
 | `FORMAT.md`, `FACETS.md`, `RECORDS.md` | the frozen on-disk specs (`RRSI` index, `RRSF` facet sidecar, `RRSR` record store) |
 | `reader/` | Rust crate `roaringrange_reader`: WASM reader (`Index`/`FacetIndex`/`RecordStore`) + native `build` writers (`wasm-pack`) |
-| `conformance/` | cross-library test: roaringsearch build ⇄ roaringrange read must agree |
+| `go/conformance/` | cross-library test: roaringsearch build ⇄ roaringrange(go) read must agree |
 | `examples/openalex/` | the OpenAlex demo: Go loader, parallel Rust `builder/`, `download.sh`, static web UI |
 | `docs/` | architecture diagrams (SVG) |
 

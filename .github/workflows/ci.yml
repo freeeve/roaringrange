@@ -29,7 +29,7 @@ jobs:
           file: go/coverage.out
           format: golang
       - name: Conformance (roaringsearch ⇄ roaringrange)
-        working-directory: conformance
+        working-directory: go/conformance
         run: go test ./...
       - name: Example builds
         working-directory: examples/openalex
