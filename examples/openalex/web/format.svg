@@ -1,75 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 548" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="RRS index file layout">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 300" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="RRS index file format">
   <defs>
     <style>
-      .title{font-size:20px;font-weight:700;fill:#0f172a}
-      .sub{font-size:13px;fill:#64748b}
-      .seg{font-size:13px;font-weight:700;fill:#fff}
-      .lbl{font-size:12px;fill:#334155}
-      .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-      .note{font-size:12px;fill:#475569}
-      .pill{font-size:11px;font-weight:700}
+      .lbl{font-size:13px;font-weight:700;fill:#1a1d24}
+      .sub{font-size:11px;fill:#5b6472}
+      .byte{font-size:10.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;fill:#8b94a3}
+      .seg{font-size:12px;font-weight:600;fill:#fff}
+      .note{font-size:11px;fill:#5b6472}
     </style>
-    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
-      <path d="M0,0 L8,4 L0,8 z" fill="#475569"/>
-    </marker>
   </defs>
 
-  <text x="32" y="38" class="title">RRS index — one static file on S3 (<tspan class="mono">.rrs</tspan>)</text>
-  <text x="32" y="60" class="sub">key-sorted layout so a reader loads a tiny sparse view, then fetches any posting by absolute byte offset</text>
+  <text x="20" y="28" class="lbl">RRS index — one static file, fetched by byte range</text>
 
-  <!-- file bar -->
+  <!-- file layout bar: colour encodes WHEN each part is fetched -->
+  <!-- indigo = loaded once at boot · slate = range-fetched on demand per query -->
   <g>
-    <rect x="32" y="86" width="96"  height="56" rx="6" fill="#6366f1"/>
-    <rect x="132" y="86" width="150" height="56" rx="6" fill="#8b5cf6"/>
-    <rect x="286" y="86" width="220" height="56" rx="6" fill="#0ea5e9"/>
-    <rect x="510" y="86" width="438" height="56" rx="6" fill="#10b981"/>
-    <text x="80"  y="112" class="seg" text-anchor="middle">Header</text>
-    <text x="80"  y="128" class="seg mono" text-anchor="middle" font-size="11">16 B</text>
-    <text x="207" y="112" class="seg" text-anchor="middle">Sparse index</text>
-    <text x="207" y="128" class="seg mono" text-anchor="middle" font-size="11">every 512th key</text>
-    <text x="396" y="112" class="seg" text-anchor="middle">Dictionary</text>
-    <text x="396" y="128" class="seg mono" text-anchor="middle" font-size="11">key-sorted, 24 B/entry</text>
-    <text x="729" y="112" class="seg" text-anchor="middle">Postings</text>
-    <text x="729" y="128" class="seg mono" text-anchor="middle" font-size="11">≈ 99% of the file (range-fetched, never whole)</text>
+    <rect x="20" y="44" width="90" height="48" rx="5" fill="#3b5bdb"/>
+    <text x="65" y="72" text-anchor="middle" class="seg">header</text>
+
+    <rect x="114" y="44" width="150" height="48" rx="5" fill="#3b5bdb"/>
+    <text x="189" y="68" text-anchor="middle" class="seg">sparse</text>
+    <text x="189" y="82" text-anchor="middle" class="seg">index</text>
+
+    <rect x="268" y="44" width="180" height="48" rx="5" fill="#64748b"/>
+    <text x="358" y="68" text-anchor="middle" class="seg">dictionary</text>
+    <text x="358" y="82" text-anchor="middle" class="seg">(key-sorted)</text>
+
+    <rect x="452" y="44" width="248" height="48" rx="5" fill="#64748b"/>
+    <text x="576" y="72" text-anchor="middle" class="seg">postings (head ∥ tail)</text>
   </g>
 
-  <!-- header detail -->
-  <text x="32" y="172" class="lbl mono">magic "RRSI" · ver · gramSize 3 · #ngrams · stride</text>
-  <!-- sparse detail -->
-  <text x="132" y="190" class="note">Downloaded once at boot (~tens of KB) and kept in memory →</text>
-  <text x="132" y="206" class="note">in-memory binary search picks which dictionary block to read.</text>
+  <!-- colour legend -->
+  <rect x="20" y="102" width="12" height="12" rx="3" fill="#3b5bdb"/>
+  <text x="38" y="112" class="note">loaded once at boot</text>
+  <rect x="170" y="102" width="12" height="12" rx="3" fill="#64748b"/>
+  <text x="188" y="112" class="note">range-fetched on demand, per query</text>
 
-  <!-- dictionary entry callout -->
-  <line x1="396" y1="142" x2="320" y2="250" stroke="#0ea5e9" stroke-width="1.5"/>
-  <rect x="120" y="250" width="400" height="92" rx="8" fill="#f0f9ff" stroke="#0ea5e9"/>
-  <text x="136" y="271" class="lbl" font-weight="700">one dictionary entry (24 B)</text>
-  <text x="136" y="291" class="lbl mono" font-size="12">key u64 · headOffset u64</text>
-  <text x="136" y="309" class="lbl mono" font-size="12">headSize u32 · tailSize u32</text>
-  <text x="136" y="330" class="note">→ absolute byte offsets locate this trigram's posting</text>
+  <!-- boot vs query callouts -->
+  <text x="20" y="148" class="lbl" fill="#3b5bdb">boot: fetch once</text>
+  <rect x="20" y="156" width="244" height="3" fill="#3b5bdb"/>
+  <text x="20" y="178" class="note">header + sparse index → ~tens of KB,</text>
+  <text x="20" y="194" class="note">kept in memory for the whole session</text>
 
-  <!-- postings callout: head/tail -->
-  <line x1="729" y1="142" x2="729" y2="250" stroke="#10b981" stroke-width="1.5" marker-end="url(#arr)"/>
-  <rect x="556" y="250" width="392" height="150" rx="8" fill="#ecfdf5" stroke="#10b981"/>
-  <text x="572" y="272" class="lbl" font-weight="700">per trigram: <tspan class="mono">[ head ][ tail ]</tspan></text>
+  <text x="360" y="148" class="lbl" fill="#64748b">per query: range reads</text>
+  <rect x="360" y="156" width="340" height="3" fill="#64748b"/>
+  <text x="360" y="178" class="note">binary-search sparse → fetch one dict block,</text>
+  <text x="360" y="194" class="note">then the head postings for each trigram</text>
 
-  <rect x="572" y="284" width="150" height="40" rx="5" fill="#10b981"/>
-  <text x="647" y="303" class="seg" text-anchor="middle" font-size="12">head</text>
-  <text x="647" y="318" class="seg mono" text-anchor="middle" font-size="10">docs [0, 65536)</text>
-  <rect x="726" y="284" width="206" height="40" rx="5" fill="#94a3b8"/>
-  <text x="829" y="303" class="seg" text-anchor="middle" font-size="12">tail</text>
-  <text x="829" y="318" class="seg mono" text-anchor="middle" font-size="10">docs ≥ 65536</text>
-
-  <text x="572" y="346" class="note">head = the 65,536 most-popular docs → the top-K for any</text>
-  <text x="572" y="362" class="note">ranked query lives here (≤ ~8 KB).</text>
-  <text x="572" y="382" class="note">tail fetched only if the head under-fills the page.</text>
-
-  <!-- bottom notes: the up-front ranking trade-off -->
-  <rect x="32" y="410" width="916" height="86" rx="8" fill="#fffbeb" stroke="#f59e0b"/>
-  <text x="48" y="432" class="note" font-weight="700">The up-front trade-off — the ranking is baked into doc-ID order at build time.</text>
-  <text x="48" y="450" class="note">Doc IDs are assigned in descending popularity, so ascending docID = rank: top-K &amp; pagination come free, with no sort at query time.</text>
-  <text x="48" y="468" class="note">But the order is fixed — there is no query-time relevance (TF-IDF / BM25) scoring.</text>
-  <text x="48" y="486" class="note">So the technique needs a good ranking signal known up front (citations, library holdings, …); without one it works far less well.</text>
-
-  <text x="32" y="516" class="sub">Companion facet sidecar (<tspan class="mono">.rrf</tspan>): field table → category table (with counts) →</text>
-  <text x="32" y="534" class="sub">per-category <tspan class="mono">[head][tail]</tspan> postings — same shape, range-fetched the same way.</text>
+  <!-- postings: head/tail split (within the slate "postings" segment) -->
+  <text x="20" y="232" class="lbl">postings: doc IDs in popularity order</text>
+  <rect x="20" y="244" width="680" height="40" rx="5" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <rect x="20" y="244" width="180" height="40" rx="5" fill="#cbd5e1"/>
+  <text x="110" y="269" text-anchor="middle" class="note">head: top 65,536 ranked</text>
+  <text x="450" y="269" text-anchor="middle" class="note">tail: the rest, fetched only when paging deeper</text>
 </svg>

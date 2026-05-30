@@ -215,6 +215,28 @@
         </p>
 
         <section class="step">
+          <h2>Searching in the browser</h2>
+          <figure class="diagram">
+            <img src="search.svg" alt="In-browser search via HTTP range reads" />
+            <figcaption>
+              A query tokenizes into trigrams, fetches the matching dictionary blocks and head
+              postings as parallel HTTP Range requests, ANDs the roaring bitmaps, and reads the
+              page's records — a few KB–MB total. The multi-GB file is never downloaded whole.
+            </figcaption>
+          </figure>
+          <figure class="diagram">
+            <img src="boot.svg" alt="What loads at boot versus what stays in S3" />
+            <figcaption>
+              That's why boot is cheap: the browser downloads only the small top of each
+              file — the index header + sparse index, the facet metadata + top category
+              heads, and the record store's header — a few MB in total. Everything else
+              (the dictionary + postings, the facet tails, and the record blobs — tens of
+              GB) stays in S3 and is range-fetched only as a query needs it.
+            </figcaption>
+          </figure>
+        </section>
+
+        <section class="step">
           <h2>File formats</h2>
 
           <h3>Text index (RRS)</h3>
@@ -247,28 +269,6 @@
               record blob (<code>.bin</code>) — two ranged reads, and a results page of consecutive
               IDs is one contiguous slice. Records are opaque bytes (here, compact JSON), so the
               format never dictates your data model.
-            </figcaption>
-          </figure>
-        </section>
-
-        <section class="step">
-          <h2>Searching in the browser</h2>
-          <figure class="diagram">
-            <img src="search.svg" alt="In-browser search via HTTP range reads" />
-            <figcaption>
-              A query tokenizes into trigrams, fetches the matching dictionary blocks and head
-              postings as parallel HTTP Range requests, ANDs the roaring bitmaps, and reads the
-              page's records — a few KB–MB total. The multi-GB file is never downloaded whole.
-            </figcaption>
-          </figure>
-          <figure class="diagram">
-            <img src="boot.svg" alt="What loads at boot versus what stays in S3" />
-            <figcaption>
-              That's why boot is cheap: the browser downloads only the small top of each
-              file — the index header + sparse index, the facet metadata + top category
-              heads, and the record store's header — a few MB in total. Everything else
-              (the dictionary + postings, the facet tails, and the record blobs — tens of
-              GB) stays in S3 and is range-fetched only as a query needs it.
             </figcaption>
           </figure>
         </section>
