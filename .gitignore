@@ -16,7 +16,7 @@ records.bin
 records.idx
 *.gz
 
-# DeepLibby-specific local dev harness (proprietary data domain)
+# local reader perf/test harness (loads a built wasm bundle + a local index)
 rust/webtest/
 
 # OS / editor
