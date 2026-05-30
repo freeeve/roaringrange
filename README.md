@@ -24,7 +24,7 @@ writer — both emit the same files the Rust/WASM (or Go) reader reads.
 
 ## Live demos
 
-- **OpenAlex** — [openalex.evefreeman.com](https://openalex.evefreeman.com): ~9.5M
+- **OpenAlex** — [openalex.evefreeman.com](https://openalex.evefreeman.com): ~47.8M
   scholarly works, citation-ranked, faceted (year/type/open-access/language/topic),
   searched entirely client-side. (Reproducible — see [`examples/openalex/`](examples/openalex).)
 
@@ -131,10 +131,10 @@ available for advanced use. Host the files on anything that supports HTTP Range
 
 ## Measured (full corpora, range-fetched)
 
-| | library catalog 9.6M | OpenAlex 9.5M (with abstracts) |
+| | library catalog 9.6M | OpenAlex 47.8M (with abstracts) |
 |---|---|---|
-| index size | 1.4 GB | 4.25 GB |
-| one-time boot | ~52 KB | ~210 KB |
+| text index (`.rrs`) | 1.4 GB | 11.5 GB |
+| boot — index sparse | ~52 KB | ~0.5 MB |
 | typical query | tens–hundreds of KB | ~1–6 MB head+tail (less head-only) |
 | compute | 2–14 µs | — |
 
@@ -142,10 +142,13 @@ Boot and per-query cost stay ~constant as the corpus grows; size lives in the
 postings (≈0.4 bytes per trigram-document incidence — roaring is near-optimal),
 so the lever for a smaller index is indexing less text per doc, not the encoding.
 
-The Rust builder scales this to the full **47.8M-work** OpenAlex corpus: an
-11.5 GB index (30.3M unique trigrams) built in ~57 min at ~52 GB peak RAM, no
-swap — and **sublinearly** (≈half the naive linear projection), because the
-trigram vocabulary saturates and roaring absorbs the added postings.
+The Rust builder reaches the **47.8M-work** OpenAlex corpus that backs the live
+demo: an 11.5 GB index of 30.3M unique trigrams, built in ~57 min at ~52 GB peak
+RAM with no swap — and **sublinearly** (≈half the naive linear projection), as the
+trigram vocabulary saturates and roaring absorbs the added postings. With facets
+and records attached, the demo's full boot is ~3 MB: the index sparse, the facet
+metadata + top-category heads (the facet *tails* stay range-fetched, not loaded
+up front), and the record-store header.
 
 ## Development
 
