@@ -9,11 +9,12 @@
 //!           descending to assign doc IDs (doc 0 = most cited);
 //!   pass 2: re-stream, tokenize each work's text into trigram keys, insert its
 //!           doc ID into key-sharded roaring bitmaps + facet bitmaps, and emit
-//!           its record. Parsing/tokenizing fan out across files with rayon.
+//!           its record. Parsing/tokenizing fan out across shards with rayon.
 //!
-//! Then each posting is split head/tail and the index, facets, and record store
-//! are written. Peak memory is the index + facet bitmaps + the records — never
-//! the works' text.
+//! Input shards are local gzipped files (`-in <glob>`) or, with `-in s3://…/`,
+//! the public OpenAlex bucket streamed directly over HTTPS (no download, no
+//! credentials) — its `manifest` lists the objects. Pass through `-maxfiles N`
+//! to cap the shard count for a quick run.
 
 use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
@@ -25,10 +26,10 @@ use roaringrange_reader::ngram_keys;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader, BufWriter, Read};
+use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Trigram size (matches the index/reader contract).
 const GRAM: usize = 3;
@@ -39,6 +40,21 @@ const ABSTRACT_CHAR_CAP: usize = 2000;
 const KEY_SHARDS: usize = 256;
 /// Facet fields, emitted in this order.
 const FACET_FIELDS: [&str; 5] = ["year", "type", "oa", "language", "topic"];
+
+/// One input shard: a local gzipped file or a public S3 (HTTPS) object.
+enum Source {
+    Local(PathBuf),
+    Url(String),
+}
+
+impl Source {
+    fn label(&self) -> String {
+        match self {
+            Source::Local(p) => p.display().to_string(),
+            Source::Url(u) => u.clone(),
+        }
+    }
+}
 
 /// Pass-1 view: just enough to rank a work.
 #[derive(Deserialize)]
@@ -104,27 +120,27 @@ struct PrimaryLocation {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let in_glob = arg(&args, "-in", "/tmp/openalex/works/*/*.gz");
+    let in_arg = arg(&args, "-in", "/tmp/openalex/works/*/*.gz");
     let rrs_path = arg(&args, "-rrs", "/tmp/openalex.rrs");
     let facets_path = arg(&args, "-facets", "/tmp/openalex.rrf");
     let bin_path = arg(&args, "-bin", "/tmp/openalex-records.bin");
     let idx_path = arg(&args, "-idx", "/tmp/openalex-records.idx");
     let limit: usize = arg(&args, "-limit", "0").parse().unwrap_or(0);
+    let maxfiles: usize = arg(&args, "-maxfiles", "0").parse().unwrap_or(0);
 
-    let mut files: Vec<PathBuf> = glob::glob(&in_glob)
-        .expect("invalid -in glob")
-        .filter_map(Result::ok)
-        .collect();
-    files.sort();
-    if files.is_empty() {
-        eprintln!("no input files matched {in_glob}");
+    let mut sources = resolve_sources(&in_arg);
+    if sources.is_empty() {
+        eprintln!("no input shards matched {in_arg}");
         std::process::exit(1);
     }
-    eprintln!("matched {} input files", files.len());
+    if maxfiles > 0 && sources.len() > maxfiles {
+        sources.truncate(maxfiles);
+    }
+    eprintln!("{} input shards", sources.len());
     let t0 = Instant::now();
 
     // Pass 1: rank by citations to assign doc IDs.
-    let mut rows: Vec<(u64, i64)> = files.par_iter().flat_map_iter(|p| rank_file(p)).collect();
+    let mut rows: Vec<(u64, i64)> = sources.par_iter().flat_map_iter(rank_source).collect();
     eprintln!(
         "pass1: {} ranked rows in {:.1}s",
         rows.len(),
@@ -147,18 +163,17 @@ fn main() {
         .collect();
     drop(rows);
 
-    // Pass 2: tokenize + index + facets + records, fanned out across files.
+    // Pass 2: tokenize + index + facets + records, fanned out across shards.
     let t1 = Instant::now();
-    let shards: Vec<Mutex<HashMap<u64, RoaringBitmap>>> = (0..KEY_SHARDS)
-        .map(|_| Mutex::new(HashMap::new()))
-        .collect();
+    let shards: Vec<Mutex<HashMap<u64, RoaringBitmap>>> =
+        (0..KEY_SHARDS).map(|_| Mutex::new(HashMap::new())).collect();
     let facets: Vec<Mutex<HashMap<String, RoaringBitmap>>> = (0..FACET_FIELDS.len())
         .map(|_| Mutex::new(HashMap::new()))
         .collect();
 
-    let per_file: Vec<Vec<(u32, Vec<u8>)>> = files
+    let per_file: Vec<Vec<(u32, Vec<u8>)>> = sources
         .par_iter()
-        .map(|p| build_file(p, &id_to_doc, &shards, &facets))
+        .map(|s| build_source(s, &id_to_doc, &shards, &facets))
         .collect();
     let indexed: usize = per_file.iter().map(|v| v.len()).sum();
     eprintln!(
@@ -253,21 +268,94 @@ fn main() {
         t4.elapsed().as_secs_f64()
     );
 
-    eprintln!(
-        "DONE: {} docs in {:.1}s total",
-        n,
-        t0.elapsed().as_secs_f64()
-    );
+    eprintln!("DONE: {} docs in {:.1}s total", n, t0.elapsed().as_secs_f64());
 }
 
-/// Streams one file for pass 1, returning `(wid, cited_by_count)` per indexable
+/// Resolves `-in` to input shards: an `s3://…/` prefix is enumerated from the
+/// bucket manifest (streamed over HTTPS); anything else is a local glob.
+fn resolve_sources(in_arg: &str) -> Vec<Source> {
+    if let Some(_rest) = in_arg.strip_prefix("s3://") {
+        eprintln!("enumerating S3 manifest under {in_arg} …");
+        s3_sources(in_arg)
+    } else {
+        let mut v: Vec<PathBuf> = glob::glob(in_arg)
+            .expect("invalid -in glob")
+            .filter_map(Result::ok)
+            .collect();
+        v.sort();
+        v.into_iter().map(Source::Local).collect()
+    }
+}
+
+/// Enumerates object URLs for an `s3://…/` works prefix via its `manifest`.
+fn s3_sources(prefix: &str) -> Vec<Source> {
+    let base = prefix.trim_end_matches('/');
+    let manifest_url = s3_to_https(&format!("{base}/manifest"));
+    let mut body = String::new();
+    http_get(&manifest_url)
+        .and_then(|mut r| r.read_to_string(&mut body))
+        .unwrap_or_else(|e| panic!("fetch manifest {manifest_url}: {e}"));
+    let v: serde_json::Value = serde_json::from_str(&body).expect("parse manifest JSON");
+    v["entries"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| e["url"].as_str())
+                .map(|u| Source::Url(s3_to_https(u)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Converts `s3://bucket/key` to the public `https://bucket.s3.amazonaws.com/key`.
+fn s3_to_https(s3url: &str) -> String {
+    match s3url.strip_prefix("s3://") {
+        Some(rest) => {
+            let (bucket, key) = rest.split_once('/').unwrap_or((rest, ""));
+            format!("https://{bucket}.s3.amazonaws.com/{key}")
+        }
+        None => s3url.to_string(),
+    }
+}
+
+/// GETs `url` (public, no credentials), retrying transient failures, returning
+/// the streaming response body.
+fn http_get(url: &str) -> std::io::Result<Box<dyn Read + Send + Sync>> {
+    let mut last = String::new();
+    for attempt in 0..5u64 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(250 * attempt));
+        }
+        match ureq::get(url).call() {
+            Ok(resp) => return Ok(resp.into_reader()),
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("GET {url}: {last}"),
+    ))
+}
+
+/// Opens a source as a buffered line reader over its decompressed JSON Lines.
+/// Local files are read directly; S3 objects stream over HTTPS.
+fn open_source(src: &Source) -> std::io::Result<Box<dyn BufRead>> {
+    let raw: Box<dyn Read> = match src {
+        Source::Local(p) => Box::new(File::open(p)?),
+        Source::Url(u) => Box::new(http_get(u)?),
+    };
+    let gz = MultiGzDecoder::new(BufReader::with_capacity(1 << 20, raw));
+    Ok(Box::new(BufReader::with_capacity(1 << 20, gz)))
+}
+
+/// Streams one source for pass 1, returning `(wid, cited_by_count)` per indexable
 /// work (titled, with a parseable id).
-fn rank_file(path: &Path) -> Vec<(u64, i64)> {
+fn rank_source(src: &Source) -> Vec<(u64, i64)> {
     let mut out = Vec::new();
-    let reader = match open_gz(path) {
+    let reader = match open_source(src) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("skip {}: {e}", path.display());
+            eprintln!("skip {}: {e}", src.label());
             return out;
         }
     };
@@ -291,24 +379,24 @@ fn rank_file(path: &Path) -> Vec<(u64, i64)> {
     out
 }
 
-/// Streams one file for pass 2: tokenizes each work and inserts its doc ID into
+/// Streams one source for pass 2: tokenizes each work and inserts its doc ID into
 /// the shared sharded bitmaps + facet bitmaps (one lock per touched shard/field),
-/// returning the file's `(docID, record bytes)` pairs.
-fn build_file(
-    path: &Path,
+/// returning the source's `(docID, record bytes)` pairs.
+fn build_source(
+    src: &Source,
     id_to_doc: &HashMap<u64, u32>,
     shards: &[Mutex<HashMap<u64, RoaringBitmap>>],
     facets: &[Mutex<HashMap<String, RoaringBitmap>>],
 ) -> Vec<(u32, Vec<u8>)> {
     let mut recs = Vec::new();
-    let reader = match open_gz(path) {
+    let reader = match open_source(src) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("skip {}: {e}", path.display());
+            eprintln!("skip {}: {e}", src.label());
             return recs;
         }
     };
-    // Per-shard key buckets, reused across this file's works to batch lock acquisitions.
+    // Per-shard key buckets, reused across this source's works to batch locks.
     let mut buckets: Vec<Vec<u64>> = (0..KEY_SHARDS).map(|_| Vec::new()).collect();
 
     for line in reader.lines() {
@@ -386,14 +474,6 @@ fn build_file(
     recs
 }
 
-/// Opens a gzipped JSON-Lines file as a buffered line reader (multi-member gzip,
-/// matching Go's default multistream behavior).
-fn open_gz(path: &Path) -> std::io::Result<BufReader<MultiGzDecoder<BufReader<File>>>> {
-    let f = File::open(path)?;
-    let gz = MultiGzDecoder::new(BufReader::with_capacity(1 << 20, f));
-    Ok(BufReader::with_capacity(1 << 20, gz))
-}
-
 /// Parses the numeric tail of an OpenAlex work id
 /// ("https://openalex.org/W2741809807" -> 2741809807), a compact, stable key
 /// across the two passes.
@@ -424,11 +504,7 @@ fn author_names(w: &Work) -> String {
 
 /// Primary topic display name, falling back to the first concept's.
 fn topic_name(w: &Work) -> String {
-    if let Some(n) = w
-        .primary_topic
-        .as_ref()
-        .and_then(|t| t.display_name.as_deref())
-    {
+    if let Some(n) = w.primary_topic.as_ref().and_then(|t| t.display_name.as_deref()) {
         if !n.is_empty() {
             return n.to_string();
         }
