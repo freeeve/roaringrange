@@ -36,12 +36,12 @@
   <text x="64" y="458" class="req">the multi-GB file is <tspan font-weight="700">never</tspan> downloaded whole;</text>
   <text x="64" y="474" class="req">waves run in parallel via <tspan class="mono">Range:</tspan> requests</text>
 
-  <!-- CloudFront + S3 file -->
+  <!-- CloudFront + S3 file: colour = when each part is fetched -->
   <text x="700" y="84" class="box" text-anchor="middle">CloudFront → S3</text>
   <rect x="706" y="92" width="180" height="300" rx="8" fill="#fff" stroke="#cbd5e1"/>
-  <rect x="706" y="92"  width="180" height="52" rx="8" fill="#6366f1"/>
-  <rect x="706" y="148" width="180" height="92" fill="#0ea5e9"/>
-  <rect x="706" y="244" width="180" height="56" fill="#10b981"/>
+  <rect x="706" y="92"  width="180" height="52" rx="8" fill="#3b5bdb"/>
+  <rect x="706" y="148" width="180" height="92" fill="#64748b"/>
+  <rect x="706" y="244" width="180" height="56" fill="#64748b"/>
   <rect x="706" y="304" width="180" height="84" rx="8" fill="#94a3b8"/>
   <text x="796" y="123" class="seg" text-anchor="middle">header + sparse index</text>
   <text x="796" y="198" class="seg" text-anchor="middle">dictionary</text>
@@ -50,8 +50,8 @@
   <text x="796" y="410" class="sub mono" text-anchor="middle" font-size="11">index.rrs (multi-GB)</text>
 
   <!-- records file -->
-  <rect x="706" y="438" width="180" height="46" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
-  <text x="796" y="466" class="sub mono" text-anchor="middle" font-size="11">records.bin</text>
+  <rect x="706" y="438" width="180" height="46" rx="8" fill="#64748b"/>
+  <text x="796" y="466" class="seg mono" text-anchor="middle" font-size="11">records.bin</text>
 
   <!-- range request arrows -->
   <line x1="350" y1="150" x2="704" y2="118" stroke="#6366f1" stroke-width="1.6" marker-end="url(#a2)"/>
@@ -68,4 +68,10 @@
 
   <line x1="350" y1="402" x2="704" y2="460" stroke="#6366f1" stroke-width="1.6" marker-end="url(#a2)"/>
   <text x="372" y="420" class="req"><tspan class="wave">⑥</tspan> GET records (coalesced ranges)</text>
+
+  <!-- colour legend -->
+  <rect x="372" y="486" width="12" height="12" rx="3" fill="#3b5bdb"/>
+  <text x="390" y="496" class="req">loaded at boot</text>
+  <rect x="500" y="486" width="12" height="12" rx="3" fill="#64748b"/>
+  <text x="518" y="496" class="req">range-fetched on demand</text>
 </svg>
