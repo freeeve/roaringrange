@@ -470,3 +470,41 @@ fn facet_filtering_within_or_across_and() {
         vec![vec![3u64, 2], vec![3, 2]]
     );
 }
+
+/// Reads the exact `RRSR` bytes the Go writer emits (the golden layout asserted
+/// by roaringrange's Go `TestWriteRecordsGoldenLayout`) through the Rust
+/// [`RecordStore`]. This is the cross-language guard: it pins that Go-written
+/// record-store bytes deserialize in the Rust reader, so a Go build → Rust read
+/// round-trip stays byte-compatible without a generated fixture file.
+#[test]
+fn reads_go_written_rrsr_golden_bytes() {
+    use crate::records::RecordStore;
+    use crate::MemoryFetch;
+
+    // Records: a JSON-ish row, a zero-length record, and "hello" — identical to
+    // the Go golden test. Cumulative end offsets: 0, 16, 16, 21.
+    let bin = b"{\"id\":\"A\",\"c\":9}hello".to_vec();
+    let mut idx = Vec::new();
+    idx.extend_from_slice(b"RRSR"); // magic
+    idx.extend_from_slice(&1u16.to_le_bytes()); // version
+    idx.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    idx.extend_from_slice(&3u32.to_le_bytes()); // count
+    idx.extend_from_slice(&0u32.to_le_bytes()); // reserved2
+    for off in [0u64, 16, 16, 21] {
+        idx.extend_from_slice(&off.to_le_bytes());
+    }
+
+    let store = block_on(RecordStore::open(
+        MemoryFetch::new(idx),
+        MemoryFetch::new(bin),
+    ))
+    .unwrap();
+    assert_eq!(store.len(), 3);
+    assert_eq!(
+        block_on(store.get(0)).unwrap().unwrap(),
+        br#"{"id":"A","c":9}"#
+    );
+    assert_eq!(block_on(store.get(1)).unwrap().unwrap(), b"");
+    assert_eq!(block_on(store.get(2)).unwrap().unwrap(), b"hello");
+    assert!(block_on(store.get(3)).unwrap().is_none());
+}

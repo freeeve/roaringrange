@@ -33,8 +33,13 @@ consecutive ranks) is a contiguous slice.
   `bin[start, end)`. Two ranged reads per record; a page of consecutive doc IDs
   coalesces to one index read + one blob read.
 
-Written by `build::write_records`, read by `RecordStore` (the reader crate). The
-record *schema* is intentionally not part of the format — only the container is.
+Written by Rust `build::write_records` / `RecordWriter` or Go
+`roaringrange.WriteRecords` / `RecordWriter`, read by `RecordStore` (in both the
+Rust reader crate and the Go package). The two writers emit byte-identical
+output — a Go-build → Rust-read round-trip is pinned by the Go
+`TestWriteRecordsGoldenLayout` golden offsets and the Rust
+`reads_go_written_rrsr_golden_bytes` test, which read the same bytes. The record
+*schema* is intentionally not part of the format — only the container is.
 
 ## Future — optional compression
 Records are stored uncompressed today. Optional per-page/per-record **zstd with a
