@@ -16,7 +16,8 @@
 use crate::facet::FacetIndex;
 use crate::fetch::{FetchError, RangeFetch};
 use crate::index::{Cursor, Index};
-use js_sys::{ArrayBuffer, Reflect, Uint8Array};
+use crate::records::RecordStore;
+use js_sys::{Array, ArrayBuffer, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
@@ -337,5 +338,89 @@ impl RrsCursor {
     /// Number of doc IDs materialized so far.
     pub fn loaded(&self) -> usize {
         self.inner.loaded()
+    }
+}
+
+/// A range-fetchable `RRSR` record store exposed to JavaScript: maps a ranked
+/// doc ID to its raw record bytes over HTTP Range. The offset index (`.idx`) and
+/// the record blob (`.bin`) are each backed by their own [`WasmFetch`] URL.
+#[wasm_bindgen]
+pub struct RrsRecords {
+    inner: RecordStore<WasmFetch>,
+}
+
+#[wasm_bindgen]
+impl RrsRecords {
+    /// Boots the record store: reads and validates the 16-byte `RRSR` header of
+    /// the offset index at `idx_url`, with records served from the blob at
+    /// `bin_url`. Returns a `Promise<RrsRecords>` to JavaScript.
+    pub async fn open(idx_url: String, bin_url: String) -> Result<RrsRecords, JsError> {
+        let inner = RecordStore::open(WasmFetch::new(idx_url), WasmFetch::new(bin_url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrsRecords { inner })
+    }
+
+    /// Number of records (doc IDs `0..len`).
+    pub fn len(&self) -> u32 {
+        self.inner.len()
+    }
+
+    /// Whether the store holds no records.
+    #[wasm_bindgen(js_name = isEmpty)]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Raw record bytes for doc `id` as a `Uint8Array`, or `undefined` (a JS
+    /// `null`) when `id` is out of range. One Range read of the offset pair, one
+    /// of the record slice.
+    pub async fn get(&self, id: u32) -> Result<JsValue, JsError> {
+        match self
+            .inner
+            .get(id)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?
+        {
+            Some(bytes) => Ok(Uint8Array::from(bytes.as_slice()).into()),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    /// Record bytes for doc `id` decoded as a UTF-8 string, or `undefined` (a JS
+    /// `null`) when `id` is out of range. Convenience for JSON/text records;
+    /// invalid UTF-8 is replaced lossily.
+    #[wasm_bindgen(js_name = getText)]
+    pub async fn get_text(&self, id: u32) -> Result<JsValue, JsError> {
+        match self
+            .inner
+            .get(id)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?
+        {
+            Some(bytes) => Ok(JsValue::from_str(&String::from_utf8_lossy(&bytes))),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    /// Raw record bytes for several doc IDs (a results page is the typical
+    /// input). Resolves to a JS `Array` aligned with `ids`: each element is a
+    /// `Uint8Array`, or `null` for an out-of-range doc ID.
+    #[wasm_bindgen(js_name = getMany)]
+    pub async fn get_many(&self, ids: Vec<u32>) -> Result<Array, JsError> {
+        let records = self
+            .inner
+            .get_many(&ids)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let out = Array::new_with_length(records.len() as u32);
+        for (i, rec) in records.into_iter().enumerate() {
+            let value = match rec {
+                Some(bytes) => Uint8Array::from(bytes.as_slice()).into(),
+                None => JsValue::NULL,
+            };
+            out.set(i as u32, value);
+        }
+        Ok(out)
     }
 }

@@ -191,6 +191,98 @@ export class RrsIndex {
     }
 }
 if (Symbol.dispose) RrsIndex.prototype[Symbol.dispose] = RrsIndex.prototype.free;
+
+/**
+ * A range-fetchable `RRSR` record store exposed to JavaScript: maps a ranked
+ * doc ID to its raw record bytes over HTTP Range. The offset index (`.idx`) and
+ * the record blob (`.bin`) are each backed by their own [`WasmFetch`] URL.
+ */
+export class RrsRecords {
+    static __wrap(ptr) {
+        const obj = Object.create(RrsRecords.prototype);
+        obj.__wbg_ptr = ptr;
+        RrsRecordsFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RrsRecordsFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_rrsrecords_free(ptr, 0);
+    }
+    /**
+     * Raw record bytes for doc `id` as a `Uint8Array`, or `undefined` (a JS
+     * `null`) when `id` is out of range. One Range read of the offset pair, one
+     * of the record slice.
+     * @param {number} id
+     * @returns {Promise<any>}
+     */
+    get(id) {
+        const ret = wasm.rrsrecords_get(this.__wbg_ptr, id);
+        return ret;
+    }
+    /**
+     * Raw record bytes for several doc IDs (a results page is the typical
+     * input). Resolves to a JS `Array` aligned with `ids`: each element is a
+     * `Uint8Array`, or `null` for an out-of-range doc ID.
+     * @param {Uint32Array} ids
+     * @returns {Promise<Array<any>>}
+     */
+    getMany(ids) {
+        const ptr0 = passArray32ToWasm0(ids, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrsrecords_getMany(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Record bytes for doc `id` decoded as a UTF-8 string, or `undefined` (a JS
+     * `null`) when `id` is out of range. Convenience for JSON/text records;
+     * invalid UTF-8 is replaced lossily.
+     * @param {number} id
+     * @returns {Promise<any>}
+     */
+    getText(id) {
+        const ret = wasm.rrsrecords_getText(this.__wbg_ptr, id);
+        return ret;
+    }
+    /**
+     * Whether the store holds no records.
+     * @returns {boolean}
+     */
+    isEmpty() {
+        const ret = wasm.rrsrecords_isEmpty(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Number of records (doc IDs `0..len`).
+     * @returns {number}
+     */
+    len() {
+        const ret = wasm.rrsrecords_len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Boots the record store: reads and validates the 16-byte `RRSR` header of
+     * the offset index at `idx_url`, with records served from the blob at
+     * `bin_url`. Returns a `Promise<RrsRecords>` to JavaScript.
+     * @param {string} idx_url
+     * @param {string} bin_url
+     * @returns {Promise<RrsRecords>}
+     */
+    static open(idx_url, bin_url) {
+        const ptr0 = passStringToWasm0(idx_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(bin_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.rrsrecords_open(ptr0, len0, ptr1, len1);
+        return ret;
+    }
+}
+if (Symbol.dispose) RrsRecords.prototype[Symbol.dispose] = RrsRecords.prototype.free;
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -278,6 +370,10 @@ function __wbg_get_imports() {
             const ret = new Headers();
             return ret;
         }, arguments); },
+        __wbg_new_from_slice_18fa1f71286d66b8: function(arg0, arg1) {
+            const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
+            return ret;
+        },
         __wbg_new_typed_bf31d18f92484486: function(arg0, arg1) {
             try {
                 var state0 = {a: arg0, b: arg1};
@@ -295,6 +391,10 @@ function __wbg_get_imports() {
             } finally {
                 state0.a = 0;
             }
+        },
+        __wbg_new_with_length_690552eb9e6aeac9: function(arg0) {
+            const ret = new Array(arg0 >>> 0);
+            return ret;
         },
         __wbg_new_with_str_and_init_bcd02b79a793d27f: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = new Request(getStringFromWasm0(arg0, arg1), arg2);
@@ -326,9 +426,16 @@ function __wbg_get_imports() {
             const ret = RrsIndex.__wrap(arg0);
             return ret;
         },
+        __wbg_rrsrecords_new: function(arg0) {
+            const ret = RrsRecords.__wrap(arg0);
+            return ret;
+        },
         __wbg_set_25ef40a9aeff260d: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
             arg0.set(getStringFromWasm0(arg1, arg2), getStringFromWasm0(arg3, arg4));
         }, arguments); },
+        __wbg_set_dca99999bba88a9a: function(arg0, arg1, arg2) {
+            arg0[arg1 >>> 0] = arg2;
+        },
         __wbg_set_headers_7c1e39ece7826bec: function(arg0, arg1) {
             arg0.headers = arg1;
         },
@@ -371,7 +478,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 110, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 128, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h68218ae5a35c5694);
             return ret;
         },
@@ -422,6 +529,9 @@ const RrsCursorFinalization = (typeof FinalizationRegistry === 'undefined')
 const RrsIndexFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rrsindex_free(ptr, 1));
+const RrsRecordsFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_rrsrecords_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
@@ -510,6 +620,13 @@ function makeMutClosure(arg0, arg1, f) {
     };
     CLOSURE_DTORS.register(real, state, state);
     return real;
+}
+
+function passArray32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getUint32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passArrayJsValueToWasm0(array, malloc) {
