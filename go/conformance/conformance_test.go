@@ -6,6 +6,7 @@ package conformance
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,7 +18,9 @@ import (
 )
 
 // corpus exercises shared trigrams, multi-doc matches, Unicode (ASCII fast-path
-// vs rune/hash path), and no-match terms.
+// vs rune/hash path), the letter/digit normalization filter (the trailing doc
+// carries Nl/No runes — Ⅰ ② ① — that IsLetter||IsDigit must drop), and no-match
+// terms.
 var corpus = []string{
 	"Legends & Lattes",
 	"The Lattes of Legend",
@@ -26,6 +29,7 @@ var corpus = []string{
 	"Café society and naïve little cafés",
 	"machine learning for coffee roasting",
 	"the legend of the lattes returns",
+	"Volume Ⅰ notes ② and ① of naïveté",
 }
 
 // TestConformance builds the corpus with roaringsearch, transcodes it to RRS
@@ -33,9 +37,34 @@ var corpus = []string{
 // that single-word queries return the same doc set as roaringsearch's own
 // strict-AND Search. Single words are used because roaringsearch tokenizes the
 // whole query while roaringrange splits per word — for one word they coincide,
-// isolating the n-gram key derivation + format round-trip.
+// isolating the n-gram key derivation + format round-trip. It runs across gram
+// sizes 2 (32-bit packing), 3 (ASCII 8-bit packing), and 8 (the packing
+// boundary) so every keying path is pinned against the builder, not just gram 3.
 func TestConformance(t *testing.T) {
-	idx := rs.NewIndex(3)
+	cases := []struct {
+		gram    int
+		queries []string
+	}{
+		{2, []string{"la", "co", "wa", "naïve", "café", "notes", "zz"}},
+		{3, []string{
+			"lattes", "legend", "legends", "coffee", "history", "war", "peace",
+			"machine", "roasting", "café", "cafés", "naïve", "society", "notes",
+			"volume", "naïveté", "Ⅰ", "notes②", "xyzzy", "zz",
+		}},
+		{8, []string{"roasting", "learning", "absentee"}},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("gram%d", tc.gram), func(t *testing.T) {
+			runConformance(t, tc.gram, tc.queries)
+		})
+	}
+}
+
+// runConformance builds the corpus at gramSize, round-trips it through the
+// transcoder + reference reader, and asserts every query matches roaringsearch.
+func runConformance(t *testing.T, gram int, queries []string) {
+	t.Helper()
+	idx := rs.NewIndex(gram)
 	for i, d := range corpus {
 		idx.Add(uint32(i), d)
 	}
@@ -60,16 +89,12 @@ func TestConformance(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	queries := []string{
-		"lattes", "legend", "legends", "coffee", "history", "war", "peace",
-		"machine", "roasting", "café", "cafés", "naïve", "society", "xyzzy", "zz",
-	}
 	for _, q := range queries {
 		want := idx.Search(q)
-		got := searchRR(t, ix, q)
+		got := searchRR(t, ix, q, gram)
 		sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
 		if !equalU32(want, got) {
-			t.Errorf("query %q: roaringsearch=%v  roaringrange=%v", q, want, got)
+			t.Errorf("gram=%d query %q: roaringsearch=%v  roaringrange=%v", gram, q, want, got)
 		}
 	}
 }
@@ -77,9 +102,9 @@ func TestConformance(t *testing.T) {
 // searchRR reproduces a strict-AND search through the roaringrange reference
 // reader: derive the query's n-gram keys, OR each key's head+tail, AND the keys
 // together. An absent key makes the strict-AND result empty.
-func searchRR(t *testing.T, ix *rr.Index, q string) []uint32 {
+func searchRR(t *testing.T, ix *rr.Index, q string, gram int) []uint32 {
 	t.Helper()
-	keys := rr.NgramKeys(q, 3)
+	keys := rr.NgramKeys(q, gram)
 	if len(keys) == 0 {
 		return nil
 	}

@@ -1,6 +1,6 @@
 # roaringrange_reader
 
-Browser-side reader for the RRS v2 (`RRS2`) range-fetchable static search index.
+Browser-side reader for the RRS (`RRSI`) range-fetchable static search index.
 See [`../FORMAT.md`](../FORMAT.md) for the frozen byte-layout contract.
 
 The reader boots by downloading the 16-byte header plus the sparse index once

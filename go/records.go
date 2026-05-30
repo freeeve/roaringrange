@@ -133,6 +133,9 @@ func (s *RecordStore) Get(id uint32) (data []byte, ok bool, err error) {
 	}
 	start := binary.LittleEndian.Uint64(pair[0:8])
 	end := binary.LittleEndian.Uint64(pair[8:16])
+	if end < start {
+		return nil, false, ErrTruncated
+	}
 	buf := make([]byte, end-start)
 	if len(buf) > 0 {
 		if _, err := s.bin.ReadAt(buf, int64(start)); err != nil {

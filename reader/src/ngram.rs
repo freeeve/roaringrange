@@ -3,6 +3,8 @@
 //! The reader must reproduce the builder's tokenizer exactly so a query resolves
 //! to the same dictionary keys. See `FORMAT.md` for the frozen contract.
 
+use unicode_general_category::{get_general_category, GeneralCategory};
+
 /// FNV-1a 64-bit offset basis.
 const FNV_OFFSET64: u64 = 14695981039346656037;
 /// FNV-1a 64-bit prime.
@@ -46,11 +48,32 @@ pub fn ngram_keys(query: &str, gram_size: usize) -> Vec<u64> {
 fn normalize(s: &str) -> Vec<char> {
     let mut out = Vec::with_capacity(s.len());
     for c in s.chars() {
-        if c.is_alphabetic() || c.is_numeric() {
+        if is_letter_or_digit(c) {
             out.push(to_lower_rune(c));
         }
     }
     out
+}
+
+/// Reports whether `c` is a Unicode letter (general category L*) or decimal
+/// digit (Nd), matching Go's `unicode.IsLetter || unicode.IsDigit`. Std's
+/// `is_alphabetic`/`is_numeric` are broader — they also keep letter-numbers and
+/// other-numbers (Nl/No, e.g. Ⅰ, ², ①) that the Go builder drops — so we test
+/// the general category directly to stay byte-compatible with the builder.
+fn is_letter_or_digit(c: char) -> bool {
+    use GeneralCategory::{
+        DecimalNumber, LowercaseLetter, ModifierLetter, OtherLetter, TitlecaseLetter,
+        UppercaseLetter,
+    };
+    matches!(
+        get_general_category(c),
+        UppercaseLetter
+            | LowercaseLetter
+            | TitlecaseLetter
+            | ModifierLetter
+            | OtherLetter
+            | DecimalNumber
+    )
 }
 
 /// Lowercases a single char to a single char, matching Go's `unicode.ToLower`
@@ -162,5 +185,19 @@ mod tests {
         assert_eq!(keys[0], expected);
         // and it must differ from the 8-bit packing of the ASCII bytes.
         assert_ne!(keys[0], (b'a' as u64) << 16);
+    }
+
+    #[test]
+    fn drops_letter_numbers_and_other_numbers_like_go() {
+        // The builder filters on Go's `IsLetter || IsDigit` (categories L* + Nd).
+        // Std's `is_alphabetic`/`is_numeric` would also keep letter-numbers (Nl,
+        // e.g. Ⅰ U+2160) and other-numbers (No, e.g. ² U+00B2, ① U+2460); the
+        // reader must drop them to tokenize identically to the builder.
+        assert!(normalize("Ⅰ②①").is_empty());
+        // Ⅰ dropped -> "ab" (too short); ² and ① dropped -> "abc".
+        assert!(ngram_keys("Ⅰab", 3).is_empty());
+        assert_eq!(ngram_keys("a²b①c", 3), vec![6382179]);
+        // Letters (any L*) and decimal digits (Nd) are kept and lowercased.
+        assert_eq!(normalize("Ab9"), vec!['a', 'b', '9']);
     }
 }

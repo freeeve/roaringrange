@@ -1,4 +1,4 @@
-// Command openalexbuild builds the RRS2 text index, record store, and facet
+// Command openalexbuild builds the RRSI text index, record store, and facet
 // sidecar for an OpenAlex Works snapshot subset, assigning doc IDs in
 // DESCENDING popularity (cited_by_count) so ascending doc ID == popularity rank
 // and the head of every posting holds the most-cited works.
@@ -9,7 +9,7 @@
 //	         line) -> items {indexed text, record JSON, popularity, facets}.
 //	Phase 2: stable-sort items by popularity desc; doc ID = position.
 //	Phase 3: build the roaringsearch index + record store in that order and
-//	         transcode the index to RRS2.
+//	         transcode the index to RRSI.
 //	Phase 4: write the RRSF facet sidecar.
 //
 // OpenAlex snapshot (CC0): the Works bulk dump lives at
@@ -280,7 +280,7 @@ func appendField(b *strings.Builder, s string) {
 }
 
 // buildIndexAndStore builds the roaringsearch index and the record store in
-// popularity-ranked order (doc ID == rank), then transcodes the index to RRS2.
+// popularity-ranked order (doc ID == rank), then transcodes the index to RRSI.
 // The record store is a blob of concatenated record JSON plus a little-endian
 // uint64 offset index of length len(items)+1, mirroring buildranked.
 func buildIndexAndStore(items []item, ftsr, rrs, binP, idxP string) error {

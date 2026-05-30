@@ -66,7 +66,7 @@ Outputs:
 
 | File                     | Contents                                                        |
 |--------------------------|-----------------------------------------------------------------|
-| `openalex.rrs`           | RRS2 trigram text index (range-fetchable head/tail postings)    |
+| `openalex.rrs`           | RRSI trigram text index (range-fetchable head/tail postings)    |
 | `openalex.rrf`           | RRSF facet sidecar: `year`, `type`, `oa`, `language`, `topic`   |
 | `openalex-records.bin`   | Concatenated record JSON, in popularity-rank order              |
 | `openalex-records.idx`   | Little-endian `uint64` offsets, length `numDocs+1`              |

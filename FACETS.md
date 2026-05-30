@@ -12,9 +12,9 @@ postings split into head/tail and range-fetch identically.
 This is shipped in two phases:
 
 - **Phase 1 (implemented): sidecar `RRSF` file.** A companion `*.rrf` file fetched
-  alongside the `RRS2` text index. The text index is untouched; the reader opens two
-  resources. Smallest end-to-end slice, no change to the frozen `RRS2` contract.
-- **Phase 2 (planned): unified `RRS3` section container.** One file with a tiny
+  alongside the `RRSI` text index. The text index is untouched; the reader opens two
+  resources. Smallest end-to-end slice, no change to the frozen `RRSI` contract.
+- **Phase 2 (planned): unified section container.** One file with a tiny
   section directory (`TEXT` / `FACETS` / `SORTCOLS` / `RECORDS`), so a single atomic,
   versioned object holds everything. The `FACETS` section body equals the `RRSF`
   body below; only the framing changes.

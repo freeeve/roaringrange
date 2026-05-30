@@ -11,6 +11,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 roaring = "0.11"
+# Unicode general-category lookup so the tokenizer filters exactly on letters
+# (L*) and decimal digits (Nd), matching the Go builder's `unicode.IsLetter ||
+# unicode.IsDigit`. Pure data table, no transitive deps, builds for wasm.
+unicode-general-category = "1"
 # `join_all` (futures-util) drives the concurrent read waves; `executor`
 # provides `block_on` for the native tests. Default features are disabled to
 # keep the native build light: only the std combinators and the executor are
