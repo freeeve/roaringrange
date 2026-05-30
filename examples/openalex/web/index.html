@@ -519,7 +519,7 @@
     </main>
 
     <script type="module">
-      import init, { RrsIndex } from "./roaringrange_reader.js";
+      import init, { RrsIndex, RrsRecords } from "./roaringrange_reader.js";
 
       /* -------- byte/request accounting via fetch interception (from webtest) -------- */
       const realFetch = self.fetch.bind(self);
@@ -542,7 +542,7 @@
       const RRF_URL = new URL("openalex.rrf", location.href).href;
       const IDX_URL = new URL("records.idx", location.href).href;
       const BIN_URL = new URL("records.bin", location.href).href;
-      const PAGE = 25, GAP = 32;
+      const PAGE = 25;
 
       const $ = (id) => document.getElementById(id);
       const dec = new TextDecoder();
@@ -564,11 +564,12 @@
       const SCROLLABLE = new Set(["year", "language", "topic"]);
       const FACET_CAP = 100;             // max categories rendered per field (real fields run to tens of thousands)
 
-      let idx = null, cur = null;
+      let idx = null, cur = null, records = null;
       let offset = 0, lastPage = [], lastTotal = 0;
       const activeFilters = new Set();   // "field\tcategory"
       const recCache = new Map();        // docID -> record JSON
       const countSpans = new Map();      // "field\tname" -> count <span> (live, updated per search)
+      const facetGroups = [];            // [{ list, more, cells:[{key,item}] }] — registry for re-sorting on filtered counts
       let restoring = false;             // suppress URL writes while applying URL -> state
 
       /* -------- deep-linking: keep the address bar in sync with the active search --------
@@ -623,31 +624,19 @@
         return { q, offset: Number.isFinite(p) && p > 0 ? p : 0 };
       }
 
-      /* -------- record fetch: run-coalesced HTTP Range reads (from webtest viaRuns) -------- */
-      function runs(ids) {
-        const r = [];
-        if (!ids.length) return r;
-        let s = ids[0], p = ids[0];
-        for (let k = 1; k < ids.length; k++) {
-          if (ids[k] - p <= GAP) p = ids[k]; else { r.push([s, p]); s = ids[k]; p = ids[k]; }
-        }
-        r.push([s, p]);
-        return r;
-      }
-      async function readRun(a, b, map) {
-        const ir = await realFetch(IDX_URL, { headers: { Range: `bytes=${a * 8}-${(b + 1) * 8 + 7}` } });
-        const idv = new DataView(await ir.arrayBuffer());
-        const o = (i) => Number(idv.getBigUint64((i - a) * 8, true));
-        const s = o(a), e = o(b + 1);
-        const rr = await realFetch(BIN_URL, { headers: { Range: `bytes=${s}-${e - 1}` } });
-        const buf = new Uint8Array(await rr.arrayBuffer());
-        for (let id = a; id <= b; id++) {
-          try { map.set(id, JSON.parse(dec.decode(buf.subarray(o(id) - s, o(id + 1) - s)))); } catch (_) {}
-        }
-      }
+      /* -------- record fetch: doc IDs -> record JSON via the RRSR RecordStore --------
+         RrsRecords.getMany issues the offset-index and record-blob HTTP Range reads
+         (one offset-pair read + one blob slice per doc ID) inside the WASM reader.
+         Returns a Map<docID, recordObj>; unparseable/out-of-range entries are skipped. */
       async function fetchRecords(ids) {
         const map = new Map();
-        await Promise.all(runs(ids).map(([a, b]) => readRun(a, b, map)));
+        if (!records || !ids.length) return map;
+        const blobs = await records.getMany(Uint32Array.from(ids));
+        for (let i = 0; i < ids.length; i++) {
+          const bytes = blobs[i];
+          if (!bytes) continue;
+          try { map.set(ids[i], JSON.parse(dec.decode(bytes))); } catch (_) {}
+        }
         return map;
       }
 
@@ -672,6 +661,7 @@
         const byField = new Map(groups.map((g) => [g.field, g]));
         els.facetgroups.innerHTML = "";
         countSpans.clear();
+        facetGroups.length = 0;
 
         const fields = FIELD_ORDER.filter((f) => byField.has(f))
           .concat(groups.map((g) => g.field).filter((f) => !FIELD_ORDER.includes(f)));
@@ -708,6 +698,7 @@
 
           const list = document.createElement("div");
           list.className = "flist" + (scrollable ? " scroll" : "");
+          const cells = [];
 
           for (const cat of shown) {
             const key = `${field}\t${cat.name}`;
@@ -729,14 +720,17 @@
             });
             countSpans.set(key, item.querySelector(".cnt"));
             list.appendChild(item);
+            cells.push({ key, item });
           }
 
+          let more = null;
           if (hidden > 0) {
-            const more = document.createElement("div");
+            more = document.createElement("div");
             more.className = "fmore";
             more.textContent = `+${fmt(hidden)} more (showing top ${FACET_CAP} by frequency)`;
             list.appendChild(more);
           }
+          facetGroups.push({ list, more, cells });
 
           wrap.appendChild(list);
           els.facetgroups.appendChild(wrap);
@@ -760,6 +754,13 @@
         }
         for (const [key, span] of countSpans) {
           span.textContent = fmt(counts.get(key) || 0);
+        }
+        /* Reorder each rendered group so the highest current (filtered) counts stay
+           on top; the "+N more" note, if present, is kept last. */
+        for (const grp of facetGroups) {
+          grp.cells.sort((a, b) => (counts.get(b.key) || 0) - (counts.get(a.key) || 0));
+          for (const cell of grp.cells) grp.list.appendChild(cell.item);
+          if (grp.more) grp.list.appendChild(grp.more);
         }
       }
 
@@ -914,6 +915,9 @@
 
         try { await idx.openFacets(RRF_URL); }
         catch (_) { /* facet sidecar optional */ }
+
+        try { records = await RrsRecords.open(IDX_URL, BIN_URL); }
+        catch (e) { els.mSummary.textContent = `failed to open record store: ${e}`; return; }
 
         const bootMs = performance.now() - t0;
         setPerf({ boot: bootMs, summary: "ready" });

@@ -5,6 +5,7 @@ examples/openalex/builder/target/
 
 # Go binaries
 /openalexbuild
+examples/openalex/openalex
 *.test
 
 # index / data build artifacts (never commit large generated indexes)
