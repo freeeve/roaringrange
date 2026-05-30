@@ -126,19 +126,14 @@
         align-items: center;
         gap: 11px;
       }
-      section.step > h2 .num {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 26px; height: 26px;
-        border-radius: 7px;
-        background: var(--accent-soft);
-        color: var(--accent-ink);
-        font-family: var(--mono);
-        font-size: 13px;
-        font-weight: 500;
-        flex: none;
+      section.step > h3 {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--ink);
+        margin: 28px 0 10px;
       }
+      section.step > h3:first-of-type { margin-top: 0; }
+      figure.diagram + figure.diagram { margin-top: 16px; }
 
       figure.diagram {
         margin: 0;
@@ -220,7 +215,9 @@
         </p>
 
         <section class="step">
-          <h2><span class="num" aria-hidden="true">1</span> The file format</h2>
+          <h2>File formats</h2>
+
+          <h3>Text index (RRS)</h3>
           <figure class="diagram">
             <img src="format.svg" alt="RRS index file layout" />
             <figcaption>
@@ -229,10 +226,8 @@
               citation count, so the most-cited works sit in the "head" and top-K is free.
             </figcaption>
           </figure>
-        </section>
 
-        <section class="step">
-          <h2><span class="num" aria-hidden="true">2</span> Facets — filtering without a backend</h2>
+          <h3>Facets (RRSF) — filtering without a backend</h3>
           <figure class="diagram">
             <img src="facets.svg" alt="RRSF facet sidecar layout" />
             <figcaption>
@@ -242,10 +237,8 @@
               posting. Within a field categories OR together; across fields they AND.
             </figcaption>
           </figure>
-        </section>
 
-        <section class="step">
-          <h2><span class="num" aria-hidden="true">3</span> The record store</h2>
+          <h3>Record store (RRSR)</h3>
           <figure class="diagram">
             <img src="records.svg" alt="RRSR record store layout" />
             <figcaption>
@@ -259,7 +252,7 @@
         </section>
 
         <section class="step">
-          <h2><span class="num" aria-hidden="true">4</span> Searching in the browser</h2>
+          <h2>Searching in the browser</h2>
           <figure class="diagram">
             <img src="search.svg" alt="In-browser search via HTTP range reads" />
             <figcaption>
