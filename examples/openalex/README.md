@@ -10,7 +10,7 @@ public `openalex` S3 bucket and needs no AWS account (`--no-sign-request`).
 ## Pipeline
 
 ```
-download.sh  ──▶  openalexbuild  ──▶  upload (S3/CloudFront)  ──▶  demo
+download.sh  ──▶  build (Go or Rust)  ──▶  upload (S3/CloudFront)  ──▶  demo
  (subset .gz)     (.rrs/.rrf/.bin/.idx)
 ```
 
@@ -29,18 +29,37 @@ the **full** Works dump (~330 GB compressed / ~1.6 TB raw).
 
 ### 2. Build the index
 
-The loader lives in the `rr-e2e` module (it uses the local `roaringrange` /
-`roaringsearch` via `replace` directives).
+The loader is this example's own Go module (it pulls in `roaringsearch` only to
+build the FTSR index that `roaringrange` transcodes; the core stays free of that
+dependency via the `replace` directive in `go.mod`).
 
 ```bash
-cd /Users/efreeman/rr-e2e
-go run ./openalexbuild \
+cd examples/openalex
+go run . \
   -in "/tmp/openalex/works/*/*.gz" \
   -rrs /tmp/openalex.rrs \
   -facets /tmp/openalex.rrf \
   -bin /tmp/openalex-records.bin \
   -idx /tmp/openalex-records.idx \
   -limit 2000000          # 0 = all matched works
+```
+
+For corpora too large to hold in memory, add `-stream` for a two-pass build
+(rank pass + index pass) that never holds the works' text in RAM; the index and
+facet bitmaps still build in memory:
+
+```bash
+go run . -stream -in "/tmp/openalex/works/*/*.gz"
+```
+
+A parallel **Rust** builder produces byte-identical artifacts without
+roaringsearch/FTSR/transcode (it writes RRS/RRSF directly via the reader
+crate's `build` module and fans parsing out across files with rayon — faster
+for the full snapshot):
+
+```bash
+cd builder
+cargo run --release -- -in "/tmp/openalex/works/*/*.gz" -limit 2000000
 ```
 
 Outputs:
@@ -90,7 +109,7 @@ manifest
 updated_date=YYYY-MM-DD/<NNNN>_part_<NN>.gz   # gzip JSON Lines, one Work/line
 ```
 
-Work fields consumed by `openalexbuild`:
+Work fields consumed by the builder:
 
 | JSON field                              | Used as                          |
 |-----------------------------------------|----------------------------------|

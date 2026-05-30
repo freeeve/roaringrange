@@ -31,10 +31,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	rr "github.com/freeeve/roaringrange"
 	rs "github.com/freeeve/roaringsearch"
 )
@@ -195,29 +193,11 @@ func loadWorks(files []string, limit int) []item {
 // prepare turns a decoded Work into an item: it builds the indexed text, the
 // record JSON, and extracts the facet values.
 func prepare(w *work) item {
-	id := trimOpenAlexID(w.ID)
-	authors := authorNames(w)
-	venue := w.PrimaryLocation.Source.DisplayName
-	abstract := reconstructAbstract(w.AbstractIdx)
-
-	var sb strings.Builder
-	sb.WriteString(w.DisplayName)
-	appendField(&sb, abstract)
-	appendField(&sb, authors)
-	appendField(&sb, venue)
-
-	year := ""
-	if w.PublicationYear != 0 {
-		year = strconv.Itoa(w.PublicationYear)
-	}
-	rec := record{ID: id, T: w.DisplayName, A: authors, Y: w.PublicationYear, V: venue, C: w.CitedByCount}
-	rj, _ := json.Marshal(rec)
-
 	return item{
-		text:  sb.String(),
-		rec:   rj,
+		text:  buildText(w),
+		rec:   buildRecord(w),
 		pop:   w.CitedByCount,
-		year:  year,
+		year:  facetValue(w, 0),
 		typ:   w.Type,
 		oa:    w.OpenAccess.OAStatus,
 		lang:  w.Language,
@@ -364,68 +344,14 @@ func buildIndexAndStore(items []item, ftsr, rrs, binP, idxP string) error {
 // are emitted in order: year, type, oa, language, topic. Category strings are
 // interned per field so repeated values share a single bitmap.
 func buildFacets(items []item, path string) error {
-	fieldNames := []string{"year", "type", "oa", "language", "topic"}
-	value := func(it item, field int) string {
-		switch field {
-		case 0:
-			return it.year
-		case 1:
-			return it.typ
-		case 2:
-			return it.oa
-		case 3:
-			return it.lang
-		default:
-			return it.topic
-		}
-	}
-
-	// One ordered category list + lookup table per field, keyed by value string.
-	cats := make([]map[string]*roaring.Bitmap, len(fieldNames))
-	order := make([][]string, len(fieldNames))
-	for i := range cats {
-		cats[i] = make(map[string]*roaring.Bitmap)
-	}
+	fa := newFacetAccum()
 	for rank, it := range items {
-		r := uint32(rank)
-		for fi := range fieldNames {
-			v := value(it, fi)
-			if v == "" {
-				continue
-			}
-			bm := cats[fi][v]
-			if bm == nil {
-				bm = roaring.New()
-				cats[fi][v] = bm
-				order[fi] = append(order[fi], v)
-			}
-			bm.Add(r)
-		}
+		doc := uint32(rank)
+		fa.addValue(doc, 0, it.year)
+		fa.addValue(doc, 1, it.typ)
+		fa.addValue(doc, 2, it.oa)
+		fa.addValue(doc, 3, it.lang)
+		fa.addValue(doc, 4, it.topic)
 	}
-
-	fields := make([]rr.FacetField, 0, len(fieldNames))
-	for fi, name := range fieldNames {
-		ff := rr.FacetField{Name: name}
-		for _, v := range order[fi] {
-			ff.Categories = append(ff.Categories, rr.FacetCategory{Name: v, Bitmap: cats[fi][v]})
-		}
-		fields = append(fields, ff)
-	}
-
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	bw := bufio.NewWriterSize(f, 1<<20)
-	if err := rr.WriteFacets(bw, fields); err != nil {
-		return err
-	}
-	if err := bw.Flush(); err != nil {
-		return err
-	}
-	fi, _ := os.Stat(path)
-	log.Printf("wrote facets %s (%d bytes): years=%d types=%d oa=%d langs=%d topics=%d",
-		path, fi.Size(), len(order[0]), len(order[1]), len(order[2]), len(order[3]), len(order[4]))
-	return nil
+	return fa.write(path)
 }

@@ -339,20 +339,26 @@ func newFacetAccum() *facetAccum {
 	return fa
 }
 
+// add records doc's value for every facet field of work w.
 func (fa *facetAccum) add(doc uint32, w *work) {
 	for fi := range facetFields {
-		v := facetValue(w, fi)
-		if v == "" {
-			continue
-		}
-		bm := fa.cats[fi][v]
-		if bm == nil {
-			bm = roaring.New()
-			fa.cats[fi][v] = bm
-			fa.order[fi] = append(fa.order[fi], v)
-		}
-		bm.Add(doc)
+		fa.addValue(doc, fi, facetValue(w, fi))
 	}
+}
+
+// addValue records doc under category v of field fi, interning v and preserving
+// first-seen order. Empty values are skipped.
+func (fa *facetAccum) addValue(doc uint32, fi int, v string) {
+	if v == "" {
+		return
+	}
+	bm := fa.cats[fi][v]
+	if bm == nil {
+		bm = roaring.New()
+		fa.cats[fi][v] = bm
+		fa.order[fi] = append(fa.order[fi], v)
+	}
+	bm.Add(doc)
 }
 
 func (fa *facetAccum) write(path string) error {
