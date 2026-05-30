@@ -1,0 +1,21 @@
+[package]
+name = "roaringrange-python"
+version = "0.1.0"
+edition = "2021"
+description = "Python bindings for building roaringrange static, range-fetchable search datasets"
+license = "MIT"
+repository = "https://github.com/freeeve/roaringrange"
+
+# Builds a Python extension module named `roaringrange`. The reader/build logic
+# is reused from the core Rust crate; this crate is only the PyO3 glue.
+[lib]
+name = "roaringrange"
+crate-type = ["cdylib"]
+
+[dependencies]
+# `extension-module` defers libpython symbols to import time (maturin sets the
+# macOS `-undefined dynamic_lookup` flag); `abi3-py38` builds one wheel for
+# CPython 3.8+ instead of one per minor version.
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+roaring = "0.11"
+roaringrange_reader = { path = "../reader" }
