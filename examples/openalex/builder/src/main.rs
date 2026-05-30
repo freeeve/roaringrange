@@ -15,18 +15,30 @@
 //! the public OpenAlex bucket streamed directly over HTTPS (no download, no
 //! credentials) — its `manifest` lists the objects. Pass through `-maxfiles N`
 //! to cap the shard count for a quick run.
+//!
+//! For a corpus whose in-RAM index exceeds memory, `-chunks K` (K>1) partitions
+//! the doc-ID space into K contiguous ranges and builds them one at a time, so
+//! peak memory is one chunk's index plus the merge's per-key working set rather
+//! than the whole index. Each chunk re-streams every source (skipping works
+//! outside its doc-ID range), writes a key-sorted partial + a records temp file,
+//! and ORs its facet postings into running accumulators; after the last chunk the
+//! partials are merged into one standard `.rrs`, the record temps are concatenated
+//! in doc-ID order, and the accumulated facets are written. This re-streams the
+//! sources K times — acceptable for an offline build. `-chunks 1` (the default) is
+//! the original single-pass path and stays byte-for-byte unchanged.
 
 use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use roaringrange_reader::build::{
-    split_posting, write_records, write_rrs, write_rrsf, FacetCatOut, FacetFieldOut, DEFAULT_STRIDE,
+    merge_partials_to_rrs, split_posting, write_partial, write_records, write_rrs, write_rrsf,
+    FacetCatOut, FacetFieldOut, DEFAULT_STRIDE,
 };
 use roaringrange_reader::ngram_keys;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -127,6 +139,7 @@ fn main() {
     let idx_path = arg(&args, "-idx", "/tmp/openalex-records.idx");
     let limit: usize = arg(&args, "-limit", "0").parse().unwrap_or(0);
     let maxfiles: usize = arg(&args, "-maxfiles", "0").parse().unwrap_or(0);
+    let chunks: usize = arg(&args, "-chunks", "1").parse().unwrap_or(1).max(1);
 
     let mut sources = resolve_sources(&in_arg);
     if sources.is_empty() {
@@ -163,10 +176,27 @@ fn main() {
         .collect();
     drop(rows);
 
+    // Chunked path: bounded-memory build for indexes larger than RAM.
+    if chunks > 1 {
+        build_chunked(
+            &sources,
+            &id_to_doc,
+            n,
+            chunks,
+            &rrs_path,
+            &facets_path,
+            &bin_path,
+            &idx_path,
+            t0,
+        );
+        return;
+    }
+
     // Pass 2: tokenize + index + facets + records, fanned out across shards.
     let t1 = Instant::now();
-    let shards: Vec<Mutex<HashMap<u64, RoaringBitmap>>> =
-        (0..KEY_SHARDS).map(|_| Mutex::new(HashMap::new())).collect();
+    let shards: Vec<Mutex<HashMap<u64, RoaringBitmap>>> = (0..KEY_SHARDS)
+        .map(|_| Mutex::new(HashMap::new()))
+        .collect();
     let facets: Vec<Mutex<HashMap<String, RoaringBitmap>>> = (0..FACET_FIELDS.len())
         .map(|_| Mutex::new(HashMap::new()))
         .collect();
@@ -268,7 +298,11 @@ fn main() {
         t4.elapsed().as_secs_f64()
     );
 
-    eprintln!("DONE: {} docs in {:.1}s total", n, t0.elapsed().as_secs_f64());
+    eprintln!(
+        "DONE: {} docs in {:.1}s total",
+        n,
+        t0.elapsed().as_secs_f64()
+    );
 }
 
 /// Resolves `-in` to input shards: an `s3://…/` prefix is enumerated from the
@@ -471,6 +505,339 @@ fn build_source(
     recs
 }
 
+/// Builds the index in `chunks` contiguous doc-ID ranges, one at a time, so peak
+/// memory is a single chunk's index plus the merge's per-key working set rather
+/// than the whole index. Re-streams every source once per chunk (skipping works
+/// outside the chunk's doc-ID range), writing a key-sorted partial and a records
+/// temp file per chunk and ORing each chunk's facet postings into running
+/// accumulators (chunk ranges are disjoint, so OR = union). After the last chunk,
+/// merges the partials into one standard `.rrs`, concatenates the record temps in
+/// doc-ID order into the final store, and writes the accumulated facets — yielding
+/// the same outputs the single-pass path would, in bounded memory.
+#[allow(clippy::too_many_arguments)]
+fn build_chunked(
+    sources: &[Source],
+    id_to_doc: &HashMap<u64, u32>,
+    n: usize,
+    chunks: usize,
+    rrs_path: &str,
+    facets_path: &str,
+    bin_path: &str,
+    idx_path: &str,
+    t0: Instant,
+) {
+    let chunk_size = n.div_ceil(chunks);
+    eprintln!(
+        "chunked build: {chunks} chunks of ~{chunk_size} docs each (re-streams sources {chunks}×)"
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let stamp = std::process::id();
+    let mut partial_paths: Vec<PathBuf> = Vec::with_capacity(chunks);
+    let mut record_paths: Vec<PathBuf> = Vec::with_capacity(chunks);
+
+    // Running per-(field, value) facet postings, unioned across chunks.
+    let mut facet_acc: Vec<HashMap<String, RoaringBitmap>> =
+        (0..FACET_FIELDS.len()).map(|_| HashMap::new()).collect();
+
+    for c in 0..chunks {
+        let lo = (c * chunk_size) as u32;
+        let hi = (((c + 1) * chunk_size).min(n)) as u32;
+        if lo >= hi {
+            continue;
+        }
+        let tc = Instant::now();
+
+        // This chunk's sharded text bitmaps + facet bitmaps, populated in parallel.
+        let shards: Vec<Mutex<HashMap<u64, RoaringBitmap>>> = (0..KEY_SHARDS)
+            .map(|_| Mutex::new(HashMap::new()))
+            .collect();
+        let facets: Vec<Mutex<HashMap<String, RoaringBitmap>>> = (0..FACET_FIELDS.len())
+            .map(|_| Mutex::new(HashMap::new()))
+            .collect();
+
+        let per_file: Vec<Vec<(u32, Vec<u8>)>> = sources
+            .par_iter()
+            .map(|s| build_source_range(s, id_to_doc, lo, hi, &shards, &facets))
+            .collect();
+        let indexed: usize = per_file.iter().map(|v| v.len()).sum();
+
+        // Records for this chunk, placed at their offset within [lo, hi).
+        let mut chunk_recs: Vec<Vec<u8>> = vec![Vec::new(); (hi - lo) as usize];
+        for fr in per_file {
+            for (d, rec) in fr {
+                chunk_recs[(d - lo) as usize] = rec;
+            }
+        }
+        let rpath = tmp_dir.join(format!("rr_chunk_{stamp}_{c}.recs"));
+        write_chunk_records(&rpath, &chunk_recs).expect("write chunk records");
+        record_paths.push(rpath);
+        drop(chunk_recs);
+
+        // Serialize this chunk's text postings to a key-sorted partial (full bitmaps).
+        let entries: Vec<(u64, Vec<u8>)> = shards
+            .into_par_iter()
+            .flat_map_iter(|m| {
+                m.into_inner()
+                    .unwrap()
+                    .into_iter()
+                    .map(|(k, bm)| {
+                        let mut b = Vec::with_capacity(bm.serialized_size());
+                        bm.serialize_into(&mut b).expect("serialize posting");
+                        (k, b)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let ngrams = entries.len();
+        let ppath = tmp_dir.join(format!("rr_chunk_{stamp}_{c}.partial"));
+        {
+            let out =
+                BufWriter::with_capacity(1 << 20, File::create(&ppath).expect("create partial"));
+            write_partial(out, entries).expect("write partial");
+        }
+        partial_paths.push(ppath);
+
+        // Union this chunk's facet postings into the running accumulators.
+        for (fi, m) in facets.into_iter().enumerate() {
+            for (val, bm) in m.into_inner().unwrap() {
+                match facet_acc[fi].get_mut(&val) {
+                    Some(acc) => *acc |= bm,
+                    None => {
+                        facet_acc[fi].insert(val, bm);
+                    }
+                }
+            }
+        }
+
+        eprintln!(
+            "chunk {c} [{lo},{hi}): indexed {indexed} works, {ngrams} ngrams in {:.1}s",
+            tc.elapsed().as_secs_f64()
+        );
+    }
+
+    // Merge partials into one standard RRS.
+    let t3 = Instant::now();
+    {
+        let mut rrs = File::create(rrs_path).expect("create rrs");
+        merge_partials_to_rrs(&partial_paths, GRAM as u16, DEFAULT_STRIDE, &mut rrs)
+            .expect("merge partials");
+    }
+    eprintln!(
+        "merged {} partials -> RRS {} ({} bytes) in {:.1}s",
+        partial_paths.len(),
+        rrs_path,
+        file_len(rrs_path),
+        t3.elapsed().as_secs_f64()
+    );
+
+    // Concatenate per-chunk record temps in doc-ID order into the final store.
+    let t2 = Instant::now();
+    concat_chunk_records(&record_paths, n, bin_path, idx_path).expect("concat records");
+    eprintln!(
+        "wrote record store {} (+{}) in {:.1}s",
+        bin_path,
+        idx_path,
+        t2.elapsed().as_secs_f64()
+    );
+
+    // Facets from the unioned accumulators.
+    let t4 = Instant::now();
+    let fields_out: Vec<FacetFieldOut> = facet_acc
+        .into_iter()
+        .enumerate()
+        .map(|(fi, map)| {
+            let cats = map
+                .into_iter()
+                .map(|(val, bm)| {
+                    let card = bm.len() as u32;
+                    let (head, tail) = split_posting(&bm);
+                    FacetCatOut {
+                        name: val,
+                        card,
+                        head,
+                        tail,
+                    }
+                })
+                .collect();
+            FacetFieldOut {
+                name: FACET_FIELDS[fi].to_string(),
+                cats,
+            }
+        })
+        .collect();
+    {
+        let out =
+            BufWriter::with_capacity(1 << 20, File::create(facets_path).expect("create facets"));
+        write_rrsf(out, fields_out).expect("write facets");
+    }
+    eprintln!(
+        "wrote facets {} ({} bytes) in {:.1}s",
+        facets_path,
+        file_len(facets_path),
+        t4.elapsed().as_secs_f64()
+    );
+
+    for p in partial_paths.iter().chain(record_paths.iter()) {
+        let _ = std::fs::remove_file(p);
+    }
+    eprintln!("DONE: {n} docs in {:.1}s total", t0.elapsed().as_secs_f64());
+}
+
+/// Pass-2 worker for a chunk: like [`build_source`] but indexes only works whose
+/// doc ID falls in `[lo, hi)`, returning that source's `(docID, record bytes)`
+/// pairs for the chunk.
+fn build_source_range(
+    src: &Source,
+    id_to_doc: &HashMap<u64, u32>,
+    lo: u32,
+    hi: u32,
+    shards: &[Mutex<HashMap<u64, RoaringBitmap>>],
+    facets: &[Mutex<HashMap<String, RoaringBitmap>>],
+) -> Vec<(u32, Vec<u8>)> {
+    let mut recs = Vec::new();
+    let reader = match open_source(src) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("skip {}: {e}", src.label());
+            return recs;
+        }
+    };
+    let mut buckets: Vec<Vec<u64>> = (0..KEY_SHARDS).map(|_| Vec::new()).collect();
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        if line.is_empty() {
+            continue;
+        }
+        let w: Work = match serde_json::from_str(&line) {
+            Ok(w) => w,
+            Err(_) => continue,
+        };
+        let title = w.display_name.as_deref().unwrap_or("");
+        if title.is_empty() {
+            continue;
+        }
+        let docid = match parse_wid(&w.id).and_then(|wid| id_to_doc.get(&wid)) {
+            Some(d) => *d,
+            None => continue,
+        };
+        // Skip works outside this chunk's doc-ID range.
+        if docid < lo || docid >= hi {
+            continue;
+        }
+
+        let abstract_ = reconstruct_abstract(&w.abstract_inverted_index);
+        let authors = author_names(&w);
+        let venue = w
+            .primary_location
+            .as_ref()
+            .and_then(|p| p.source.as_ref())
+            .and_then(|s| s.display_name.as_deref())
+            .unwrap_or("");
+        let topic = topic_name(&w);
+        let text = build_text(title, &abstract_, &authors, venue);
+
+        let keys = ngram_keys(&text, GRAM);
+        for b in buckets.iter_mut() {
+            b.clear();
+        }
+        for &k in &keys {
+            buckets[(k as usize) % KEY_SHARDS].push(k);
+        }
+        for (si, ks) in buckets.iter().enumerate() {
+            if ks.is_empty() {
+                continue;
+            }
+            let mut m = shards[si].lock().unwrap();
+            for &k in ks {
+                m.entry(k).or_default().insert(docid);
+            }
+        }
+
+        for (fi, map) in facets.iter().enumerate() {
+            let v = facet_value(&w, fi, &topic);
+            if v.is_empty() {
+                continue;
+            }
+            map.lock().unwrap().entry(v).or_default().insert(docid);
+        }
+
+        let id_trim = trim_openalex_id(&w.id);
+        recs.push((
+            docid,
+            build_record(
+                id_trim,
+                title,
+                &authors,
+                w.publication_year.unwrap_or(0),
+                venue,
+                w.cited_by_count.unwrap_or(0),
+            ),
+        ));
+    }
+    recs
+}
+
+/// Flushes a chunk's records (in chunk-local doc-ID order) to a temp file as a
+/// stream of `[len u32][bytes]` frames, so they can be concatenated later without
+/// holding all chunks' records in RAM.
+fn write_chunk_records(path: &PathBuf, recs: &[Vec<u8>]) -> std::io::Result<()> {
+    let mut w = BufWriter::with_capacity(1 << 20, File::create(path)?);
+    for rec in recs {
+        w.write_all(&(rec.len() as u32).to_le_bytes())?;
+        w.write_all(rec)?;
+    }
+    w.flush()
+}
+
+/// Concatenates the per-chunk record temps (written by [`write_chunk_records`] in
+/// ascending chunk order, each chunk in doc-ID order) into the final record store,
+/// emitting the `RRSR` layout directly so no chunk's records stay resident — only
+/// one record frame is held at a time. The chunk temps in order reconstruct the
+/// global doc-ID sequence (chunks are contiguous disjoint ranges), giving a store
+/// byte-identical to the single-pass path's [`write_records`] output.
+fn concat_chunk_records(
+    paths: &[PathBuf],
+    n: usize,
+    bin_path: &str,
+    idx_path: &str,
+) -> std::io::Result<()> {
+    use roaringrange_reader::build::RECORD_MAGIC;
+    let mut bin = BufWriter::with_capacity(1 << 20, File::create(bin_path)?);
+    let mut idx = BufWriter::with_capacity(1 << 20, File::create(idx_path)?);
+
+    idx.write_all(RECORD_MAGIC)?;
+    idx.write_all(&1u16.to_le_bytes())?; // version
+    idx.write_all(&0u16.to_le_bytes())?; // reserved
+    idx.write_all(&(n as u32).to_le_bytes())?; // count
+    idx.write_all(&0u32.to_le_bytes())?; // reserved2
+    idx.write_all(&0u64.to_le_bytes())?; // off[0] = 0
+
+    let mut off: u64 = 0;
+    for p in paths {
+        let mut r = BufReader::with_capacity(1 << 20, File::open(p)?);
+        loop {
+            let mut lb = [0u8; 4];
+            match r.read_exact(&mut lb) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
+            }
+            let mut bytes = vec![0u8; u32::from_le_bytes(lb) as usize];
+            r.read_exact(&mut bytes)?;
+            bin.write_all(&bytes)?;
+            off += bytes.len() as u64;
+            idx.write_all(&off.to_le_bytes())?;
+        }
+    }
+    bin.flush()?;
+    idx.flush()
+}
+
 /// Parses the numeric tail of an OpenAlex work id
 /// ("https://openalex.org/W2741809807" -> 2741809807), a compact, stable key
 /// across the two passes.
@@ -501,7 +868,11 @@ fn author_names(w: &Work) -> String {
 
 /// Primary topic display name, falling back to the first concept's.
 fn topic_name(w: &Work) -> String {
-    if let Some(n) = w.primary_topic.as_ref().and_then(|t| t.display_name.as_deref()) {
+    if let Some(n) = w
+        .primary_topic
+        .as_ref()
+        .and_then(|t| t.display_name.as_deref())
+    {
         if !n.is_empty() {
             return n.to_string();
         }
