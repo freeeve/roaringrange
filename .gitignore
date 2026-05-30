@@ -1,6 +1,7 @@
 # Rust / wasm-pack build output
 reader/target/
 reader/pkg/
+examples/openalex/builder/target/
 
 # Go binaries
 /openalexbuild
