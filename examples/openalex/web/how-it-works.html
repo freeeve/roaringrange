@@ -232,7 +232,34 @@
         </section>
 
         <section class="step">
-          <h2><span class="num" aria-hidden="true">2</span> Searching in the browser</h2>
+          <h2><span class="num" aria-hidden="true">2</span> Facets — filtering without a backend</h2>
+          <figure class="diagram">
+            <img src="facets.svg" alt="RRSF facet sidecar layout" />
+            <figcaption>
+              A companion <code>.rrf</code> file maps each category (year, type, language, …) to
+              a doc-ID bitmap. The header, tables, and names load once, so listing categories and
+              their full-corpus counts is free; selecting one fetches a single small "head"
+              posting. Within a field categories OR together; across fields they AND.
+            </figcaption>
+          </figure>
+        </section>
+
+        <section class="step">
+          <h2><span class="num" aria-hidden="true">3</span> The record store</h2>
+          <figure class="diagram">
+            <img src="records.svg" alt="RRSR record store layout" />
+            <figcaption>
+              A search returns ranked doc IDs; the record store turns each back into its stored
+              fields. An offset index (<code>.idx</code>) maps a doc ID to a byte range in the
+              record blob (<code>.bin</code>) — two ranged reads, and a results page of consecutive
+              IDs is one contiguous slice. Records are opaque bytes (here, compact JSON), so the
+              format never dictates your data model.
+            </figcaption>
+          </figure>
+        </section>
+
+        <section class="step">
+          <h2><span class="num" aria-hidden="true">4</span> Searching in the browser</h2>
           <figure class="diagram">
             <img src="search.svg" alt="In-browser search via HTTP range reads" />
             <figcaption>
