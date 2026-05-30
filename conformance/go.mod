@@ -20,4 +20,4 @@ require (
 	github.com/mschoch/smat v0.2.0 // indirect
 )
 
-replace github.com/freeeve/roaringrange => ../
+replace github.com/freeeve/roaringrange => ../go
