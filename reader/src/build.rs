@@ -233,38 +233,83 @@ pub fn write_facets<W: Write>(mut w: W, fields: Vec<FacetField>) -> io::Result<(
     Ok(())
 }
 
-/// `RRSR` record-store index magic. Public so a streaming record-store writer
-/// (one that frames records incrementally rather than via [`write_records`]) can
-/// emit the index header itself.
-pub const RECORD_MAGIC: &[u8; 4] = b"RRSR";
+/// `RRSR` record-store index magic.
+pub(crate) const RECORD_MAGIC: &[u8; 4] = b"RRSR";
 
-/// Writes a record store: the concatenated record bytes to `bin` (in doc-ID
-/// order) and a range-fetchable offset index to `idx`. Records are opaque to the
-/// library — the caller chooses the encoding (JSON, msgpack, …); the store just
-/// frames them for O(1) Range lookup by doc ID.
+/// Streaming writer for the `RRSR` record store: record bytes are pushed one at a
+/// time in doc-ID order, so a builder that produces records incrementally never
+/// has to hold them all in memory. The concatenated record bytes go to `bin` and
+/// a range-fetchable offset index to `idx`. Records are opaque to the library —
+/// the caller chooses the encoding (JSON, msgpack, …); the store just frames them
+/// for O(1) Range lookup by doc ID.
 ///
 /// The `idx` layout (all little-endian) is:
 /// - header 16 B: magic `"RRSR"`, version `u16` = 1, reserved `u16`, count `u32`
 ///   (number of records `N`), reserved2 `u32`;
 /// - then `N+1` × `u64` byte offsets into `bin`. Record `d` is
 ///   `bin[off[d] .. off[d+1]]`, located at `idx[16 + d*8 .. 16 + (d+2)*8]`.
-pub fn write_records<W: Write, X: Write>(
-    mut bin: W,
-    mut idx: X,
-    records: &[Vec<u8>],
-) -> io::Result<()> {
-    idx.write_all(RECORD_MAGIC)?;
-    idx.write_all(&1u16.to_le_bytes())?; // version
-    idx.write_all(&0u16.to_le_bytes())?; // reserved
-    idx.write_all(&(records.len() as u32).to_le_bytes())?; // count
-    idx.write_all(&0u32.to_le_bytes())?; // reserved2
+///
+/// `count` is written into the header up front, so the caller must know the
+/// record total in advance and call [`RecordWriter::write`] exactly that many
+/// times (the offset table is sized for `count + 1` entries).
+pub struct RecordWriter<W: Write, X: Write> {
+    bin: W,
+    idx: X,
+    /// Cumulative end offset into `bin` (== bytes written so far).
+    off: u64,
+    /// Number of records written so far.
+    written: u32,
+}
 
-    idx.write_all(&0u64.to_le_bytes())?; // off[0] = 0
-    let mut off: u64 = 0;
+impl<W: Write, X: Write> RecordWriter<W, X> {
+    /// Opens a streaming record store for `count` records, writing the 16-byte
+    /// `RRSR` header and the leading `off[0] = 0` to `idx`. Push each record with
+    /// [`RecordWriter::write`] in ascending doc-ID order.
+    pub fn new(bin: W, mut idx: X, count: u32) -> io::Result<Self> {
+        idx.write_all(RECORD_MAGIC)?;
+        idx.write_all(&1u16.to_le_bytes())?; // version
+        idx.write_all(&0u16.to_le_bytes())?; // reserved
+        idx.write_all(&count.to_le_bytes())?; // count
+        idx.write_all(&0u32.to_le_bytes())?; // reserved2
+        idx.write_all(&0u64.to_le_bytes())?; // off[0] = 0
+        Ok(Self {
+            bin,
+            idx,
+            off: 0,
+            written: 0,
+        })
+    }
+
+    /// Appends one record's bytes to the blob and its cumulative end offset to the
+    /// index. A zero-length record (a doc with no stored fields) stays addressable.
+    pub fn write(&mut self, rec: &[u8]) -> io::Result<()> {
+        self.bin.write_all(rec)?;
+        self.off += rec.len() as u64;
+        self.idx.write_all(&self.off.to_le_bytes())?;
+        self.written += 1;
+        Ok(())
+    }
+
+    /// Number of records written so far.
+    pub fn written(&self) -> u32 {
+        self.written
+    }
+
+    /// Flushes both underlying writers, surfacing any buffered-write error. Useful
+    /// when the writers are buffered (e.g. `BufWriter`) and the caller wants to
+    /// propagate a flush failure rather than rely on drop.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.bin.flush()?;
+        self.idx.flush()
+    }
+}
+
+/// Writes a record store from an in-memory slice of records, in doc-ID order — a
+/// convenience over [`RecordWriter`] for callers that already hold every record.
+pub fn write_records<W: Write, X: Write>(bin: W, idx: X, records: &[Vec<u8>]) -> io::Result<()> {
+    let mut w = RecordWriter::new(bin, idx, records.len() as u32)?;
     for rec in records {
-        bin.write_all(rec)?;
-        off += rec.len() as u64;
-        idx.write_all(&off.to_le_bytes())?;
+        w.write(rec)?;
     }
     Ok(())
 }

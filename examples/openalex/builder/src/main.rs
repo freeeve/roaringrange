@@ -33,7 +33,7 @@ use roaring::RoaringBitmap;
 use roaringrange_reader::build::chunk::{merge_partials_to_rrs, write_partial};
 use roaringrange_reader::build::{
     split_posting, write_facets, write_index, write_records, FacetCategory, FacetField,
-    DEFAULT_STRIDE,
+    RecordWriter, DEFAULT_STRIDE,
 };
 use roaringrange_reader::ngram_keys;
 use serde::Deserialize;
@@ -805,7 +805,7 @@ fn write_chunk_records(path: &PathBuf, recs: &[Vec<u8>]) -> std::io::Result<()> 
 
 /// Concatenates the per-chunk record temps (written by [`write_chunk_records`] in
 /// ascending chunk order, each chunk in doc-ID order) into the final record store,
-/// emitting the `RRSR` layout directly so no chunk's records stay resident — only
+/// streaming through a [`RecordWriter`] so no chunk's records stay resident — only
 /// one record frame is held at a time. The chunk temps in order reconstruct the
 /// global doc-ID sequence (chunks are contiguous disjoint ranges), giving a store
 /// byte-identical to the single-pass path's [`write_records`] output.
@@ -815,18 +815,10 @@ fn concat_chunk_records(
     bin_path: &str,
     idx_path: &str,
 ) -> std::io::Result<()> {
-    use roaringrange_reader::build::RECORD_MAGIC;
-    let mut bin = BufWriter::with_capacity(1 << 20, File::create(bin_path)?);
-    let mut idx = BufWriter::with_capacity(1 << 20, File::create(idx_path)?);
+    let bin = BufWriter::with_capacity(1 << 20, File::create(bin_path)?);
+    let idx = BufWriter::with_capacity(1 << 20, File::create(idx_path)?);
+    let mut writer = RecordWriter::new(bin, idx, n as u32)?;
 
-    idx.write_all(RECORD_MAGIC)?;
-    idx.write_all(&1u16.to_le_bytes())?; // version
-    idx.write_all(&0u16.to_le_bytes())?; // reserved
-    idx.write_all(&(n as u32).to_le_bytes())?; // count
-    idx.write_all(&0u32.to_le_bytes())?; // reserved2
-    idx.write_all(&0u64.to_le_bytes())?; // off[0] = 0
-
-    let mut off: u64 = 0;
     for p in paths {
         let mut r = BufReader::with_capacity(1 << 20, File::open(p)?);
         loop {
@@ -838,13 +830,10 @@ fn concat_chunk_records(
             }
             let mut bytes = vec![0u8; u32::from_le_bytes(lb) as usize];
             r.read_exact(&mut bytes)?;
-            bin.write_all(&bytes)?;
-            off += bytes.len() as u64;
-            idx.write_all(&off.to_le_bytes())?;
+            writer.write(&bytes)?;
         }
     }
-    bin.flush()?;
-    idx.flush()
+    writer.flush()
 }
 
 /// Parses the numeric tail of an OpenAlex work id
