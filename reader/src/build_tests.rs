@@ -491,6 +491,25 @@ fn facet_open_rejects_out_of_bounds_category_range() {
     );
 }
 
+#[test]
+fn facet_open_lazy_loads_only_top_n_heads_per_field() {
+    // Force the large-sidecar path (eager_limit = 0) with top_n = 1: only the
+    // highest-count category per field gets a head loaded, so filtered counts
+    // cover the top category and report 0 for the rest (whose full-corpus counts
+    // still come from the meta). This is what keeps boot small for a huge sidecar.
+    let rrsf = build_rrsf(&[(
+        "format",
+        vec![("ebook", bm(&[1, 2, 3])), ("audiobook", bm(&[1, 2]))],
+    )]);
+    let facets = block_on(FacetIndex::open_tuned(MemoryFetch::new(rrsf), 0, 1)).unwrap();
+    // Full-corpus counts (from the meta) are intact for both categories.
+    assert_eq!(facets.fields[0].categories[0].count, 3); // ebook
+    assert_eq!(facets.fields[0].categories[1].count, 2); // audiobook
+                                                         // Filtered counts over {1,2,3}: ebook (top-1, head loaded) = 3; audiobook
+                                                         // (beyond top-1, head not loaded) = 0.
+    assert_eq!(facets.counts(&bm(&[1, 2, 3])), vec![vec![3u64, 0]]);
+}
+
 /// Reads the exact `RRSR` bytes the Go writer emits (the golden layout asserted
 /// by roaringrange's Go `TestWriteRecordsGoldenLayout`) through the Rust
 /// [`RecordStore`]. This is the cross-language guard: it pins that Go-written

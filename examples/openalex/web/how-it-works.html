@@ -220,6 +220,20 @@
         </p>
 
         <section class="step">
+          <h2>What loads at boot</h2>
+          <figure class="diagram">
+            <img src="boot.svg" alt="What loads at boot versus what stays in S3" />
+            <figcaption>
+              Booting downloads only the small top of each file — the index header +
+              sparse index, the facet metadata + top category heads, and the record
+              store's header — a few MB in total. Everything else (the dictionary +
+              postings, the facet tails, and the record blobs — tens of GB) stays in
+              S3 and is range-fetched only as a query needs it.
+            </figcaption>
+          </figure>
+        </section>
+
+        <section class="step">
           <h2><span class="num" aria-hidden="true">1</span> The file format</h2>
           <figure class="diagram">
             <img src="format.svg" alt="RRS index file layout" />

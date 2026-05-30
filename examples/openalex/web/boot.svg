@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 392" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="What loads at boot versus what stays in S3 and is range-fetched on demand">
+  <defs>
+    <style>
+      .title{font-size:18px;font-weight:700;fill:#0f172a}
+      .sub{font-size:12.5px;fill:#64748b}
+      .file{font-size:12.5px;font-weight:700;fill:#0f172a}
+      .boot{font-size:11px;font-weight:700;fill:#3b5bdb}
+      .seg{font-size:10.5px;font-weight:700;fill:#fff}
+      .rest{font-size:11px;fill:#64748b}
+      .note{font-size:11px;fill:#475569}
+      .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    </style>
+    <pattern id="hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#eef2f7"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#d3dae6" stroke-width="3"/>
+    </pattern>
+  </defs>
+
+  <text x="32" y="34" class="title">What boots, and what stays in S3</text>
+  <text x="32" y="55" class="sub">the browser downloads only the small top of each file once (~3 MB total); the multi-GB bulk is range-fetched per query, never up front</text>
+
+  <!-- index.rrs -->
+  <rect x="70" y="96" width="150" height="176" rx="5" fill="url(#hatch)" stroke="#cbd5e1"/>
+  <rect x="70" y="96" width="150" height="18" rx="5" fill="#3b5bdb"/>
+  <text x="145" y="109" class="seg" text-anchor="middle">header + sparse</text>
+  <text x="145" y="200" class="rest" text-anchor="middle">dictionary +</text>
+  <text x="145" y="216" class="rest" text-anchor="middle">postings</text>
+  <text x="145" y="294" class="file" text-anchor="middle">index.rrs</text>
+  <text x="145" y="312" class="boot" text-anchor="middle">boot ~0.5 MB</text>
+  <text x="145" y="327" class="rest mono" text-anchor="middle" font-size="10">of 12.3 GB</text>
+
+  <!-- index.rrf -->
+  <rect x="285" y="96" width="150" height="176" rx="5" fill="url(#hatch)" stroke="#cbd5e1"/>
+  <rect x="285" y="96" width="150" height="26" rx="5" fill="#3b5bdb"/>
+  <text x="360" y="106" class="seg" text-anchor="middle">facet meta</text>
+  <text x="360" y="118" class="seg" text-anchor="middle">+ top heads</text>
+  <text x="360" y="205" class="rest" text-anchor="middle">facet tails</text>
+  <text x="360" y="294" class="file" text-anchor="middle">index.rrf</text>
+  <text x="360" y="312" class="boot" text-anchor="middle">boot ~2.4 MB</text>
+  <text x="360" y="327" class="rest mono" text-anchor="middle" font-size="10">of 231 MB</text>
+
+  <!-- records -->
+  <rect x="500" y="96" width="150" height="176" rx="5" fill="url(#hatch)" stroke="#cbd5e1"/>
+  <rect x="500" y="96" width="150" height="12" rx="5" fill="#3b5bdb"/>
+  <text x="575" y="105" class="seg" text-anchor="middle" font-size="9">.idx header</text>
+  <text x="575" y="197" class="rest" text-anchor="middle">offset table +</text>
+  <text x="575" y="213" class="rest" text-anchor="middle">record blobs</text>
+  <text x="575" y="294" class="file" text-anchor="middle">records.idx / .bin</text>
+  <text x="575" y="312" class="boot" text-anchor="middle">boot ~16 B</text>
+  <text x="575" y="327" class="rest mono" text-anchor="middle" font-size="10">of 9.3 GB</text>
+
+  <line x1="70" y1="352" x2="650" y2="352" stroke="#e2e8f0"/>
+  <rect x="70" y="362" width="13" height="13" rx="3" fill="#3b5bdb"/>
+  <text x="90" y="373" class="note">loaded at boot</text>
+  <rect x="196" y="362" width="13" height="13" rx="3" fill="url(#hatch)" stroke="#cbd5e1"/>
+  <text x="216" y="373" class="note">stays in S3, range-fetched on demand</text>
+  <text x="650" y="373" class="note" text-anchor="end" font-style="italic">bars not to scale</text>
+</svg>

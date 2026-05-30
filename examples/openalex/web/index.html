@@ -691,7 +691,8 @@
             filterInput.addEventListener("input", () => {
               const needle = filterInput.value.trim().toLowerCase();
               list.querySelectorAll(".fitem").forEach((it) => {
-                it.style.display = it.dataset.name.toLowerCase().includes(needle) ? "" : "none";
+                const match = it.dataset.name.toLowerCase().includes(needle);
+                it.style.display = match && it.dataset.zero !== "1" ? "" : "none";
               });
             });
           }
@@ -756,10 +757,18 @@
           span.textContent = fmt(counts.get(key) || 0);
         }
         /* Reorder each rendered group so the highest current (filtered) counts stay
-           on top; the "+N more" note, if present, is kept last. */
+           on top; the "+N more" note, if present, is kept last. A category with a
+           zero count for the current query is hidden (its name-filter match is
+           suppressed too), unless it is an active filter — that must stay visible
+           so it can be unchecked. */
         for (const grp of facetGroups) {
           grp.cells.sort((a, b) => (counts.get(b.key) || 0) - (counts.get(a.key) || 0));
-          for (const cell of grp.cells) grp.list.appendChild(cell.item);
+          for (const cell of grp.cells) {
+            const zero = (counts.get(cell.key) || 0) === 0 && !activeFilters.has(cell.key);
+            cell.item.dataset.zero = zero ? "1" : "";
+            cell.item.style.display = zero ? "none" : "";
+            grp.list.appendChild(cell.item);
+          }
           if (grp.more) grp.list.appendChild(grp.more);
         }
       }
