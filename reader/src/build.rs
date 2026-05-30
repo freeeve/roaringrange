@@ -233,7 +233,9 @@ pub fn write_facets<W: Write>(mut w: W, fields: Vec<FacetField>) -> io::Result<(
     Ok(())
 }
 
-/// `RRSR` record-store index magic.
+/// `RRSR` record-store index magic. Public so a streaming record-store writer
+/// (one that frames records incrementally rather than via [`write_records`]) can
+/// emit the index header itself.
 pub const RECORD_MAGIC: &[u8; 4] = b"RRSR";
 
 /// Writes a record store: the concatenated record bytes to `bin` (in doc-ID
