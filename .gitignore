@@ -2,6 +2,7 @@
 rust/target/
 rust/pkg/
 examples/openalex/builder/target/
+examples/search-lambda/target/
 
 # Go binaries
 /openalexbuild
