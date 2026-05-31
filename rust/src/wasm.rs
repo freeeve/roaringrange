@@ -19,6 +19,7 @@ use crate::fetch::{FetchError, RangeFetch};
 use crate::index::{Cursor, Index};
 use crate::records::RecordStore;
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint32Array, Uint8Array};
+use roaring::RoaringBitmap;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
@@ -635,6 +636,67 @@ impl RrsCatalog {
     #[wasm_bindgen(js_name = ngramCount)]
     pub fn ngram_count(&self) -> u32 {
         self.cat().index().ngram_count()
+    }
+}
+
+/// A standalone portable RoaringBitmap exposed to JavaScript for client-side set
+/// operations over external `.bm` bitmaps — e.g. the per-library bitmaps a static
+/// catalog ships for library diff / intersection / collection paging. The bytes
+/// are the portable serialization written by Go's `RoaringBitmap/roaring/v2`
+/// `WriteTo` (the same format the index postings use), so they deserialize here
+/// byte-for-byte with no glue.
+#[wasm_bindgen]
+pub struct WasmBitmap {
+    inner: RoaringBitmap,
+}
+
+#[wasm_bindgen]
+impl WasmBitmap {
+    /// Deserializes a portable RoaringBitmap from `bytes`.
+    #[wasm_bindgen(js_name = fromBytes)]
+    pub fn from_bytes(bytes: &[u8]) -> Result<WasmBitmap, JsError> {
+        let inner = RoaringBitmap::deserialize_from(bytes)
+            .map_err(|e| JsError::new(&format!("deserialize bitmap: {e}")))?;
+        Ok(WasmBitmap { inner })
+    }
+
+    /// Intersection (`self ∩ other`) as a new bitmap.
+    pub fn and(&self, other: &WasmBitmap) -> WasmBitmap {
+        let mut inner = self.inner.clone();
+        inner &= &other.inner;
+        WasmBitmap { inner }
+    }
+
+    /// Difference (`self \ other`) as a new bitmap.
+    pub fn andnot(&self, other: &WasmBitmap) -> WasmBitmap {
+        let mut inner = self.inner.clone();
+        inner -= &other.inner;
+        WasmBitmap { inner }
+    }
+
+    /// Union (`self ∪ other`) as a new bitmap.
+    pub fn or(&self, other: &WasmBitmap) -> WasmBitmap {
+        let mut inner = self.inner.clone();
+        inner |= &other.inner;
+        WasmBitmap { inner }
+    }
+
+    /// Number of doc IDs set (cardinality).
+    pub fn len(&self) -> u32 {
+        u32::try_from(self.inner.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Whether the bitmap holds no doc IDs.
+    #[wasm_bindgen(js_name = isEmpty)]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Doc IDs in ascending order (== rank order, since doc IDs are popularity-
+    /// ranked), skipping `offset` and taking up to `limit`. Resolves to a
+    /// `Uint32Array`.
+    pub fn page(&self, offset: usize, limit: usize) -> Vec<u32> {
+        self.inner.iter().skip(offset).take(limit).collect()
     }
 }
 
