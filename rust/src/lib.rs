@@ -32,5 +32,9 @@ pub use records::RecordStore;
 #[cfg(feature = "wasm")]
 mod wasm;
 
-#[cfg(test)]
+// The in-crate test modules exercise the native build writers (`crate::build`),
+// which are excluded from wasm32; gate them to native so `wasm-pack test` (which
+// compiles the crate's tests) builds. The wasm decode path is covered by the
+// dedicated integration test in tests/wasm_zstd.rs.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod build_tests;

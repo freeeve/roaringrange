@@ -154,7 +154,8 @@ impl<F: RangeFetch + Clone> Catalog<F> {
     }
 }
 
-#[cfg(test)]
+// Uses the native-only build writers; gated to native so `wasm-pack test` builds.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::build::{
