@@ -482,7 +482,6 @@
           <span class="stat"><span class="lbl">boot</span><b id="m-boot">—</b></span>
           <span class="stat"><span class="lbl">search</span><b id="m-search">—</b></span>
           <span class="stat"><span class="lbl">results</span><b id="m-results">—</b></span>
-          <span class="stat"><span class="lbl">requests</span><b id="m-reqs">—</b></span>
           <span class="stat"><span class="lbl">fetched</span><b id="m-kb">—</b></span>
           <span class="summary" id="m-summary">booting…</span>
         </div>
@@ -556,7 +555,7 @@
         pager: $("pager"), prev: $("prev"), next: $("next"), pginfo: $("pginfo"),
         facetgroups: $("facetgroups"), clearfilters: $("clearfilters"),
         facets: $("facets"), menutoggle: $("menutoggle"),
-        mBoot: $("m-boot"), mSearch: $("m-search"), mResults: $("m-results"), mReqs: $("m-reqs"), mKb: $("m-kb"), mSummary: $("m-summary"),
+        mBoot: $("m-boot"), mSearch: $("m-search"), mResults: $("m-results"), mKb: $("m-kb"), mSummary: $("m-summary"),
       };
 
       /* facet field display names + which groups get a scroll box + text filter */
@@ -644,11 +643,12 @@
       /* -------- perf bar -------- */
       function setPerf({ boot, search, results, summary } = {}) {
         if (boot !== undefined) els.mBoot.textContent = `${boot.toFixed(1)} ms`;
-        if (search !== undefined) els.mSearch.textContent = `${search.toFixed(2)} ms`;
-        if (results !== undefined) {
-          els.mResults.textContent = `${results.ms.toFixed(1)} ms · ${results.reqs} req · ${(results.bytes / 1024).toFixed(1)} KB`;
+        if (search !== undefined) {
+          els.mSearch.textContent = `${search.ms.toFixed(2)} ms · ${search.reqs} req`;
         }
-        els.mReqs.textContent = String(reqs);
+        if (results !== undefined) {
+          els.mResults.textContent = `${results.ms.toFixed(1)} ms · ${results.reqs} req`;
+        }
         els.mKb.textContent = `${(bytes / 1024).toFixed(1)} KB`;
         if (summary !== undefined) els.mSummary.textContent = summary;
       }
@@ -865,10 +865,11 @@
       /* -------- paging: pull a page of doc IDs, then fetch their records --------
          extraMs folds an upstream cursor-open into the reported index-search latency
          (record HTTP Range fetches are intentionally excluded from search ms). */
-      async function goPage(o, extraMs = 0) {
+      async function goPage(o, extraMs = 0, openReqs = 0) {
         if (!cur) return;
         offset = Math.max(0, o);
         skeletons(Math.min(PAGE, 8));
+        const pgReq0 = reqs;
         const t0 = performance.now();
         let ids;
         try { ids = await cur.page(offset, PAGE); }
@@ -878,11 +879,11 @@
         lastTotal = cur.loaded();
 
         const missing = lastPage.filter((id) => !recCache.has(id));
-        const recReq0 = reqs, recByte0 = bytes, recT0 = performance.now();
+        const recReq0 = reqs, recT0 = performance.now();
+        const searchReqs = openReqs + (recReq0 - pgReq0);  // cursor-open + this page's tail reads
         const map = await fetchRecords(missing);
         const recMs = performance.now() - recT0;    // record HTTP-Range fetch only
-        const recReqs = reqs - recReq0;             // its request count (≈2 per uncached doc)
-        const recBytes = bytes - recByte0;
+        const recReqs = reqs - recReq0;             // ≈2 reads per uncached doc
         for (const [id, rec] of map) recCache.set(id, rec);
 
         renderCards(recCache);
@@ -890,8 +891,8 @@
         updatePager();
         syncUrl();
         setPerf({
-          search: searchMs,
-          results: { ms: recMs, reqs: recReqs, bytes: recBytes },
+          search: { ms: searchMs, reqs: searchReqs },
+          results: { ms: recMs, reqs: recReqs },
           summary: lastTotal
             ? `${fmt(lastTotal)} result${lastTotal === 1 ? "" : "s"} in ${(searchMs + recMs).toFixed(0)} ms`
             : "no results",
@@ -918,8 +919,9 @@
         try { cur = await idx.searchCursorFiltered(q, mm, filters); }
         catch (e) { els.mSummary.textContent = `error: ${e}`; return; }
         const openMs = performance.now() - t0;
+        const openReqs = reqs;   // dict-block + head-posting reads from the cursor open
         try { applyFacetCounts(cur.facetCountsJson()); } catch (_) {}
-        await goPage(resetPaging ? 0 : offset, openMs);
+        await goPage(resetPaging ? 0 : offset, openMs, openReqs);
       }
 
       /* -------- boot -------- */
