@@ -70,7 +70,9 @@ async fn index() -> Result<&'static Index<S3Fetch>, Error> {
         .await
 }
 
-/// `GET ?q=<query>&max_missing=<n>&limit=<n>` → `{"total":N,"ids":[...]}`.
+/// `GET ?q=<query>&offset=<n>&limit=<n>&max_missing=<n>` →
+/// `{"total":N,"offset":O,"ids":[...]}`. `total` is exact only on `offset` 0
+/// (the client caches it); later pages omit the full intersection and stay cheap.
 async fn handler(event: Request) -> Result<Response<Body>, Error> {
     let params = event.query_string_parameters();
     let query = params.first("q").unwrap_or("").trim();
@@ -78,27 +80,42 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         .first("max_missing")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    let offset: usize = params
+        .first("offset")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let limit: usize = params
         .first("limit")
         .and_then(|s| s.parse().ok())
-        .unwrap_or(200_000);
+        .unwrap_or(25)
+        .min(500);
 
     let body = if query.is_empty() {
         r#"{"total":0,"ids":[]}"#.to_string()
     } else {
         let idx = index().await?;
-        // Cursor materializes the full result (head + tail) so `total` is exact;
-        // we return up to `limit` ids — the browser paginates them and fetches
-        // records per page. Strict AND when max_missing == 0; fuzzy otherwise.
+        // Paginate: return just this page of result IDs (a few hundred bytes), not
+        // the whole result set. The exact total needs the full tail intersection,
+        // so compute it only on the first page (offset 0); the client caches it and
+        // later pages stay cheap (the popular head serves early pages with no tail
+        // read). Strict AND when max_missing == 0; fuzzy otherwise.
         let mut cur = idx
             .search_cursor(query, max_missing)
             .await
             .map_err(|e| Error::from(format!("search: {e}")))?;
+        let total = if offset == 0 {
+            cur.load_tail()
+                .await
+                .map_err(|e| Error::from(format!("load_tail: {e}")))?;
+            cur.loaded()
+        } else {
+            0 // unknown on later pages; the client keeps the total from page 0
+        };
         let ids = cur
-            .page(0, limit)
+            .page(offset, limit)
             .await
             .map_err(|e| Error::from(format!("page: {e}")))?;
-        serde_json::json!({ "total": cur.loaded(), "ids": ids }).to_string()
+        serde_json::json!({ "total": total, "offset": offset, "ids": ids }).to_string()
     };
 
     Ok(Response::builder()
