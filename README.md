@@ -150,6 +150,32 @@ and records attached, the demo's full boot is ~3 MB: the index sparse, the facet
 metadata + top-category heads (the facet *tails* stay range-fetched, not loaded
 up front), and the record-store header.
 
+## Tried and shelved
+
+Experiments the data argued against — recorded so we don't relitigate them.
+
+### Inverting common-trigram postings
+
+Idea: a very common trigram has a huge posting, but its *complement* (the docs
+that lack it) is small — so store the complement plus a one-bit "inverted" flag
+and `ANDNOT` it during intersection, cutting the bytes a query fetches.
+
+Why it didn't pan out: roaring stores each 65,536-doc block as either an array
+(≤4096 docs, 2 B each) or a flat **8 KB bitmap** for any cardinality in
+(4096, 61440]. A common trigram's complement usually lands in that same band, so
+it is *also* an 8 KB bitmap — inversion only shrinks a block denser than ~94%
+(complement becomes a small array, or empty). Measured on the live 47.8M index
+(`rust/examples/density`, e.g. `cargo run --release --example density -- "machine learning" "posthuman became"`):
+the hottest trigram, `the`, is only ~52% dense — OpenAlex lacks an abstract for
+roughly half its works, so half the corpus is title-only text — and just
+**0.0–0.6%** of posting bytes sit in >94%-dense blocks. Net saving across those
+queries: **~0.1%**. Not worth a format-version bump + reindex.
+
+It *would* pay on a corpus where common trigrams are near-universal (full text
+with an abstract on every doc); here it's the partial abstract coverage that
+flattens the density. The `density` example re-runs the analysis on any
+index/query.
+
 ## Development
 
 Enable the formatting pre-commit hook (runs `gofmt` + `cargo fmt --check` on
