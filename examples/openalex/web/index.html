@@ -883,13 +883,16 @@
         if (!c) return;
         const seq = searchSeq;
         offset = Math.max(0, o);
-        skeletons(Math.min(PAGE, 8));
         // Lazy tail: page only the popular head until the full set is wanted (the
         // auto-pull once a query settles, or a deep offset past the head). The
         // tail load is timed on its own so it reports as a separate "tail" stat
         // rather than clobbering the head's search numbers.
         if (!tailLoaded && offset >= c.headCount() && c.pendingTail()) tailLoaded = true;
         const willLoadTail = tailLoaded && c.pendingTail();
+        // Keep the already-rendered popular results on screen while the (possibly
+        // multi-second) tail loads in the background; only skeleton when fetching
+        // genuinely new page content.
+        if (!willLoadTail) skeletons(Math.min(PAGE, 8));
         const pgReq0 = reqs, pgByte0 = bytes, t0 = performance.now();
         let ids;
         try {
@@ -937,6 +940,10 @@
       async function loadAll() {
         if (!cur || tailLoaded) return;
         tailLoaded = true;   // goPage pulls the tail once, then pages over the full set
+        // Immediate feedback: the tail fetch can take seconds. Keep the popular
+        // results on screen and show that the full set is loading.
+        els.resultcount.innerHTML =
+          `<b>${fmt(lastTotal)}</b> popular result${lastTotal === 1 ? "" : "s"} <span style="color:var(--ink-faint)">· loading the rest…</span>`;
         await goPage(0);
       }
 
