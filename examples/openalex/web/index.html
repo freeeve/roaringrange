@@ -853,7 +853,12 @@
           const lead = total
             ? `<b>${fmt(total)}</b> popular result${total === 1 ? "" : "s"}`
             : `Searching the full corpus`;
-          els.resultcount.innerHTML = `${lead} <span style="color:var(--ink-faint)">· loading the rest…</span>`;
+          // Sparse head: the rest is auto-pulling. Rich head (a full page): offer
+          // it on demand rather than auto-fetching a possibly-huge tail.
+          const tailUI = total >= PAGE
+            ? ` · <button type="button" id="loadall" style="margin-left:2px;padding:2px 9px;border:1px solid #c7d2fe;border-radius:6px;background:#eef2ff;color:#3b5bdb;cursor:pointer;font:inherit;font-size:12px">load full results</button>`
+            : ` <span style="color:var(--ink-faint)">· loading the rest…</span>`;
+          els.resultcount.innerHTML = `${lead}${tailUI}`;
         } else {
           els.resultcount.innerHTML = `<b>${fmt(total)}</b> result${total === 1 ? "" : "s"}`;
         }
@@ -966,9 +971,12 @@
         try { applyFacetCounts(cur.facetCountsJson()); } catch (_) {}
         setPerf({ tail: null });   // new query: clear any prior tail-load stat
         await goPage(resetPaging ? 0 : offset, openMs, openReqs, openBytes);
-        // Auto-pull: the popular head is shown; once the query settles, fetch the
-        // full tail in the background so the complete set fills in on its own.
-        if (mySeq === searchSeq && cur && !tailLoaded && cur.pendingTail()) {
+        // Auto-pull only when the head can't even fill a page — there the user
+        // clearly wants more, and it's the "show the few, then pull the rest"
+        // case. A rich head (a full page of popular hits) stays put and offers an
+        // explicit "load full results" rather than auto-fetching a possibly-huge
+        // tail (a common query's tail can be tens of MB).
+        if (mySeq === searchSeq && cur && !tailLoaded && cur.pendingTail() && cur.headCount() < PAGE) {
           autoPullTimer = setTimeout(() => { if (mySeq === searchSeq) loadAll(); }, AUTO_PULL_MS);
         }
       }
@@ -1019,6 +1027,9 @@
       els.q.addEventListener("input", scheduleSearch);
       document.querySelectorAll('input[name="fuzz"]').forEach((r) =>
         r.addEventListener("change", () => runSearch(true)));
+      els.resultcount.addEventListener("click", (e) => {
+        if (e.target.closest("#loadall")) loadAll();
+      });
       els.results.addEventListener("click", (e) => {
         const btn = e.target.closest(".amore");
         if (!btn) return;

@@ -41,7 +41,7 @@
   <!-- Panel B: on demand, the full tail -->
   <rect x="500" y="166" width="448" height="344" rx="10" fill="#f8fafc" stroke="#94a3b8"/>
   <text x="520" y="194" class="box"><tspan class="tag" fill="#64748b">&#9313;</tspan> Then — the full tail (automatic)</text>
-  <text x="520" y="212" class="req">auto-loads once the query settles; the head stays on screen</text>
+  <text x="520" y="212" class="req">auto-loads after a sparse head; on demand for a big result set</text>
   <line x1="520" y1="222" x2="928" y2="222" stroke="#e2e8f0"/>
   <text x="520" y="246" class="step">read the <tspan font-weight="700">rarest</tspan> trigram's tail in full</text>
   <text x="536" y="264" class="step">→ a small candidate set of doc IDs</text>
