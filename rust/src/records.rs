@@ -8,6 +8,7 @@
 
 use crate::fetch::RangeFetch;
 use crate::index::{read_u16, read_u32, read_u64, IndexError};
+use futures::future::join_all;
 
 /// `RRSR` index magic.
 const MAGIC: &[u8; 4] = b"RRSR";
@@ -71,11 +72,15 @@ impl<F: RangeFetch> RecordStore<F> {
     }
 
     /// Raw record bytes for several doc IDs, aligned with `ids`. A results page
-    /// (ascending doc IDs in rank order) is the typical input.
+    /// (ascending doc IDs in rank order) is the typical input. Every doc's `get`
+    /// is issued before any is awaited, so a page's reads proceed as a few
+    /// concurrent waves rather than one serial round-trip per doc; `join_all`
+    /// preserves order, keeping the output aligned with `ids`.
     pub async fn get_many(&self, ids: &[u32]) -> Result<Vec<Option<Vec<u8>>>, IndexError> {
-        let mut out = Vec::with_capacity(ids.len());
-        for &id in ids {
-            out.push(self.get(id).await?);
+        let results = join_all(ids.iter().map(|&id| self.get(id))).await;
+        let mut out = Vec::with_capacity(results.len());
+        for rec in results {
+            out.push(rec?);
         }
         Ok(out)
     }

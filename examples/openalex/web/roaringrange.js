@@ -425,6 +425,108 @@ export class RrsRecords {
     }
 }
 if (Symbol.dispose) RrsRecords.prototype[Symbol.dispose] = RrsRecords.prototype.free;
+
+/**
+ * A standalone portable RoaringBitmap exposed to JavaScript for client-side set
+ * operations over external `.bm` bitmaps — e.g. the per-library bitmaps a static
+ * catalog ships for library diff / intersection / collection paging. The bytes
+ * are the portable serialization written by Go's `RoaringBitmap/roaring/v2`
+ * `WriteTo` (the same format the index postings use), so they deserialize here
+ * byte-for-byte with no glue.
+ */
+export class WasmBitmap {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmBitmap.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmBitmapFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmBitmapFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmbitmap_free(ptr, 0);
+    }
+    /**
+     * Intersection (`self ∩ other`) as a new bitmap.
+     * @param {WasmBitmap} other
+     * @returns {WasmBitmap}
+     */
+    and(other) {
+        _assertClass(other, WasmBitmap);
+        const ret = wasm.wasmbitmap_and(this.__wbg_ptr, other.__wbg_ptr);
+        return WasmBitmap.__wrap(ret);
+    }
+    /**
+     * Difference (`self \ other`) as a new bitmap.
+     * @param {WasmBitmap} other
+     * @returns {WasmBitmap}
+     */
+    andnot(other) {
+        _assertClass(other, WasmBitmap);
+        const ret = wasm.wasmbitmap_andnot(this.__wbg_ptr, other.__wbg_ptr);
+        return WasmBitmap.__wrap(ret);
+    }
+    /**
+     * Deserializes a portable RoaringBitmap from `bytes`.
+     * @param {Uint8Array} bytes
+     * @returns {WasmBitmap}
+     */
+    static fromBytes(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmbitmap_fromBytes(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmBitmap.__wrap(ret[0]);
+    }
+    /**
+     * Whether the bitmap holds no doc IDs.
+     * @returns {boolean}
+     */
+    isEmpty() {
+        const ret = wasm.wasmbitmap_isEmpty(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Number of doc IDs set (cardinality).
+     * @returns {number}
+     */
+    len() {
+        const ret = wasm.wasmbitmap_len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Union (`self ∪ other`) as a new bitmap.
+     * @param {WasmBitmap} other
+     * @returns {WasmBitmap}
+     */
+    or(other) {
+        _assertClass(other, WasmBitmap);
+        const ret = wasm.wasmbitmap_or(this.__wbg_ptr, other.__wbg_ptr);
+        return WasmBitmap.__wrap(ret);
+    }
+    /**
+     * Doc IDs in ascending order (== rank order, since doc IDs are popularity-
+     * ranked), skipping `offset` and taking up to `limit`. Resolves to a
+     * `Uint32Array`.
+     * @param {number} offset
+     * @param {number} limit
+     * @returns {Uint32Array}
+     */
+    page(offset, limit) {
+        const ret = wasm.wasmbitmap_page(this.__wbg_ptr, offset, limit);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+}
+if (Symbol.dispose) WasmBitmap.prototype[Symbol.dispose] = WasmBitmap.prototype.free;
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -652,7 +754,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 155, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 162, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h68218ae5a35c5694);
             return ret;
         },
@@ -714,11 +816,20 @@ const RrsIndexFinalization = (typeof FinalizationRegistry === 'undefined')
 const RrsRecordsFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rrsrecords_free(ptr, 1));
+const WasmBitmapFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmbitmap_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
     wasm.__wbindgen_externrefs.set(idx, obj);
     return idx;
+}
+
+function _assertClass(instance, klass) {
+    if (!(instance instanceof klass)) {
+        throw new Error(`expected instance of ${klass.name}`);
+    }
 }
 
 const CLOSURE_DTORS = (typeof FinalizationRegistry === 'undefined')
@@ -807,6 +918,13 @@ function makeMutClosure(arg0, arg1, f) {
 function passArray32ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 4, 4) >>> 0;
     getUint32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }
