@@ -481,6 +481,7 @@
         <div class="perfbar" id="perfbar" aria-live="polite">
           <span class="stat"><span class="lbl">boot</span><b id="m-boot">—</b></span>
           <span class="stat"><span class="lbl">search</span><b id="m-search">—</b></span>
+          <span class="stat"><span class="lbl">results</span><b id="m-results">—</b></span>
           <span class="stat"><span class="lbl">requests</span><b id="m-reqs">—</b></span>
           <span class="stat"><span class="lbl">fetched</span><b id="m-kb">—</b></span>
           <span class="summary" id="m-summary">booting…</span>
@@ -555,7 +556,7 @@
         pager: $("pager"), prev: $("prev"), next: $("next"), pginfo: $("pginfo"),
         facetgroups: $("facetgroups"), clearfilters: $("clearfilters"),
         facets: $("facets"), menutoggle: $("menutoggle"),
-        mBoot: $("m-boot"), mSearch: $("m-search"), mReqs: $("m-reqs"), mKb: $("m-kb"), mSummary: $("m-summary"),
+        mBoot: $("m-boot"), mSearch: $("m-search"), mResults: $("m-results"), mReqs: $("m-reqs"), mKb: $("m-kb"), mSummary: $("m-summary"),
       };
 
       /* facet field display names + which groups get a scroll box + text filter */
@@ -641,10 +642,11 @@
       }
 
       /* -------- perf bar -------- */
-      function setPerf({ boot, search, summary } = {}) {
+      function setPerf({ boot, search, results, summary } = {}) {
         if (boot !== undefined) els.mBoot.textContent = `${boot.toFixed(1)} ms`;
-        if (search !== undefined) {
-          els.mSearch.textContent = `${search.toFixed(2)} ms · ${(search * 1000).toFixed(0)} µs`;
+        if (search !== undefined) els.mSearch.textContent = `${search.toFixed(2)} ms`;
+        if (results !== undefined) {
+          els.mResults.textContent = `${results.ms.toFixed(1)} ms · ${results.reqs} req · ${(results.bytes / 1024).toFixed(1)} KB`;
         }
         els.mReqs.textContent = String(reqs);
         els.mKb.textContent = `${(bytes / 1024).toFixed(1)} KB`;
@@ -876,7 +878,11 @@
         lastTotal = cur.loaded();
 
         const missing = lastPage.filter((id) => !recCache.has(id));
+        const recReq0 = reqs, recByte0 = bytes, recT0 = performance.now();
         const map = await fetchRecords(missing);
+        const recMs = performance.now() - recT0;    // record HTTP-Range fetch only
+        const recReqs = reqs - recReq0;             // its request count (≈2 per uncached doc)
+        const recBytes = bytes - recByte0;
         for (const [id, rec] of map) recCache.set(id, rec);
 
         renderCards(recCache);
@@ -885,8 +891,9 @@
         syncUrl();
         setPerf({
           search: searchMs,
+          results: { ms: recMs, reqs: recReqs, bytes: recBytes },
           summary: lastTotal
-            ? `${fmt(lastTotal)} result${lastTotal === 1 ? "" : "s"} in ${searchMs.toFixed(1)} ms`
+            ? `${fmt(lastTotal)} result${lastTotal === 1 ? "" : "s"} in ${(searchMs + recMs).toFixed(0)} ms`
             : "no results",
         });
       }
