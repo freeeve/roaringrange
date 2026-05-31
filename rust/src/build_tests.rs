@@ -217,6 +217,76 @@ fn sparse_path_with_many_entries() {
     assert!(block_on(idx.head(largest + 1)).unwrap().is_none());
 }
 
+/// Builds a synthetic RRS index over `texts` (doc id = slice index), deriving
+/// trigrams with the same `ngram_keys` the reader uses — so a doc's index
+/// membership matches re-deriving its text's trigrams (what verification does).
+fn build_index_from_texts(texts: &[&str]) -> Vec<u8> {
+    use std::collections::BTreeMap;
+    let mut by_key: BTreeMap<u64, RoaringBitmap> = BTreeMap::new();
+    for (doc, text) in texts.iter().enumerate() {
+        for key in ngram_keys(text, 3) {
+            by_key.entry(key).or_default().insert(doc as u32);
+        }
+    }
+    let entries: Vec<(u64, RoaringBitmap)> = by_key.into_iter().collect();
+    build_rrs(3, 2, &entries)
+}
+
+#[test]
+fn candidates_then_verify_equals_full_and() {
+    use std::collections::HashSet;
+    // "abc" is common (6 docs); "bcd" is rare (4). doc2 has only bcd; doc4 has
+    // both trigrams in separate tokens (still a true trigram-AND match).
+    let texts = [
+        "abcd",    // 0: abc + bcd
+        "abc",     // 1: abc only
+        "bcd",     // 2: bcd only
+        "xabcd",   // 3: abc + bcd
+        "abc bcd", // 4: abc + bcd (separate tokens)
+        "abc",     // 5: abc only
+        "abc",     // 6: abc only
+    ];
+    let idx = block_on(Index::open(MemoryFetch::new(build_index_from_texts(
+        &texts,
+    ))))
+    .unwrap();
+
+    let full_and = block_on(idx.search("abcd", 100)).unwrap();
+    assert_eq!(full_and, vec![0, 3, 4]); // abc{0,1,3,4,5,6} ∩ bcd{0,2,3,4}
+
+    // Seed from the single rarest trigram (bcd) -> a superset of the AND.
+    let candidates = block_on(idx.search_candidates("abcd", 1)).unwrap();
+    assert_eq!(candidates, vec![0, 2, 3, 4]); // = bcd's posting
+    for &d in &full_and {
+        assert!(
+            candidates.contains(&d),
+            "candidates must be a superset of the AND"
+        );
+    }
+
+    // Verify each candidate against its text: keep those whose trigrams cover the
+    // query. This is exactly what the browser does with the record's stored text.
+    let qkeys: HashSet<u64> = ngram_keys("abcd", 3).into_iter().collect();
+    let verified: Vec<u32> = candidates
+        .into_iter()
+        .filter(|&d| {
+            let dkeys: HashSet<u64> = ngram_keys(texts[d as usize], 3).into_iter().collect();
+            qkeys.is_subset(&dkeys)
+        })
+        .collect();
+    assert_eq!(verified, full_and);
+
+    // Seeding from all trigrams already yields the exact AND (verification is a no-op).
+    assert_eq!(
+        block_on(idx.search_candidates("abcd", 9)).unwrap(),
+        full_and
+    );
+    // An absent trigram makes the strict AND impossible -> empty candidates.
+    assert!(block_on(idx.search_candidates("abqz", 2))
+        .unwrap()
+        .is_empty());
+}
+
 #[test]
 fn open_rejects_bad_magic() {
     let mut buf = build_rrs(3, 2, &[(6382179, bm(&[1]))]);

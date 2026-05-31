@@ -366,6 +366,56 @@ impl<F: RangeFetch> Index<F> {
         Ok(out)
     }
 
+    /// Resolves `query` to candidate doc IDs by intersecting only the `k` rarest
+    /// of its trigram postings (ranked by posting size). The result is a
+    /// *superset* of the strict-AND result — every true match contains all
+    /// trigrams, so it contains the `k` rarest — which the caller then verifies
+    /// against each candidate's stored text, skipping the common trigrams' (often
+    /// multi-MB) posting fetches. Candidates come back in ascending doc-ID order;
+    /// an absent trigram (the strict AND is then empty) returns an empty vector.
+    pub async fn search_candidates(&self, query: &str, k: usize) -> Result<Vec<u32>, IndexError> {
+        let keys = ngram_keys(query, self.gram_size as usize);
+        if keys.is_empty() || k == 0 {
+            return Ok(Vec::new());
+        }
+        let blocks: Vec<DictBlock> = match keys.iter().map(|&k| self.dict_block_for(k)).collect() {
+            Some(blocks) => blocks,
+            None => return Ok(Vec::new()), // a key precedes the dictionary -> absent
+        };
+        let block_reads = blocks
+            .iter()
+            .map(|blk| self.fetch.read(blk.byte_off, blk.entries * DICT_ENTRY));
+        let block_results = join_all(block_reads).await;
+        let mut recs = Vec::with_capacity(keys.len());
+        for ((bytes, blk), &key) in block_results.into_iter().zip(&blocks).zip(&keys) {
+            match Self::parse_block(&bytes?, blk.entries, key) {
+                None => return Ok(Vec::new()), // absent key -> strict AND empty
+                Some(rec) => recs.push(rec),
+            }
+        }
+        // Seed from the k rarest postings (smallest serialized size).
+        recs.sort_by_key(|r| r.head_size as u64 + r.tail_size as u64);
+        recs.truncate(k.min(recs.len()));
+        let mut postings = Vec::with_capacity(recs.len());
+        for rec in &recs {
+            let head = self
+                .fetch
+                .read(rec.head_offset, rec.head_size as usize)
+                .await?;
+            let mut full = deserialize(&head)?;
+            if rec.tail_size > 0 {
+                let off = rec.head_offset.saturating_add(rec.head_size as u64);
+                let tail = self.fetch.read(off, rec.tail_size as usize).await?;
+                full |= deserialize(&tail)?;
+            }
+            postings.push(full);
+        }
+        Ok(Self::intersect(postings)
+            .unwrap_or_default()
+            .iter()
+            .collect())
+    }
+
     /// Opens a stateful pagination cursor for `query`. Does the up-front work
     /// once (one dict-block wave + one head-posting wave, intersected into the
     /// head result set); [`Cursor::next`] then pages through that in-memory set
