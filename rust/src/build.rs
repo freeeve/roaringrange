@@ -259,12 +259,28 @@ pub struct RecordWriter<W: Write, X: Write> {
     off: u64,
     /// Number of records written so far.
     written: u32,
+    /// Optional shared zstd dictionary + compression level. When set, the writer
+    /// emits the version-2 framed layout: each record becomes `[tag][payload]`,
+    /// raw (tag 0) when compression does not shrink it, zstd-with-dict (tag 1)
+    /// otherwise. When `None` the writer emits the original untagged version-1
+    /// layout byte-for-byte.
+    #[cfg(feature = "zstd")]
+    zstd: Option<(Vec<u8>, i32)>,
 }
+
+/// Frame tag for a raw (uncompressed) payload in a version-2 store.
+#[cfg(feature = "zstd")]
+const TAG_RAW: u8 = 0;
+/// Frame tag for a zstd frame compressed against the shared dictionary.
+#[cfg(feature = "zstd")]
+const TAG_ZSTD_DICT: u8 = 1;
 
 impl<W: Write, X: Write> RecordWriter<W, X> {
     /// Opens a streaming record store for `count` records, writing the 16-byte
     /// `RRSR` header and the leading `off[0] = 0` to `idx`. Push each record with
-    /// [`RecordWriter::write`] in ascending doc-ID order.
+    /// [`RecordWriter::write`] in ascending doc-ID order. Records are stored
+    /// uncompressed in the original version-1 (untagged) layout; use
+    /// [`RecordWriter::new_zstd`] for the compressed version-2 layout.
     pub fn new(bin: W, mut idx: X, count: u32) -> io::Result<Self> {
         idx.write_all(RECORD_MAGIC)?;
         idx.write_all(&1u16.to_le_bytes())?; // version
@@ -277,12 +293,76 @@ impl<W: Write, X: Write> RecordWriter<W, X> {
             idx,
             off: 0,
             written: 0,
+            #[cfg(feature = "zstd")]
+            zstd: None,
         })
+    }
+
+    /// Opens a streaming record store for `count` records that **zstd-compresses**
+    /// each record against the shared `dict` at compression `level`, writing the
+    /// version-2 `RRSR` header (and the leading `off[0] = 0`) to `idx`. Each
+    /// record is framed `[tag][payload]`: a record is stored raw (tag 0) when
+    /// compression would not shrink it, otherwise as a zstd frame (tag 1). The
+    /// `dict` must be shipped to the reader as the `*.dict` sidecar and passed to
+    /// [`crate::records::RecordStore::open_with_dict`]. Gated on the `zstd`
+    /// feature. Train a dictionary with [`train_record_dict`].
+    #[cfg(feature = "zstd")]
+    pub fn new_zstd(bin: W, mut idx: X, count: u32, dict: &[u8], level: i32) -> io::Result<Self> {
+        idx.write_all(RECORD_MAGIC)?;
+        idx.write_all(&2u16.to_le_bytes())?; // version 2: framed records
+        idx.write_all(&0u16.to_le_bytes())?; // reserved
+        idx.write_all(&count.to_le_bytes())?; // count
+        idx.write_all(&0u32.to_le_bytes())?; // reserved2
+        idx.write_all(&0u64.to_le_bytes())?; // off[0] = 0
+        Ok(Self {
+            bin,
+            idx,
+            off: 0,
+            written: 0,
+            zstd: Some((dict.to_vec(), level)),
+        })
+    }
+
+    /// Frames one record for the version-2 layout: returns `[tag][payload]`. The
+    /// record is compressed against the shared dictionary; if the compressed
+    /// payload is not smaller than the raw record, the raw form (tag 0) is kept so
+    /// a record never grows. A zero-length record stays zero-length (no tag),
+    /// matching the version-1 zero-length convention.
+    #[cfg(feature = "zstd")]
+    fn frame_zstd(rec: &[u8], dict: &[u8], level: i32) -> io::Result<Vec<u8>> {
+        if rec.is_empty() {
+            return Ok(Vec::new());
+        }
+        let compressed = zstd::bulk::Compressor::with_dictionary(level, dict)?.compress(rec)?;
+        // Both candidate frames pay the same 1-byte tag, so compare payload sizes.
+        if compressed.len() < rec.len() {
+            let mut framed = Vec::with_capacity(compressed.len() + 1);
+            framed.push(TAG_ZSTD_DICT);
+            framed.extend_from_slice(&compressed);
+            Ok(framed)
+        } else {
+            let mut framed = Vec::with_capacity(rec.len() + 1);
+            framed.push(TAG_RAW);
+            framed.extend_from_slice(rec);
+            Ok(framed)
+        }
     }
 
     /// Appends one record's bytes to the blob and its cumulative end offset to the
     /// index. A zero-length record (a doc with no stored fields) stays addressable.
+    /// A compressing writer (see [`RecordWriter::new_zstd`]) frames the record
+    /// first; a plain writer stores the bytes verbatim.
     pub fn write(&mut self, rec: &[u8]) -> io::Result<()> {
+        #[cfg(feature = "zstd")]
+        let framed = match &self.zstd {
+            Some((dict, level)) => Some(Self::frame_zstd(rec, dict, *level)?),
+            None => None,
+        };
+        #[cfg(feature = "zstd")]
+        let rec: &[u8] = match &framed {
+            Some(f) => f,
+            None => rec,
+        };
         self.bin.write_all(rec)?;
         self.off += rec.len() as u64;
         self.idx.write_all(&self.off.to_le_bytes())?;
@@ -310,6 +390,93 @@ pub fn write_records<W: Write, X: Write>(bin: W, idx: X, records: &[Vec<u8>]) ->
     let mut w = RecordWriter::new(bin, idx, records.len() as u32)?;
     for rec in records {
         w.write(rec)?;
+    }
+    Ok(())
+}
+
+/// Writes a **zstd-compressed** record store from an in-memory slice of records,
+/// in doc-ID order — the compressing counterpart of [`write_records`]. Each
+/// record is framed and compressed against the shared `dict` at compression
+/// `level` (a record that does not shrink is kept raw, so it never grows). The
+/// resulting version-2 store reads back through
+/// [`crate::records::RecordStore::open_with_dict`] with the same `dict`, which
+/// must be shipped to the reader as the `*.dict` sidecar. Gated on the `zstd`
+/// feature. Train a `dict` with [`train_record_dict`].
+#[cfg(feature = "zstd")]
+pub fn write_records_zstd<W: Write, X: Write>(
+    bin: W,
+    idx: X,
+    records: &[Vec<u8>],
+    dict: &[u8],
+    level: i32,
+) -> io::Result<()> {
+    let mut w = RecordWriter::new_zstd(bin, idx, records.len() as u32, dict, level)?;
+    for rec in records {
+        w.write(rec)?;
+    }
+    Ok(())
+}
+
+/// Trains a shared zstd dictionary from representative record `samples`, capped
+/// at `max_dict_bytes`. Records are small and self-similar (repeated JSON keys,
+/// common venues/authors), so a trained dictionary recovers big-block ratio on
+/// per-record units without the fetch amplification of large blocks. Pass the
+/// returned dictionary to [`write_records_zstd`] / [`RecordWriter::new_zstd`] at
+/// build time and ship it to the reader as the `*.dict` sidecar. Gated on the
+/// `zstd` feature. See `RECORDS.md`.
+#[cfg(feature = "zstd")]
+pub fn train_record_dict(samples: &[&[u8]], max_dict_bytes: usize) -> io::Result<Vec<u8>> {
+    zstd::dict::from_samples(samples, max_dict_bytes)
+}
+
+/// `RRIL` identifier exact-match index magic.
+pub(crate) const LOOKUP_MAGIC: &[u8; 4] = b"RRIL";
+
+/// Writes the `RRIL` identifier exact-match index for `entries` to `w` — the
+/// build-side mirror of [`crate::lookup::Lookup`]. Each entry is an
+/// `(identifier, doc)` pair: the identifier is normalized with
+/// [`crate::lookup::normalize_id`] and double-hashed (FNV-1a primary + verify),
+/// so the reader resolves the same identifier byte-for-byte. Entries are sorted
+/// by `(hash, doc)` here — the reader binary-searches the hash and scans the
+/// matching run in ascending doc (rank) order — and an empty normalized
+/// identifier is dropped (it can never be looked up). The `*.rril` layout (all
+/// little-endian) is:
+/// - header 16 B: magic `"RRIL"`, version `u16` = 1, reserved `u16`, count `u32`
+///   (number of records `N`), reserved2 `u32`;
+/// - then `N` × `[hash u64][verify u32][doc u32]`, sorted by `(hash, doc)`.
+///
+/// See `lookup.rs` for the reader and the hashing/normalization details.
+pub fn write_lookup<W: Write>(mut w: W, entries: &[(String, u32)]) -> io::Result<()> {
+    use crate::lookup::{fnv64a_basis, normalize_id, FNV_OFFSET, FNV_VERIFY_BASIS};
+
+    let mut recs: Vec<(u64, u32, u32)> = entries
+        .iter()
+        .filter_map(|(id, doc)| {
+            let n = normalize_id(id);
+            if n.is_empty() {
+                return None;
+            }
+            Some((
+                fnv64a_basis(&n, FNV_OFFSET),
+                fnv64a_basis(&n, FNV_VERIFY_BASIS) as u32,
+                *doc,
+            ))
+        })
+        .collect();
+    recs.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
+
+    // Header (16 B).
+    w.write_all(LOOKUP_MAGIC)?;
+    w.write_all(&1u16.to_le_bytes())?; // version
+    w.write_all(&0u16.to_le_bytes())?; // reserved
+    w.write_all(&(recs.len() as u32).to_le_bytes())?; // count
+    w.write_all(&0u32.to_le_bytes())?; // reserved2
+
+    // Records (16 B each): [hash u64][verify u32][doc u32], sorted by (hash, doc).
+    for (hash, verify, doc) in &recs {
+        w.write_all(&hash.to_le_bytes())?;
+        w.write_all(&verify.to_le_bytes())?;
+        w.write_all(&doc.to_le_bytes())?;
     }
     Ok(())
 }

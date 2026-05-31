@@ -9,14 +9,17 @@
 //! so the same code path works on both the main thread (`Window`) and inside a
 //! Web Worker (`WorkerGlobalScope`).
 //!
-//! Build: `wasm-pack build --target web --features wasm`. The host serving the
-//! index must support HTTP Range requests; pass the index URL to
-//! [`RrsIndex::open`].
+//! Build: `wasm-pack build --target web --features wasm`. To also inflate
+//! zstd-compressed (version-2) records in the browser, add the `zstd` feature:
+//! `wasm-pack build --target web --features "wasm zstd"` — the decode path is the
+//! pure-Rust `ruzstd` decoder, so it builds for wasm. The host serving the index
+//! must support HTTP Range requests; pass the index URL to [`RrsIndex::open`].
 
 use crate::catalog::Catalog;
 use crate::facet::{FacetIndex, Field};
 use crate::fetch::{FetchError, RangeFetch};
 use crate::index::{Cursor, Index};
+use crate::lookup::Lookup;
 use crate::records::RecordStore;
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint32Array, Uint8Array};
 use roaring::RoaringBitmap;
@@ -403,6 +406,24 @@ impl RrsRecords {
         Ok(RrsRecords { inner })
     }
 
+    /// Boots a record store and attaches the shared zstd dictionary `dict` (the
+    /// `*.dict` sidecar's bytes, e.g. fetched once at boot, passed as a
+    /// `Uint8Array`), so version-2 compressed records inflate transparently.
+    /// Requires the crate to be built with the `zstd` feature for a compressed
+    /// store; a raw store ignores the dictionary. Returns a `Promise<RrsRecords>`.
+    #[wasm_bindgen(js_name = openWithDict)]
+    pub async fn open_with_dict(
+        idx_url: String,
+        bin_url: String,
+        dict: Vec<u8>,
+    ) -> Result<RrsRecords, JsError> {
+        let inner =
+            RecordStore::open_with_dict(WasmFetch::new(idx_url), WasmFetch::new(bin_url), dict)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrsRecords { inner })
+    }
+
     /// Number of records (doc IDs `0..len`).
     pub fn len(&self) -> u32 {
         self.inner.len()
@@ -574,6 +595,28 @@ impl RrsCatalog {
         Ok(())
     }
 
+    /// Opens the record store (`idx_url` offset index + `bin_url` record blob)
+    /// with the shared zstd dictionary `dict` (the `*.dict` sidecar's bytes,
+    /// passed as a `Uint8Array`) and attaches it, so a version-2 compressed store
+    /// inflates records transparently in [`RrsCatalog::search`]. Requires the
+    /// crate to be built with the `zstd` feature for a compressed store; a raw
+    /// store ignores the dictionary.
+    #[wasm_bindgen(js_name = openRecordsWithDict)]
+    pub async fn open_records_with_dict(
+        &mut self,
+        idx_url: String,
+        bin_url: String,
+        dict: Vec<u8>,
+    ) -> Result<(), JsError> {
+        let prev = self.inner.take().expect("catalog present");
+        self.inner = Some(
+            prev.with_records_dict(WasmFetch::new(idx_url), WasmFetch::new(bin_url), dict)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?,
+        );
+        Ok(())
+    }
+
     /// Runs the full search flow and resolves to a JS object:
     /// `{ ids: Uint32Array, records: Array<Uint8Array|null> | null,
     /// facetCounts: Array<{field, cats:[{name, count}]}> | null }`.
@@ -719,6 +762,46 @@ impl WasmBitmap {
     /// `Uint32Array`.
     pub fn page(&self, offset: usize, limit: usize) -> Vec<u32> {
         self.inner.iter().skip(offset).take(limit).collect()
+    }
+}
+
+/// A range-fetchable identifier exact-match index (`RRIL`) exposed to JavaScript:
+/// resolves an ISBN/ASIN/… to the ranked doc IDs of the title(s) carrying it, over
+/// HTTP Range. Pairs with the trigram index, which no longer carries identifiers.
+#[wasm_bindgen]
+pub struct RrsLookup {
+    inner: Lookup<WasmFetch>,
+}
+
+#[wasm_bindgen]
+impl RrsLookup {
+    /// Boots the index at `url` (reads the 16-byte header). Returns a
+    /// `Promise<RrsLookup>`.
+    pub async fn open(url: String) -> Result<RrsLookup, JsError> {
+        let inner = Lookup::open(WasmFetch::new(url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrsLookup { inner })
+    }
+
+    /// Resolves `identifier` to the doc IDs of the title(s) carrying it (most
+    /// popular first), as a `Uint32Array`. Empty if none.
+    pub async fn lookup(&self, identifier: String) -> Result<Vec<u32>, JsError> {
+        self.inner
+            .lookup(&identifier)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Number of index entries.
+    pub fn len(&self) -> u32 {
+        self.inner.len()
+    }
+
+    /// Whether the index holds no entries.
+    #[wasm_bindgen(js_name = isEmpty)]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 }
 

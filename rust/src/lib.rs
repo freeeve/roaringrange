@@ -10,6 +10,7 @@ pub mod catalog;
 pub mod facet;
 pub mod fetch;
 pub mod index;
+pub mod lookup;
 pub mod ngram;
 pub mod records;
 
@@ -24,6 +25,7 @@ pub use catalog::{Catalog, SearchPage};
 pub use facet::FacetIndex;
 pub use fetch::{FetchError, MemoryFetch, RangeFetch};
 pub use index::{Index, IndexError, ResolvedFilter};
+pub use lookup::Lookup;
 pub use ngram::ngram_keys;
 pub use records::RecordStore;
 

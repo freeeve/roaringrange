@@ -27,6 +27,26 @@ wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 
+# Optional zstd record compression with a shared dictionary, behind the `zstd`
+# feature. Two codecs split by direction so the same feature works on every
+# target:
+#   - `ruzstd` (pure Rust) drives the DECODE path the reader/wasm needs. Decode
+#     WITH a shared dictionary is public since 0.8.2 — which is all the browser
+#     needs (it only ever decompresses; it never compresses).
+#   - `zstd` (C `libzstd`) drives the native ENCODE + dictionary-TRAIN path
+#     ([`build::write_records_zstd`]/[`build::train_record_dict`]). It is declared
+#     under the `cfg(not(wasm32))` target table below, so Cargo never compiles
+#     libzstd's C/asm for the browser reader.
+ruzstd = { version = "0.8", optional = true }
+
+# The C-backed `zstd` crate (native ENCODE + dictionary TRAIN) lives under this
+# target table so it is NEVER compiled for wasm32 — libzstd's C/asm does not build
+# for that target. On native it is pulled in by the `zstd` feature; on wasm the
+# `zstd` feature pulls only `ruzstd` (decode). `zdict_builder` enables
+# `zstd::dict::from_samples` (the dictionary trainer), off by default in the crate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+zstd = { version = "0.13", optional = true, features = ["zdict_builder"] }
+
 [dependencies.web-sys]
 version = "0.3"
 optional = true
@@ -47,4 +67,18 @@ wasm = [
     "dep:wasm-bindgen-futures",
     "dep:js-sys",
     "dep:web-sys",
+]
+
+# Optional per-record zstd compression with a shared dictionary. Additive: with
+# the feature off the reader still reads raw (tag-0) records byte-for-byte, and a
+# tag-1 (compressed) record surfaces a clear error instead of decompressing. The
+# DECODE path compiles on every target (pure-Rust `ruzstd`); the C-backed encode
+# and dictionary trainer are native-only (see the dependency comments). Build the
+# browser reader that must inflate records with
+# `wasm-pack build --target web --features "wasm zstd"`.
+zstd = [
+    "dep:ruzstd",
+    # The C `zstd` crate is native-only; on wasm32 it is excluded by the cfg
+    # gates on the encode/train code, and Cargo will not pull it for that target.
+    "dep:zstd",
 ]

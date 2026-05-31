@@ -617,3 +617,98 @@ fn reads_go_written_rrsr_golden_bytes() {
     assert_eq!(block_on(store.get(2)).unwrap().unwrap(), b"hello");
     assert!(block_on(store.get(3)).unwrap().is_none());
 }
+
+/// Round-trips the `RRIL` identifier index through [`crate::build::write_lookup`]
+/// and the [`crate::lookup::Lookup`] reader: a write → open → lookup loop must
+/// resolve known identifiers (hyphen/case-insensitively, both editions of a
+/// shared ISBN in ascending doc order) and miss unknown ones.
+#[test]
+fn write_lookup_round_trips_through_reader() {
+    use crate::build::write_lookup;
+    use crate::lookup::Lookup;
+
+    // The same ISBN on two editions (docs 5, 7); an ASIN on doc 10.
+    let entries = vec![
+        ("978-1-234567-89-0".to_string(), 5u32),
+        ("B00ABC123X".to_string(), 10),
+        ("978-1-234567-89-0".to_string(), 7),
+    ];
+    let mut buf = Vec::new();
+    write_lookup(&mut buf, &entries).unwrap();
+
+    let lk = block_on(Lookup::open(MemoryFetch::new(buf))).unwrap();
+    assert_eq!(lk.len(), 3);
+    assert!(!lk.is_empty());
+    // Hyphen/case-insensitive ISBN -> both editions, ascending doc (rank) order.
+    assert_eq!(block_on(lk.lookup("9781234567890")).unwrap(), vec![5, 7]);
+    // ASIN, case-insensitive.
+    assert_eq!(block_on(lk.lookup("b00abc123x")).unwrap(), vec![10]);
+    // Misses return an empty result.
+    assert!(block_on(lk.lookup("0000000000000")).unwrap().is_empty());
+    assert!(block_on(lk.lookup("")).unwrap().is_empty());
+}
+
+/// Round-trips a zstd-compressed (version-2) record store: train a shared
+/// dictionary over the records, write them with
+/// [`crate::build::write_records_zstd`], then read them back via
+/// [`crate::records::RecordStore::open_with_dict`] and assert each decoded record
+/// equals the original. A zero-length record stays addressable. Also asserts that
+/// opening the same compressed store *without* the dictionary surfaces an error
+/// (never panics) on a compressed record. Gated on the `zstd` feature.
+#[cfg(feature = "zstd")]
+#[test]
+fn write_records_zstd_round_trips_with_dict() {
+    use crate::build::{train_record_dict, write_records_zstd};
+    use crate::records::RecordStore;
+
+    // Self-similar JSON-ish records (repeated keys) so the dictionary has signal.
+    let recs: Vec<Vec<u8>> = (0..64u32)
+        .map(|i| {
+            format!(
+                r#"{{"id":"W{i}","title":"a study of widgets number {i}","venue":"Journal of Widgets","year":20{:02}}}"#,
+                i % 25
+            )
+            .into_bytes()
+        })
+        .chain(std::iter::once(Vec::new())) // a zero-length record stays addressable
+        .collect();
+
+    let samples: Vec<&[u8]> = recs.iter().map(|r| r.as_slice()).collect();
+    let dict = train_record_dict(&samples, 4096).unwrap();
+    assert!(!dict.is_empty(), "trained dictionary should be non-empty");
+
+    let mut bin = Vec::new();
+    let mut idx = Vec::new();
+    write_records_zstd(&mut bin, &mut idx, &recs, &dict, 19).unwrap();
+    // Version-2 framed store.
+    assert_eq!(u16::from_le_bytes(idx[4..6].try_into().unwrap()), 2);
+
+    let store = block_on(RecordStore::open_with_dict(
+        MemoryFetch::new(idx.clone()),
+        MemoryFetch::new(bin.clone()),
+        dict,
+    ))
+    .unwrap();
+    assert_eq!(store.len() as usize, recs.len());
+    for (d, rec) in recs.iter().enumerate() {
+        assert_eq!(
+            &block_on(store.get(d as u32)).unwrap().unwrap(),
+            rec,
+            "record {d} must round-trip"
+        );
+    }
+
+    // The same compressed store opened without a dictionary must error (not
+    // panic) on a compressed record. Record 0 is non-trivial JSON, so it was
+    // compressed (tag 1); decoding it without the dictionary fails cleanly.
+    let no_dict = block_on(RecordStore::open(
+        MemoryFetch::new(idx),
+        MemoryFetch::new(bin),
+    ))
+    .unwrap();
+    let got = block_on(no_dict.get(0));
+    assert!(
+        matches!(got, Err(crate::index::IndexError::Malformed(_))),
+        "expected Malformed without a dictionary, got {got:?}"
+    );
+}

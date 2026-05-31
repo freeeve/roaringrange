@@ -71,6 +71,20 @@ impl<F: RangeFetch + Clone> Catalog<F> {
         Ok(self)
     }
 
+    /// Opens the record store and attaches the shared zstd `dict` (the `*.dict`
+    /// sidecar's bytes), so a version-2 compressed store's records inflate
+    /// transparently in [`Catalog::search`]. A raw store ignores the dictionary,
+    /// so this is always safe to use. Builder style: consumes and returns `self`.
+    pub async fn with_records_dict(
+        mut self,
+        idx: F,
+        bin: F,
+        dict: Vec<u8>,
+    ) -> Result<Self, IndexError> {
+        self.records = Some(RecordStore::open_with_dict(idx, bin, dict).await?);
+        Ok(self)
+    }
+
     /// The facet fields and their categories, or an empty slice when no facet
     /// sidecar is attached. The order matches [`SearchPage::facet_counts`].
     pub fn fields(&self) -> &[crate::facet::Field] {
