@@ -176,6 +176,26 @@ with an abstract on every doc); here it's the partial abstract coverage that
 flattens the density. The `density` example re-runs the analysis on any
 index/query.
 
+### Rarest-trigram candidates + verify
+
+Idea: skip the common trigrams' multi-MB postings entirely — seed candidates by
+intersecting only the *rarest* trigrams, then verify each against its record's
+stored text (title + abstract + authors + venue), keeping the true matches.
+
+Why it didn't pan out: client-side, egress is floored by the **result-set size**.
+The candidate set can't shrink below the number of results, and verifying that
+many records costs ~`result_count × record_size`. Measured on the live 47.8M
+index (`rust/examples/candidates`): `machine learning` (171k results) still has
+~195k candidates after seeding the 4 rarest trigrams → ~190 MB of record
+verification, *worse* than the 53 MB full intersection. It helps only sparse
+results (`posthuman became`, 317 → ~12 MB vs 30 MB), which the lazy tail already
+gates behind an explicit load. `Index::search_candidates` and the `candidates`
+example stay for re-measuring.
+
+Returning *just result IDs* needs the intersection to run server-side (a thin
+Lambda@Edge over in-region postings) — the one lever that beats the result-set
+floor.
+
 ## Development
 
 Enable the formatting pre-commit hook (runs `gofmt` + `cargo fmt --check` on
