@@ -13,6 +13,9 @@ pub mod index;
 pub mod ngram;
 pub mod records;
 
+/// Container-level ranged reads into tail postings (search-fetch reduction).
+mod posting;
+
 /// Native build-side writers for the `RRS`/`RRSF` formats (excluded from wasm).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod build;

@@ -339,26 +339,29 @@ impl<F: RangeFetch> Index<F> {
             return Ok(out);
         }
 
-        // WAVE 3 (only if the head AND under-fills the limit): fetch every tail
-        // posting concurrently, intersect, and append docs >= 65536.
-        let tails = self
-            .fetch_postings(&recs, |rec| {
+        // WAVE 3 (only if the head AND under-fills the limit): intersect the
+        // tails with container-level ranged reads — the rarest tail in full,
+        // then only the containers of the rest that overlap surviving candidates
+        // — so a rare phrase of common trigrams costs KB, not every full posting.
+        // Append docs >= 65536.
+        let tail_ranges: Vec<(u64, usize)> = recs
+            .iter()
+            .map(|rec| {
                 (
                     rec.head_offset.saturating_add(rec.head_size as u64),
                     rec.tail_size as usize,
                 )
             })
-            .await?;
-        if let Some(tail_and) = Self::intersect(tails) {
-            for doc in tail_and.iter() {
-                if doc < HEAD_BOUNDARY as u32 {
-                    continue; // malformed tail; the head already covers sub-boundary docs
-                }
-                if out.len() >= limit {
-                    break;
-                }
-                out.push(doc);
+            .collect();
+        let tail_and = crate::posting::tail_intersect_and(&self.fetch, &tail_ranges).await?;
+        for doc in tail_and.iter() {
+            if doc < HEAD_BOUNDARY as u32 {
+                continue; // malformed tail; the head already covers sub-boundary docs
             }
+            if out.len() >= limit {
+                break;
+            }
+            out.push(doc);
         }
         Ok(out)
     }
@@ -580,13 +583,21 @@ impl<F: RangeFetch> Cursor<F> {
                 )
             })
             .collect();
-        let reads = ranges.iter().map(|&(off, len)| self.fetch.read(off, len));
-        let results = join_all(reads).await;
-        let mut tails = Vec::with_capacity(results.len());
-        for bytes in results {
-            tails.push(deserialize(&bytes?)?);
-        }
-        if let Some(mut tail_and) = threshold(tails, self.min_match) {
+        // Strict AND (Exact mode) intersects the tails with container-level
+        // ranged reads, so a rare phrase of common trigrams costs KB instead of
+        // every full tail posting. Fuzzy threshold still needs each full posting.
+        let mut tail_and = if self.min_match == self.recs.len() {
+            crate::posting::tail_intersect_and(&self.fetch, &ranges).await?
+        } else {
+            let reads = ranges.iter().map(|&(off, len)| self.fetch.read(off, len));
+            let results = join_all(reads).await;
+            let mut tails = Vec::with_capacity(results.len());
+            for bytes in results {
+                tails.push(deserialize(&bytes?)?);
+            }
+            threshold(tails, self.min_match).unwrap_or_default()
+        };
+        if !tail_and.is_empty() {
             if let Some(f) = &self.filter {
                 tail_and &= f.tail_bitmap().await?;
             }
@@ -679,7 +690,7 @@ fn threshold(bitmaps: Vec<RoaringBitmap>, min_match: usize) -> Option<RoaringBit
 }
 
 /// Deserializes a portable RoaringBitmap.
-fn deserialize(bytes: &[u8]) -> Result<RoaringBitmap, IndexError> {
+pub(crate) fn deserialize(bytes: &[u8]) -> Result<RoaringBitmap, IndexError> {
     RoaringBitmap::deserialize_from(bytes).map_err(|e| IndexError::Roaring(e.to_string()))
 }
 
