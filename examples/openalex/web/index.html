@@ -565,6 +565,7 @@
 
       let idx = null, cur = null, records = null;
       let offset = 0, lastPage = [], lastTotal = 0;
+      let tailLoaded = false, tailPending = false;   // lazy tail: defer the (large) tail intersection until the full set is asked for
       const activeFilters = new Set();   // "field\tcategory"
       const recCache = new Map();        // docID -> record JSON
       const countSpans = new Map();      // "field\tname" -> count <span> (live, updated per search)
@@ -841,23 +842,28 @@
       }
 
       function updateResultsHead() {
-        const loaded = cur ? cur.loaded() : 0;
         const total = lastTotal;
-        if (!total) { els.resultcount.textContent = ""; return; }
-        els.resultcount.innerHTML =
-          `<b>${fmt(total)}</b> result${total === 1 ? "" : "s"}` +
-          (loaded && loaded < total ? ` <span style="color:var(--ink-faint)">(${fmt(loaded)} ranked so far)</span>` : "");
+        if (!total && !tailPending) { els.resultcount.textContent = ""; return; }
+        if (tailPending) {
+          const lead = total
+            ? `<b>${fmt(total)}</b> popular result${total === 1 ? "" : "s"}`
+            : `No matches in the popular set`;
+          els.resultcount.innerHTML =
+            `${lead} · <button type="button" id="loadall" style="margin-left:2px;padding:2px 9px;border:1px solid #c7d2fe;border-radius:6px;background:#eef2ff;color:#3b5bdb;cursor:pointer;font:inherit;font-size:12px">load full results</button>`;
+        } else {
+          els.resultcount.innerHTML = `<b>${fmt(total)}</b> result${total === 1 ? "" : "s"}`;
+        }
       }
 
       function updatePager() {
         const hasPrev = offset > 0;
-        const hasNext = lastPage.length === PAGE;
+        const hasNext = offset + lastPage.length < lastTotal;
         els.prev.disabled = !hasPrev;
         els.next.disabled = !hasNext;
         if (!lastTotal) { els.pager.hidden = true; return; }
         els.pager.hidden = false;
         const from = offset + 1, to = offset + lastPage.length;
-        els.pginfo.textContent = `${fmt(from)}–${fmt(to)} of ${fmt(lastTotal)}`;
+        els.pginfo.textContent = `${fmt(from)}–${fmt(to)} of ${fmt(lastTotal)}${tailPending ? "+" : ""}`;
       }
 
       /* -------- paging: pull a page of doc IDs, then fetch their records --------
@@ -867,14 +873,24 @@
         if (!cur) return;
         offset = Math.max(0, o);
         skeletons(Math.min(PAGE, 8));
+        // Lazy tail: page only the popular head until the full set is requested
+        // (the "load full results" button, or a deep offset landing past the
+        // head). Clamping the page limit to the head keeps cur.page from reaching
+        // into the tail; loadTail() pulls it once when we do want everything.
+        if (!tailLoaded && offset >= cur.headCount() && cur.pendingTail()) tailLoaded = true;
         const pgReq0 = reqs, pgByte0 = bytes;
         const t0 = performance.now();
         let ids;
-        try { ids = await cur.page(offset, PAGE); }
+        try {
+          if (tailLoaded && cur.pendingTail()) await cur.loadTail();
+          const limit = tailLoaded ? PAGE : Math.min(PAGE, Math.max(0, cur.headCount() - offset));
+          ids = await cur.page(offset, limit);
+        }
         catch (e) { els.mSummary.textContent = `error: ${e}`; return; }
         const searchMs = extraMs + (performance.now() - t0);
         lastPage = Array.from(ids);
-        lastTotal = cur.loaded();
+        lastTotal = tailLoaded ? cur.loaded() : cur.headCount();
+        tailPending = !tailLoaded && cur.pendingTail();
 
         const missing = lastPage.filter((id) => !recCache.has(id));
         const recReq0 = reqs, recByte0 = bytes, recT0 = performance.now();
@@ -893,10 +909,17 @@
         setPerf({
           search: { ms: searchMs, reqs: searchReqs, bytes: searchBytes },
           results: { ms: recMs, reqs: recReqs, bytes: recBytes },
-          summary: lastTotal
-            ? `${fmt(lastTotal)} result${lastTotal === 1 ? "" : "s"} in ${(searchMs + recMs).toFixed(0)} ms`
+          summary: (lastTotal || tailPending)
+            ? `${fmt(lastTotal)}${tailPending ? "+" : ""} result${lastTotal === 1 && !tailPending ? "" : "s"} in ${(searchMs + recMs).toFixed(0)} ms`
             : "no results",
         });
+      }
+
+      /* -------- load the full result set (the lazy tail) on demand -------- */
+      async function loadAll() {
+        if (!cur || tailLoaded) return;
+        tailLoaded = true;   // goPage pulls the tail once, then pages over the full set
+        await goPage(0);
       }
 
       let searchSeq = 0;   // bumped per query so a stale, slower earlier search can bail before rendering
@@ -908,6 +931,7 @@
           els.results.innerHTML = `<div class="empty">Type a query to search OpenAlex works.</div>`;
           els.resultcount.textContent = "";
           els.pager.hidden = true;
+          tailPending = false;
           applyFacetCounts(null);
           syncUrl();
           return;
@@ -915,6 +939,7 @@
         const mySeq = ++searchSeq;
         reqs = 0; bytes = 0;
         recCache.clear();
+        tailLoaded = false;   // a new query starts from the popular head; the tail loads on demand
         const mm = Number.parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
         const filters = Array.from(activeFilters);
         const t0 = performance.now();
@@ -972,6 +997,9 @@
       els.q.addEventListener("input", scheduleSearch);
       document.querySelectorAll('input[name="fuzz"]').forEach((r) =>
         r.addEventListener("change", () => runSearch(true)));
+      els.resultcount.addEventListener("click", (e) => {
+        if (e.target.closest("#loadall")) loadAll();
+      });
       els.results.addEventListener("click", (e) => {
         const btn = e.target.closest(".amore");
         if (!btn) return;

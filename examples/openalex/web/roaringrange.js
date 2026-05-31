@@ -182,6 +182,23 @@ export class RrsCursor {
         }
     }
     /**
+     * Number of head (popular) results — available immediately, no tail fetch.
+     * @returns {number}
+     */
+    headCount() {
+        const ret = wasm.rrscursor_headCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Fetches the lazy tail intersection on demand; afterwards `loaded`/`page`
+     * cover the full result set.
+     * @returns {Promise<void>}
+     */
+    loadTail() {
+        const ret = wasm.rrscursor_loadTail(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * Number of doc IDs materialized so far.
      * @returns {number}
      */
@@ -209,6 +226,14 @@ export class RrsCursor {
     page(offset, limit) {
         const ret = wasm.rrscursor_page(this.__wbg_ptr, offset, limit);
         return ret;
+    }
+    /**
+     * Whether loading the tail could still add results (its intersection is unfetched).
+     * @returns {boolean}
+     */
+    pendingTail() {
+        const ret = wasm.rrscursor_pendingTail(this.__wbg_ptr);
+        return ret !== 0;
     }
 }
 if (Symbol.dispose) RrsCursor.prototype[Symbol.dispose] = RrsCursor.prototype.free;
@@ -754,7 +779,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 163, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 168, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h68218ae5a35c5694);
             return ret;
         },

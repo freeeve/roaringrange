@@ -631,6 +631,22 @@ impl<F: RangeFetch> Cursor<F> {
     pub fn loaded(&self) -> usize {
         self.results.len()
     }
+
+    /// Number of head (popular) results — available with no tail fetch.
+    pub fn head_count(&self) -> usize {
+        self.head_result.len() as usize
+    }
+
+    /// Whether an unfetched tail intersection could still add results.
+    pub fn pending_tail(&self) -> bool {
+        !self.tail_done && !self.recs.is_empty()
+    }
+
+    /// Forces the lazy tail intersection to be fetched; afterwards `loaded` and
+    /// `page` span the full result set. A no-op once the tail is loaded.
+    pub async fn load_tail(&mut self) -> Result<(), IndexError> {
+        self.ensure(usize::MAX).await
+    }
 }
 
 /// Number of sparse-index entries: `ceil(ngrams / stride)`.

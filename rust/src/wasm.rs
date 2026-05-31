@@ -359,6 +359,28 @@ impl RrsCursor {
     pub fn loaded(&self) -> usize {
         self.inner.loaded()
     }
+
+    /// Number of head (popular) results — available immediately, no tail fetch.
+    #[wasm_bindgen(js_name = headCount)]
+    pub fn head_count(&self) -> usize {
+        self.inner.head_count()
+    }
+
+    /// Whether loading the tail could still add results (its intersection is unfetched).
+    #[wasm_bindgen(js_name = pendingTail)]
+    pub fn pending_tail(&self) -> bool {
+        self.inner.pending_tail()
+    }
+
+    /// Fetches the lazy tail intersection on demand; afterwards `loaded`/`page`
+    /// cover the full result set.
+    #[wasm_bindgen(js_name = loadTail)]
+    pub async fn load_tail(&mut self) -> Result<(), JsError> {
+        self.inner
+            .load_tail()
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
 }
 
 /// A range-fetchable `RRSR` record store exposed to JavaScript: maps a ranked
