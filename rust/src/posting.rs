@@ -30,6 +30,12 @@ const NO_RUNCONTAINER_COOKIE: u32 = 12346;
 /// one exact re-read; the body containers are still fetched selectively.
 const HEADER_PREFIX: usize = 4096;
 
+/// Needed containers within this many bytes of each other are fetched as one
+/// ranged read rather than separately, so a run of consecutive keys collapses to
+/// a single request. Bridging a gap wastes at most this many bytes but saves a
+/// round-trip — which dominates when the candidate set still spans many keys.
+const SPAN_GAP: usize = 16384;
+
 /// One container's location within a posting: its high key, cardinality (needed
 /// to re-frame it into a standalone bitmap), and byte range relative to the
 /// posting start.
@@ -122,15 +128,38 @@ async fn read_posting_subset<F: RangeFetch>(
     if needed.is_empty() {
         return Ok(RoaringBitmap::new());
     }
-    let reads = needed
-        .iter()
-        .map(|c| fetch.read(off + c.start as u64, c.len));
-    let bodies = join_all(reads).await;
-    let mut got = Vec::with_capacity(needed.len());
-    for b in bodies {
-        got.push(b?);
+    // Coalesce the needed containers (already in ascending offset order) into a
+    // few byte spans, bridging gaps up to SPAN_GAP, so a run of consecutive keys
+    // is one ranged read instead of hundreds. Each span is fetched once; the
+    // container bodies are sliced back out for reassembly.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut span_of: Vec<usize> = Vec::with_capacity(needed.len());
+    for c in &needed {
+        let (cs, ce) = (c.start, c.start + c.len);
+        match spans.last_mut() {
+            Some(last) if cs <= last.1 + SPAN_GAP => last.1 = ce,
+            _ => spans.push((cs, ce)),
+        }
+        span_of.push(spans.len() - 1);
     }
-    deserialize(&assemble(&needed, &got))
+    let reads = spans
+        .iter()
+        .map(|&(s, e)| fetch.read(off + s as u64, e - s));
+    let datas = join_all(reads).await;
+    let mut span_bytes = Vec::with_capacity(spans.len());
+    for d in datas {
+        span_bytes.push(d?);
+    }
+    let sel: Vec<(u16, u32, &[u8])> = needed
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let (s, _) = spans[span_of[i]];
+            let rel = c.start - s;
+            (c.key, c.card, &span_bytes[span_of[i]][rel..rel + c.len])
+        })
+        .collect();
+    deserialize(&assemble(&sel))
 }
 
 /// The full header length (cookie + size + descriptive header + offset table) of
@@ -190,28 +219,28 @@ fn parse_dir(header: &[u8], total: usize) -> Option<Vec<Container>> {
     Some(out)
 }
 
-/// Re-frames a selection of containers (and their fetched bodies) into a
-/// standalone portable RoaringBitmap, byte-for-byte the NO_RUNCONTAINER layout
-/// the `roaring` crate deserializes. `needed` is in ascending key order (the
-/// directory is sorted), as the format requires.
-fn assemble(needed: &[&Container], bodies: &[Vec<u8>]) -> Vec<u8> {
-    let n = needed.len();
+/// Re-frames a selection of containers into a standalone portable RoaringBitmap,
+/// byte-for-byte the NO_RUNCONTAINER layout the `roaring` crate deserializes.
+/// `sel` is `(key, cardinality, body)` in ascending key order, as the format
+/// requires.
+fn assemble(sel: &[(u16, u32, &[u8])]) -> Vec<u8> {
+    let n = sel.len();
     let data_start = 8 + n * 4 + n * 4;
-    let total: usize = bodies.iter().map(|b| b.len()).sum();
+    let total: usize = sel.iter().map(|(_, _, b)| b.len()).sum();
     let mut blob = Vec::with_capacity(data_start + total);
     blob.extend_from_slice(&NO_RUNCONTAINER_COOKIE.to_le_bytes());
     blob.extend_from_slice(&(n as u32).to_le_bytes());
-    for c in needed {
-        blob.extend_from_slice(&c.key.to_le_bytes());
-        blob.extend_from_slice(&((c.card - 1) as u16).to_le_bytes());
+    for &(key, card, _) in sel {
+        blob.extend_from_slice(&key.to_le_bytes());
+        blob.extend_from_slice(&((card - 1) as u16).to_le_bytes());
     }
     let mut pos = data_start;
-    for b in bodies {
+    for &(_, _, body) in sel {
         blob.extend_from_slice(&(pos as u32).to_le_bytes());
-        pos += b.len();
+        pos += body.len();
     }
-    for b in bodies {
-        blob.extend_from_slice(b);
+    for &(_, _, body) in sel {
+        blob.extend_from_slice(body);
     }
     blob
 }
