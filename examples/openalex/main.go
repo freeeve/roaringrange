@@ -73,11 +73,15 @@ type work struct {
 }
 
 // record is the stored JSON shape returned for a search hit. Compact keys keep
-// the record store small: id, title, authors, year, venue, cited_by_count.
+// the record store: id, title, authors, abstract, year, venue, cited_by_count.
+// The abstract (Ab) is carried so the browser can re-derive a work's indexed
+// text (title + abstract + authors + venue) and verify a query match without
+// fetching the common trigrams' postings.
 type record struct {
 	ID string `json:"id"`
 	T  string `json:"t"`
 	A  string `json:"a,omitempty"`
+	Ab string `json:"ab,omitempty"`
 	Y  int    `json:"y,omitempty"`
 	V  string `json:"v,omitempty"`
 	C  int    `json:"c"`

@@ -292,6 +292,7 @@ func buildRecord(w *work) []byte {
 		ID: trimOpenAlexID(w.ID),
 		T:  w.DisplayName,
 		A:  authorNames(w),
+		Ab: reconstructAbstract(w.AbstractIdx),
 		Y:  w.PublicationYear,
 		V:  w.PrimaryLocation.Source.DisplayName,
 		C:  w.CitedByCount,
