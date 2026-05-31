@@ -203,6 +203,30 @@
       }
       .fuzz input:focus-visible + label { outline: 2px solid var(--focus); outline-offset: -2px; }
 
+      /* ---- server-side (Lambda) opt-in ---- */
+      .srvtoggle { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+      .srvtoggle .switch {
+        display: inline-flex; align-items: center; gap: 8px;
+        font-size: 13px; font-weight: 500; color: var(--ink-soft); cursor: pointer; user-select: none;
+      }
+      .srvtoggle .switch input { position: absolute; opacity: 0; pointer-events: none; }
+      .srvtoggle .track {
+        width: 34px; height: 20px; flex: none; border-radius: 999px;
+        background: var(--line); border: 1px solid var(--line); position: relative; transition: background .15s;
+      }
+      .srvtoggle .track::after {
+        content: ""; position: absolute; top: 1px; left: 1px; width: 16px; height: 16px;
+        border-radius: 50%; background: #fff; box-shadow: var(--shadow); transition: transform .15s;
+      }
+      .srvtoggle .switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+      .srvtoggle .switch input:checked + .track::after { transform: translateX(14px); }
+      .srvtoggle .switch input:focus-visible + .track { outline: 2px solid var(--focus); outline-offset: 2px; }
+      .srvnote { font-size: 12px; color: var(--ink-faint); }
+      .srvfacetnote { display: none; font-size: 12px; line-height: 1.45; color: var(--ink-faint); padding: 4px 2px 10px; }
+      .facets.srvoff .srvfacetnote { display: block; }
+      .facets.srvoff #clearfilters { display: none; }
+      .facets.srvoff .fgroup { opacity: .45; pointer-events: none; }
+
       /* ---- perf bar ---- */
       .perfbar {
         margin-top: 14px;
@@ -499,6 +523,15 @@
           <button class="btn" id="go" type="button">Search</button>
         </div>
 
+        <div class="srvtoggle">
+          <label class="switch">
+            <input type="checkbox" id="servermode" />
+            <span class="track"></span>
+            <span>Server-side search</span>
+          </label>
+          <span class="srvnote">runs the intersection in a Lambda and returns only result IDs — KB instead of MB for huge result sets (facets off)</span>
+        </div>
+
         <div class="perfbar" id="perfbar" aria-live="polite">
           <span class="stat"><span class="lbl">boot</span><b id="m-boot">—</b></span>
           <span class="stat"><span class="lbl">search</span><b id="m-search">—</b></span>
@@ -521,6 +554,7 @@
         <div class="layout">
           <aside class="facets" id="facets" aria-label="Filters">
             <button class="clearfilters" id="clearfilters" type="button">Clear all filters</button>
+            <p class="srvfacetnote">Filters run in-browser, on the result bitmap. Turn off <b>Server-side search</b> to use them.</p>
             <div id="facetgroups"></div>
           </aside>
 
@@ -564,6 +598,12 @@
       const IDX_URL = new URL("records-47m.idx", location.href).href;
       const BIN_URL = new URL("records-47m.bin", location.href).href;
       const PAGE = 25;
+      // Optional server-side search: the regional Lambda runs the same intersection
+      // over in-region S3 reads and returns only this page's IDs + the exact total,
+      // so the multi-MB postings never egress to the browser. Opt-in via the toggle.
+      const LAMBDA_URL = "https://6ebz0mnwd0.execute-api.us-east-1.amazonaws.com/";
+      let serverMode = false;
+      let serverTotal = 0;   // exact total from the Lambda (set on page 0), cached across pages
 
       const $ = (id) => document.getElementById(id);
       const dec = new TextDecoder();
@@ -589,6 +629,7 @@
         facets: $("facets"), menutoggle: $("menutoggle"),
         mBoot: $("m-boot"), mSearch: $("m-search"), mTail: $("m-tail"), mResults: $("m-results"), mSummary: $("m-summary"),
         dsWorks: $("ds-works"), dsIndex: $("ds-index"), dsRecords: $("ds-records"),
+        servermode: $("servermode"),
       };
 
       /* Fill the header dataset line: one HEAD per static file → Content-Length.
@@ -1006,6 +1047,69 @@
         }
       }
 
+      /* -------- server-side search (the Lambda backend) --------
+         One small request returns this page's IDs + the exact total (a few hundred
+         bytes), so the intersection's multi-MB postings stay in-region and never
+         reach the browser. Uses realFetch so it stays out of the ranged byte/request
+         counters (it has no Range header anyway); the response size is measured for
+         the perf bar. total is exact only on page 0 — the client caches it. */
+      async function lambdaSearch(q, off, limit, mm) {
+        const u = new URL(LAMBDA_URL);
+        u.searchParams.set("q", q);
+        u.searchParams.set("offset", off);
+        u.searchParams.set("limit", limit);
+        if (mm) u.searchParams.set("max_missing", mm);
+        const resp = await realFetch(u.href);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const text = await resp.text();
+        const data = JSON.parse(text);
+        return { total: data.total || 0, ids: data.ids || [], bytes: new Blob([text]).size };
+      }
+
+      /* Server-mode counterpart to goPage: get the page IDs from the Lambda, then
+         fetch their records client-side (small, paginated) exactly as client mode. */
+      async function goPageServer(o) {
+        const seq = searchSeq;
+        offset = Math.max(0, o);
+        skeletons(Math.min(PAGE, 8));
+        const q = els.q.value.trim();
+        const mm = Number.parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
+        let res;
+        const t0 = performance.now();
+        try { res = await lambdaSearch(q, offset, PAGE, mm); }
+        catch (e) { if (seq === searchSeq) els.mSummary.textContent = `server search error: ${e}`; return; }
+        const lamMs = performance.now() - t0;
+        if (seq !== searchSeq) return;
+        if (offset === 0) serverTotal = res.total;   // exact only on page 0; cached for prev/next
+        lastTotal = serverTotal;
+        tailPending = false;
+        const page = res.ids;
+
+        const missing = page.filter((id) => !recCache.has(id));
+        const recReq0 = reqs, recByte0 = bytes, recT0 = performance.now();
+        const map = await fetchRecords(missing);
+        const recMs = performance.now() - recT0, recReqs = reqs - recReq0, recBytes = bytes - recByte0;
+        if (seq !== searchSeq) return;
+        for (const [id, rec] of map) recCache.set(id, rec);
+        lastPage = page;
+
+        renderCards(recCache);
+        updateResultsHead();
+        updatePager();
+        syncUrl();
+        const summary = lastTotal
+          ? `${fmt(lastTotal)} result${lastTotal === 1 ? "" : "s"} in ${(lamMs + recMs).toFixed(0)} ms · server-side`
+          : "no results";
+        setPerf({
+          search: { ms: lamMs, reqs: 1, bytes: res.bytes },
+          results: { ms: recMs, reqs: recReqs, bytes: recBytes },
+          tail: null,
+          summary,
+        });
+      }
+
+      const pageTo = (o) => (serverMode ? goPageServer(o) : goPage(o));
+
       /* -------- pull the full result set (the lazy tail); fired automatically once a query settles -------- */
       async function loadAll() {
         if (!cur || tailLoaded) return;
@@ -1036,6 +1140,13 @@
         reqs = 0; bytes = 0;
         recCache.clear();
         tailLoaded = false;   // a new query starts from the popular head; the tail loads on demand
+        if (serverMode) {
+          // The Lambda runs the intersection; no client cursor, tail, or facet counts.
+          serverTotal = 0;
+          setPerf({ tail: null });
+          await goPageServer(resetPaging ? 0 : offset);
+          return;
+        }
         const mm = Number.parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
         const filters = Array.from(activeFilters);
         const t0 = performance.now();
@@ -1115,8 +1226,16 @@
         if (rest) rest.hidden = false;
         btn.remove();
       });
-      els.prev.addEventListener("click", () => goPage(offset - PAGE));
-      els.next.addEventListener("click", () => goPage(offset + PAGE));
+      els.prev.addEventListener("click", () => pageTo(offset - PAGE));
+      els.next.addEventListener("click", () => pageTo(offset + PAGE));
+      // Server-side opt-in: swap the intersection backend. Server mode can't apply
+      // facet filters (no client cursor), so clear any and dim the panel.
+      els.servermode.addEventListener("change", () => {
+        serverMode = els.servermode.checked;
+        els.facets.classList.toggle("srvoff", serverMode);
+        if (serverMode && activeFilters.size) { activeFilters.clear(); updateClearButton(); renderFacets(); }
+        runSearch(true);
+      });
       els.clearfilters.addEventListener("click", () => {
         activeFilters.clear();
         renderFacets();
