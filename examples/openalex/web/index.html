@@ -899,6 +899,7 @@
         });
       }
 
+      let searchSeq = 0;   // bumped per query so a stale, slower earlier search can bail before rendering
       /* -------- run a query (resetPaging=true on new query / fuzz change) -------- */
       async function runSearch(resetPaging = true) {
         if (!idx) return;
@@ -911,6 +912,7 @@
           syncUrl();
           return;
         }
+        const mySeq = ++searchSeq;
         reqs = 0; bytes = 0;
         recCache.clear();
         const mm = Number.parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
@@ -918,6 +920,7 @@
         const t0 = performance.now();
         try { cur = await idx.searchCursorFiltered(q, mm, filters); }
         catch (e) { els.mSummary.textContent = `error: ${e}`; return; }
+        if (mySeq !== searchSeq) return;   // a newer keystroke superseded this search
         const openMs = performance.now() - t0;
         const openReqs = reqs;   // dict-block + head-posting reads from the cursor open
         try { applyFacetCounts(cur.facetCountsJson()); } catch (_) {}
@@ -951,8 +954,21 @@
       }
 
       /* -------- events -------- */
-      els.go.addEventListener("click", () => runSearch(true));
-      els.q.addEventListener("keydown", (e) => { if (e.key === "Enter") runSearch(true); });
+      // Search-as-you-type: debounce input so a query fires shortly after the user
+      // pauses; Enter and the button search immediately. Trigram search needs ≥3
+      // chars, so 1–2-char inputs wait for more (Enter still forces them).
+      let searchTimer;
+      const SEARCH_DEBOUNCE_MS = 250;
+      function searchNow() { clearTimeout(searchTimer); runSearch(true); }
+      function scheduleSearch() {
+        clearTimeout(searchTimer);
+        const len = els.q.value.trim().length;
+        if (len >= 3) searchTimer = setTimeout(searchNow, SEARCH_DEBOUNCE_MS);
+        else if (len === 0) searchNow();   // cleared → reset immediately
+      }
+      els.go.addEventListener("click", searchNow);
+      els.q.addEventListener("keydown", (e) => { if (e.key === "Enter") searchNow(); });
+      els.q.addEventListener("input", scheduleSearch);
       document.querySelectorAll('input[name="fuzz"]').forEach((r) =>
         r.addEventListener("change", () => runSearch(true)));
       els.results.addEventListener("click", (e) => {
