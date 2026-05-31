@@ -225,6 +225,18 @@
             </figcaption>
           </figure>
           <figure class="diagram">
+            <img src="search-detail.svg" alt="Two-tier search: the popular head paints instantly, then the full tail auto-loads via container-level range reads" />
+            <figcaption>
+              Two tiers in time. Doc IDs are numbered by citation count, so the most-cited matches
+              live in the “head” and a ranked top-K paints instantly from one cheap wave. The rest of
+              the corpus is the “tail”; once the query settles it auto-loads in the background —
+              intersecting the rarest posting first, then fetching only the roaring containers the
+              surviving candidates still touch (adjacent ones coalesced into single range reads). A
+              rare phrase of common trigrams costs a few hundred KB instead of the tens of MB of
+              reading every full tail.
+            </figcaption>
+          </figure>
+          <figure class="diagram">
             <img src="boot.svg" alt="What loads at boot versus what stays in S3" />
             <figcaption>
               That's why boot is cheap: the browser downloads only the small top of each

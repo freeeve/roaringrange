@@ -481,6 +481,7 @@
         <div class="perfbar" id="perfbar" aria-live="polite">
           <span class="stat"><span class="lbl">boot</span><b id="m-boot">—</b></span>
           <span class="stat"><span class="lbl">search</span><b id="m-search">—</b></span>
+          <span class="stat"><span class="lbl">tail</span><b id="m-tail">—</b></span>
           <span class="stat"><span class="lbl">results</span><b id="m-results">—</b></span>
           <span class="summary" id="m-summary">booting…</span>
         </div>
@@ -554,7 +555,7 @@
         pager: $("pager"), prev: $("prev"), next: $("next"), pginfo: $("pginfo"),
         facetgroups: $("facetgroups"), clearfilters: $("clearfilters"),
         facets: $("facets"), menutoggle: $("menutoggle"),
-        mBoot: $("m-boot"), mSearch: $("m-search"), mResults: $("m-results"), mSummary: $("m-summary"),
+        mBoot: $("m-boot"), mSearch: $("m-search"), mTail: $("m-tail"), mResults: $("m-results"), mSummary: $("m-summary"),
       };
 
       /* facet field display names + which groups get a scroll box + text filter */
@@ -641,10 +642,14 @@
       }
 
       /* -------- perf bar -------- */
-      function setPerf({ boot, search, results, summary } = {}) {
+      function setPerf({ boot, search, tail, results, summary } = {}) {
         if (boot !== undefined) els.mBoot.textContent = `${boot.toFixed(1)} ms`;
         if (search !== undefined) {
           els.mSearch.textContent = `${search.ms.toFixed(2)} ms · ${search.reqs} req · ${(search.bytes / 1024).toFixed(1)} KB`;
+        }
+        if (tail !== undefined) {
+          els.mTail.textContent = tail === null ? "—"
+            : `${tail.ms.toFixed(1)} ms · ${tail.reqs} req · ${(tail.bytes / 1024).toFixed(1)} KB`;
         }
         if (results !== undefined) {
           els.mResults.textContent = `${results.ms.toFixed(1)} ms · ${results.reqs} req · ${(results.bytes / 1024).toFixed(1)} KB`;
@@ -847,9 +852,8 @@
         if (tailPending) {
           const lead = total
             ? `<b>${fmt(total)}</b> popular result${total === 1 ? "" : "s"}`
-            : `No matches in the popular set`;
-          els.resultcount.innerHTML =
-            `${lead} · <button type="button" id="loadall" style="margin-left:2px;padding:2px 9px;border:1px solid #c7d2fe;border-radius:6px;background:#eef2ff;color:#3b5bdb;cursor:pointer;font:inherit;font-size:12px">load full results</button>`;
+            : `Searching the full corpus`;
+          els.resultcount.innerHTML = `${lead} <span style="color:var(--ink-faint)">· loading the rest…</span>`;
         } else {
           els.resultcount.innerHTML = `<b>${fmt(total)}</b> result${total === 1 ? "" : "s"}`;
         }
@@ -870,52 +874,61 @@
          extraMs folds an upstream cursor-open into the reported index-search latency
          (record HTTP Range fetches are intentionally excluded from search ms). */
       async function goPage(o, extraMs = 0, openReqs = 0, openBytes = 0) {
-        if (!cur) return;
+        const c = cur;
+        if (!c) return;
+        const seq = searchSeq;
         offset = Math.max(0, o);
         skeletons(Math.min(PAGE, 8));
-        // Lazy tail: page only the popular head until the full set is requested
-        // (the "load full results" button, or a deep offset landing past the
-        // head). Clamping the page limit to the head keeps cur.page from reaching
-        // into the tail; loadTail() pulls it once when we do want everything.
-        if (!tailLoaded && offset >= cur.headCount() && cur.pendingTail()) tailLoaded = true;
-        const pgReq0 = reqs, pgByte0 = bytes;
-        const t0 = performance.now();
+        // Lazy tail: page only the popular head until the full set is wanted (the
+        // auto-pull once a query settles, or a deep offset past the head). The
+        // tail load is timed on its own so it reports as a separate "tail" stat
+        // rather than clobbering the head's search numbers.
+        if (!tailLoaded && offset >= c.headCount() && c.pendingTail()) tailLoaded = true;
+        const willLoadTail = tailLoaded && c.pendingTail();
+        const pgReq0 = reqs, pgByte0 = bytes, t0 = performance.now();
         let ids;
         try {
-          if (tailLoaded && cur.pendingTail()) await cur.loadTail();
-          const limit = tailLoaded ? PAGE : Math.min(PAGE, Math.max(0, cur.headCount() - offset));
-          ids = await cur.page(offset, limit);
+          if (willLoadTail) await c.loadTail();
+          const limit = tailLoaded ? PAGE : Math.min(PAGE, Math.max(0, c.headCount() - offset));
+          ids = await c.page(offset, limit);
         }
-        catch (e) { els.mSummary.textContent = `error: ${e}`; return; }
-        const searchMs = extraMs + (performance.now() - t0);
-        lastPage = Array.from(ids);
-        lastTotal = tailLoaded ? cur.loaded() : cur.headCount();
-        tailPending = !tailLoaded && cur.pendingTail();
+        catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
+        const idxMs = extraMs + (performance.now() - t0);   // index work this call: head search, or the tail load
+        const idxReqs = openReqs + (reqs - pgReq0);
+        const idxBytes = openBytes + (bytes - pgByte0);
+        const page = Array.from(ids);
 
-        const missing = lastPage.filter((id) => !recCache.has(id));
+        const missing = page.filter((id) => !recCache.has(id));
         const recReq0 = reqs, recByte0 = bytes, recT0 = performance.now();
-        const searchReqs = openReqs + (recReq0 - pgReq0);     // cursor-open + this page's tail reads
-        const searchBytes = openBytes + (recByte0 - pgByte0);
         const map = await fetchRecords(missing);
-        const recMs = performance.now() - recT0;    // record HTTP-Range fetch only
-        const recReqs = reqs - recReq0;             // ≈2 reads per uncached doc
-        const recBytes = bytes - recByte0;
+        const recMs = performance.now() - recT0, recReqs = reqs - recReq0, recBytes = bytes - recByte0;
+        if (seq !== searchSeq) return;   // a newer query superseded this page — drop the stale render
         for (const [id, rec] of map) recCache.set(id, rec);
+        lastPage = page;
+        lastTotal = tailLoaded ? c.loaded() : c.headCount();
+        tailPending = !tailLoaded && c.pendingTail();
 
         renderCards(recCache);
         updateResultsHead();
         updatePager();
         syncUrl();
-        setPerf({
-          search: { ms: searchMs, reqs: searchReqs, bytes: searchBytes },
-          results: { ms: recMs, reqs: recReqs, bytes: recBytes },
-          summary: (lastTotal || tailPending)
-            ? `${fmt(lastTotal)}${tailPending ? "+" : ""} result${lastTotal === 1 && !tailPending ? "" : "s"} in ${(searchMs + recMs).toFixed(0)} ms`
-            : "no results",
-        });
+        const summary = (lastTotal || tailPending)
+          ? `${fmt(lastTotal)}${tailPending ? "+" : ""} result${lastTotal === 1 && !tailPending ? "" : "s"} in ${(idxMs + recMs).toFixed(0)} ms`
+          : "no results";
+        if (willLoadTail) {
+          // This call fetched the lazy tail — report it on its own; the head's
+          // search and results stats from the first render stay put.
+          setPerf({ tail: { ms: idxMs, reqs: idxReqs, bytes: idxBytes }, summary });
+        } else {
+          setPerf({
+            search: { ms: idxMs, reqs: idxReqs, bytes: idxBytes },
+            results: { ms: recMs, reqs: recReqs, bytes: recBytes },
+            summary,
+          });
+        }
       }
 
-      /* -------- load the full result set (the lazy tail) on demand -------- */
+      /* -------- pull the full result set (the lazy tail); fired automatically once a query settles -------- */
       async function loadAll() {
         if (!cur || tailLoaded) return;
         tailLoaded = true;   // goPage pulls the tail once, then pages over the full set
@@ -926,6 +939,7 @@
       /* -------- run a query (resetPaging=true on new query / fuzz change) -------- */
       async function runSearch(resetPaging = true) {
         if (!idx) return;
+        clearTimeout(autoPullTimer);
         const q = els.q.value.trim();
         if (!q) {
           els.results.innerHTML = `<div class="empty">Type a query to search OpenAlex works.</div>`;
@@ -950,7 +964,13 @@
         const openReqs = reqs;     // dict-block + head-posting reads from the cursor open
         const openBytes = bytes;
         try { applyFacetCounts(cur.facetCountsJson()); } catch (_) {}
+        setPerf({ tail: null });   // new query: clear any prior tail-load stat
         await goPage(resetPaging ? 0 : offset, openMs, openReqs, openBytes);
+        // Auto-pull: the popular head is shown; once the query settles, fetch the
+        // full tail in the background so the complete set fills in on its own.
+        if (mySeq === searchSeq && cur && !tailLoaded && cur.pendingTail()) {
+          autoPullTimer = setTimeout(() => { if (mySeq === searchSeq) loadAll(); }, AUTO_PULL_MS);
+        }
       }
 
       /* -------- boot -------- */
@@ -985,6 +1005,8 @@
       // chars, so 1–2-char inputs wait for more (Enter still forces them).
       let searchTimer;
       const SEARCH_DEBOUNCE_MS = 250;
+      let autoPullTimer;              // settle delay before auto-pulling the full tail in the background
+      const AUTO_PULL_MS = 500;
       function searchNow() { clearTimeout(searchTimer); runSearch(true); }
       function scheduleSearch() {
         clearTimeout(searchTimer);
@@ -997,9 +1019,6 @@
       els.q.addEventListener("input", scheduleSearch);
       document.querySelectorAll('input[name="fuzz"]').forEach((r) =>
         r.addEventListener("change", () => runSearch(true)));
-      els.resultcount.addEventListener("click", (e) => {
-        if (e.target.closest("#loadall")) loadAll();
-      });
       els.results.addEventListener("click", (e) => {
         const btn = e.target.closest(".amore");
         if (!btn) return;
