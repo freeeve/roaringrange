@@ -107,6 +107,20 @@
         padding: 1px 6px;
         border-radius: 5px;
       }
+      .subtag {
+        margin: 3px 0 0;
+        color: var(--ink-soft);
+        font-size: 12.5px;
+        opacity: 0.85;
+      }
+      .subtag a {
+        color: inherit;
+        text-decoration: underline;
+        text-decoration-color: var(--line);
+        text-underline-offset: 2px;
+      }
+      .subtag a:hover { text-decoration-color: currentColor; }
+      #datastat b { color: var(--accent-ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 
       /* ---- search bar ---- */
       .searchrow {
@@ -452,6 +466,13 @@
         <p class="tagline">
           no backend · range-fetched from S3 · powered by <code>roaringrange</code>
         </p>
+        <p class="subtag">
+          A demo of the <a href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener">roaringrange</a>
+          search library · data from <a href="https://openalex.org" target="_blank" rel="noopener">OpenAlex</a> (CC0)
+        </p>
+        <p class="subtag" id="datastat">
+          searching <b id="ds-works">…</b> works · <b id="ds-index">…</b> index · <b id="ds-records">…</b> records, all static on S3
+        </p>
 
         <div class="searchrow">
           <div class="searchbox">
@@ -547,7 +568,18 @@
       const $ = (id) => document.getElementById(id);
       const dec = new TextDecoder();
       const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+      // OpenAlex display_names embed MathML (<mml:…> tags) for formulae; strip the
+      // markup so a title reads like its clean openalex.org form. (LaTeX like
+      // $\sqrt{…}$ is left as-is — openalex.org shows it raw too.)
+      const cleanTitle = (s) => String(s).replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
       const fmt = (n) => n.toLocaleString("en-US");
+      const fmtBytes = (n) =>
+        n >= 1e9 ? (n / 1e9).toFixed(1) + " GB"
+        : n >= 1e6 ? (n / 1e6).toFixed(0) + " MB"
+        : n >= 1e3 ? (n / 1e3).toFixed(0) + " KB"
+        : n + " B";
+      const fmtCount = (n) =>
+        n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "K" : String(n);
       const AUTHOR_SHOW = 5; // authors shown before the "+N more" expander
 
       const els = {
@@ -556,11 +588,48 @@
         facetgroups: $("facetgroups"), clearfilters: $("clearfilters"),
         facets: $("facets"), menutoggle: $("menutoggle"),
         mBoot: $("m-boot"), mSearch: $("m-search"), mTail: $("m-tail"), mResults: $("m-results"), mSummary: $("m-summary"),
+        dsWorks: $("ds-works"), dsIndex: $("ds-index"), dsRecords: $("ds-records"),
       };
+
+      /* Fill the header dataset line: one HEAD per static file → Content-Length.
+         Same-origin so no CORS, and bodyless so it costs nothing; uses realFetch to
+         stay out of the per-query byte/request counters. The record offset index is
+         8 bytes/doc, so its length also yields the exact work count. Index = postings
+         (.rrs) + facets (.rrf); records = offsets (.idx) + blob (.bin). */
+      async function loadDatasetStats() {
+        const head = async (url) => {
+          try { const r = await realFetch(url, { method: "HEAD" }); return +r.headers.get("content-length") || 0; }
+          catch (_) { return 0; }
+        };
+        const [rrs, rrf, idx, bin] = await Promise.all([head(RRS_URL), head(RRF_URL), head(IDX_URL), head(BIN_URL)]);
+        const docs = idx > 0 ? Math.round(idx / 8) - 1 : 0;
+        if (docs > 0) els.dsWorks.textContent = fmtCount(docs);
+        if (rrs + rrf > 0) els.dsIndex.textContent = fmtBytes(rrs + rrf);
+        if (idx + bin > 0) els.dsRecords.textContent = fmtBytes(idx + bin);
+      }
 
       /* facet field display names + which groups get a scroll box + text filter */
       const FIELD_LABELS = { year: "Year", type: "Type", oa: "Open Access", language: "Language", topic: "Topic" };
       const FIELD_ORDER = ["year", "type", "oa", "language", "topic"];
+      // OpenAlex stores the language facet as ISO 639-1 codes; show full names in
+      // the UI (the code stays the filter key). Unknown codes fall back to the code.
+      const LANGUAGE_NAMES = {
+        en: "English", de: "German", fr: "French", es: "Spanish", pt: "Portuguese",
+        it: "Italian", ru: "Russian", ja: "Japanese", zh: "Chinese", ko: "Korean",
+        nl: "Dutch", pl: "Polish", sv: "Swedish", da: "Danish", no: "Norwegian",
+        nb: "Norwegian Bokmål", nn: "Norwegian Nynorsk", fi: "Finnish", cs: "Czech",
+        sk: "Slovak", tr: "Turkish", ar: "Arabic", fa: "Persian", he: "Hebrew",
+        hi: "Hindi", id: "Indonesian", uk: "Ukrainian", el: "Greek", hu: "Hungarian",
+        ro: "Romanian", ca: "Catalan", sr: "Serbian", hr: "Croatian", sl: "Slovenian",
+        bg: "Bulgarian", lt: "Lithuanian", lv: "Latvian", et: "Estonian", vi: "Vietnamese",
+        th: "Thai", ms: "Malay", bn: "Bengali", ta: "Tamil", te: "Telugu", ur: "Urdu",
+        mr: "Marathi", gl: "Galician", eu: "Basque", af: "Afrikaans", sq: "Albanian",
+        mk: "Macedonian", is: "Icelandic", ga: "Irish", cy: "Welsh", la: "Latin",
+        eo: "Esperanto", hy: "Armenian", ka: "Georgian", az: "Azerbaijani", kk: "Kazakh",
+        uz: "Uzbek", be: "Belarusian", mn: "Mongolian", ne: "Nepali", si: "Sinhala",
+        my: "Burmese", km: "Khmer", lo: "Lao", am: "Amharic", sw: "Swahili",
+      };
+      const catLabel = (field, name) => (field === "language" ? LANGUAGE_NAMES[name] || name : name);
       const SCROLLABLE = new Set(["year", "language", "topic"]);
       const FACET_CAP = 100;             // max categories rendered per field (real fields run to tens of thousands)
 
@@ -709,14 +778,15 @@
 
           for (const cat of shown) {
             const key = `${field}\t${cat.name}`;
+            const label = catLabel(field, cat.name);
             const item = document.createElement("label");
             item.className = "fitem";
-            item.dataset.name = cat.name;
+            item.dataset.name = label;
             const checked = activeFilters.has(key);
             if (checked) item.classList.add("on");
             item.innerHTML =
               `<input type="checkbox" ${checked ? "checked" : ""} />` +
-              `<span class="name" title="${esc(cat.name)}">${esc(cat.name)}</span>` +
+              `<span class="name" title="${esc(label)}">${esc(label)}</span>` +
               `<span class="cnt">${fmt(cat.count || 0)}</span>`;
             const cb = item.querySelector("input");
             cb.addEventListener("change", () => {
@@ -805,7 +875,7 @@
           const card = document.createElement("article");
           card.className = "card";
 
-          const titleText = r.t || "Untitled work";
+          const titleText = cleanTitle(r.t || "") || "Untitled work";
           const titleHtml = r.id
             ? `<a href="https://openalex.org/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">${esc(titleText)}</a>`
             : esc(titleText);
@@ -1003,6 +1073,7 @@
 
         const bootMs = performance.now() - t0;
         setPerf({ boot: bootMs, summary: "ready" });
+        loadDatasetStats();   // fire-and-forget; fills the header line, off the search path
         renderFacets();
 
         const restored = applyUrlState();
