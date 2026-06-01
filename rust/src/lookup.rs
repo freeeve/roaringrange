@@ -16,6 +16,10 @@ const MAGIC: &[u8; 4] = b"RRIL";
 const HEADER_SIZE: usize = 16;
 /// Record size in bytes: hash(8) + verify(4) + doc(4).
 const REC_SIZE: usize = 16;
+/// Once the candidate window is at most this many records, [`Lookup::lookup`]
+/// fetches the whole window in one ranged read and finishes in memory, replacing
+/// the binary-search tail of adjacent single-record reads. 512 records is 8 KiB.
+const BLOCK_RECORDS: u32 = 512;
 
 /// FNV-1a offset basis for the primary identifier hash. Crate-visible so the
 /// build-side writer ([`crate::build::write_lookup`]) hashes identically.
@@ -87,10 +91,25 @@ impl<F: RangeFetch> Lookup<F> {
         Ok((read_u64(&b, 0), read_u32(&b, 8), read_u32(&b, 12)))
     }
 
+    /// Reads the contiguous record window `[start, end)` in a single ranged read.
+    /// `end` must be greater than `start` and within the index.
+    async fn read_records(&self, start: u32, end: u32) -> Result<Vec<u8>, IndexError> {
+        let off = HEADER_SIZE as u64 + start as u64 * REC_SIZE as u64;
+        let len = (end - start) as usize * REC_SIZE;
+        Ok(self.f.read(off, len).await?)
+    }
+
     /// Resolves `identifier` to the doc ID(s) of the title(s) carrying it, in
-    /// ascending (rank) order; empty if none. The binary search issues ~log2(n)
-    /// dependent ranged reads, then scans the (usually length-1) matching run,
-    /// keeping only entries whose verify hash also matches.
+    /// ascending (rank) order; empty if none.
+    ///
+    /// The table is sorted by an FNV hash whose values are ~uniformly distributed
+    /// over the `u64` range, so the search **interpolates** the next probe from the
+    /// target hash's position within the current value bracket — converging in
+    /// about `log log n` dependent reads instead of the `log2 n` of plain bisection
+    /// — and, once the window is at most [`BLOCK_RECORDS`], fetches it in one ranged
+    /// read and finishes the lower-bound + equal-hash run scan in memory. The probe
+    /// falls back to bisection whenever the value bracket is degenerate (e.g. a run
+    /// of identical hashes), which keeps the window strictly shrinking every step.
     pub async fn lookup(&self, identifier: &str) -> Result<Vec<u32>, IndexError> {
         let n = normalize_id(identifier);
         if n.is_empty() || self.count == 0 {
@@ -98,23 +117,59 @@ impl<F: RangeFetch> Lookup<F> {
         }
         let hash = fnv64a_basis(&n, FNV_OFFSET);
         let verify = fnv64a_basis(&n, FNV_VERIFY_BASIS) as u32;
+        let target = hash as u128;
 
-        // Lower bound on hash.
+        // Interpolated lower bound on `hash`. Invariant: every record below `lo`
+        // hashes < target and every record at or above `hi` hashes >= target. The
+        // value bracket [lo_val, hi_val) holds the hashes known at those ends (the
+        // virtual bounds 0 and 2^64 before any read), so the probe position is the
+        // target's linear offset within it.
         let (mut lo, mut hi) = (0u32, self.count);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
+        let (mut lo_val, mut hi_val): (u128, u128) = (0, 1u128 << 64);
+        while hi - lo > BLOCK_RECORDS {
+            let mid = if hi_val > lo_val {
+                let span = (hi - lo - 1) as u128;
+                let est = lo as u128 + (target - lo_val) * span / (hi_val - lo_val);
+                est.clamp(lo as u128, (hi - 1) as u128) as u32
+            } else {
+                lo + (hi - lo) / 2
+            };
             let (rhash, _, _) = self.record(mid).await?;
             if rhash < hash {
                 lo = mid + 1;
+                lo_val = rhash as u128 + 1;
             } else {
                 hi = mid;
+                hi_val = rhash as u128;
             }
         }
-        // Scan the matching hash run, keeping verify matches.
+
         let mut out = Vec::new();
+        if lo >= self.count {
+            return Ok(out);
+        }
+        // One ranged read covers the whole remaining window (which includes the
+        // lower bound at `hi`); the equal-hash run is tiny, so a spill past the
+        // window is rare and falls back to single-record reads.
+        let end = lo.saturating_add(BLOCK_RECORDS).min(self.count);
+        let block = self.read_records(lo, end).await?;
         let mut i = lo;
-        while i < self.count {
-            let (rhash, rverify, rdoc) = self.record(i).await?;
+        while i < end && read_u64(&block, (i - lo) as usize * REC_SIZE) < hash {
+            i += 1;
+        }
+        loop {
+            let (rhash, rverify, rdoc) = if i < end {
+                let base = (i - lo) as usize * REC_SIZE;
+                (
+                    read_u64(&block, base),
+                    read_u32(&block, base + 8),
+                    read_u32(&block, base + 12),
+                )
+            } else if i < self.count {
+                self.record(i).await?
+            } else {
+                break;
+            };
             if rhash != hash {
                 break;
             }
@@ -177,5 +232,23 @@ mod tests {
         // Misses.
         assert!(block_on(lk.lookup("0000000000000")).unwrap().is_empty());
         assert!(block_on(lk.lookup("")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolves_many_via_interpolation() {
+        // More than BLOCK_RECORDS entries, so the search interpolates before the
+        // final block read. Every id must resolve to its doc; an absent id misses.
+        let ids: Vec<String> = (0..3000u32).map(|k| format!("ID{:08}", k)).collect();
+        let pairs: Vec<(&str, u32)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.as_str(), i as u32))
+            .collect();
+        let lk = block_on(Lookup::open(MemoryFetch::new(build(&pairs)))).unwrap();
+        assert_eq!(lk.len(), 3000);
+        for (i, s) in ids.iter().enumerate() {
+            assert_eq!(block_on(lk.lookup(s)).unwrap(), vec![i as u32], "id {}", s);
+        }
+        assert!(block_on(lk.lookup("MISSING-000")).unwrap().is_empty());
     }
 }
