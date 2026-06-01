@@ -23,3 +23,6 @@ rust/webtest/
 # OS / editor
 .DS_Store
 *.swp
+
+# local session handoff notes (contains AWS resource IDs; not for the public repo)
+.session-notes.md
