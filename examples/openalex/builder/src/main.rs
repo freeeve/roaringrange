@@ -33,6 +33,9 @@
 //! zstd-compressed against a trained shared dictionary (`-records-zstd`, with
 //! `-dict`/`-dict-size`/`-zstd-level`) — all off-by-default for compression so a
 //! plain run is byte-for-byte unchanged save for the new `ab` field and lookup.
+//! Record-store zstd composes with `-chunks > 1`: the shared dictionary is trained
+//! from a sample gathered during the chunk passes, so a chunked compressed build is
+//! byte-identical to the single-pass one.
 
 use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
@@ -171,18 +174,6 @@ fn main() {
     let dict_size: usize = arg(&args, "-dict-size", "114688").parse().unwrap_or(114688);
     let zstd_level: i32 = arg(&args, "-zstd-level", "19").parse().unwrap_or(19);
 
-    // The chunked path concatenates per-chunk record temps raw, so compressing
-    // there would need the trained dictionary before the per-chunk writes (it is
-    // not available until a sample has been gathered). Rather than silently emit a
-    // raw store, refuse the combination and tell the operator to use chunks=1.
-    if records_zstd && chunks > 1 {
-        eprintln!(
-            "-records-zstd is only supported with -chunks 1 (the single-pass path); \
-             got -chunks {chunks}. Re-run with -chunks 1 for a compressed record store."
-        );
-        std::process::exit(2);
-    }
-
     let mut sources = resolve_sources(&in_arg);
     if sources.is_empty() {
         eprintln!("no input shards matched {in_arg}");
@@ -231,6 +222,7 @@ fn main() {
             &idx_path,
             &lookup_path,
             abstract_cap,
+            records_zstd.then_some((dict_path.as_str(), dict_size, zstd_level)),
             t0,
         );
         return;
@@ -599,6 +591,12 @@ fn build_source(
 /// merges the partials into one standard `.rrs`, concatenates the record temps in
 /// doc-ID order into the final store, and writes the accumulated facets — yielding
 /// the same outputs the single-pass path would, in bounded memory.
+///
+/// When `zstd` is `Some((dict_path, dict_size, level))`, the dictionary-training
+/// sample is gathered from the records during the chunk passes (no extra corpus
+/// read) and the concat step compresses the store against the trained dictionary —
+/// so `-records-zstd` works with `-chunks > 1` and produces a store byte-identical
+/// to the single-pass compressed build.
 #[allow(clippy::too_many_arguments)]
 fn build_chunked(
     sources: &[Source],
@@ -611,12 +609,21 @@ fn build_chunked(
     idx_path: &str,
     lookup_path: &str,
     abstract_cap: usize,
+    zstd: Option<(&str, usize, i32)>,
     t0: Instant,
 ) {
     let chunk_size = n.div_ceil(chunks);
     eprintln!(
         "chunked build: {chunks} chunks of ~{chunk_size} docs each (re-streams sources {chunks}×)"
     );
+
+    // Dictionary-training sample gathered during the chunk passes (no extra corpus
+    // read). `dict_stride` selects every Nth record by global doc id so the sample —
+    // and thus the trained dictionary and the compressed store — matches the
+    // single-pass path exactly, independent of chunk count. Only populated when
+    // `-records-zstd` is set.
+    let dict_stride = n.div_ceil(ZSTD_DICT_SAMPLE_CAP).max(1);
+    let mut dict_samples: Vec<Vec<u8>> = Vec::new();
 
     let tmp_dir = std::env::temp_dir();
     let stamp = std::process::id();
@@ -659,6 +666,9 @@ fn build_chunked(
                 chunk_recs[(d - lo) as usize] = rec;
             }
             doi_acc.extend(fr.dois);
+        }
+        if zstd.is_some() {
+            collect_chunk_samples(&chunk_recs, lo, dict_stride, &mut dict_samples);
         }
         let rpath = tmp_dir.join(format!("rr_chunk_{stamp}_{c}.recs"));
         write_chunk_records(&rpath, &chunk_recs).expect("write chunk records");
@@ -722,9 +732,28 @@ fn build_chunked(
         t3.elapsed().as_secs_f64()
     );
 
-    // Concatenate per-chunk record temps in doc-ID order into the final store.
+    // Train the shared zstd dictionary from the gathered sample and persist it so
+    // the concat below can compress the record store against it (and the reader can
+    // inflate it via the *.dict sidecar). `None` when -records-zstd is off, in which
+    // case the store is written raw (version 1), byte-for-byte as before.
+    let dict_and_level: Option<(Vec<u8>, i32)> = zstd.map(|(dict_path, dict_size, level)| {
+        let samples: Vec<&[u8]> = dict_samples.iter().map(|s| s.as_slice()).collect();
+        let dict = train_record_dict(&samples, dict_size).expect("train record dict");
+        std::fs::write(dict_path, &dict).expect("write dict");
+        eprintln!(
+            "trained zstd dict {} ({} bytes) from {} sampled records",
+            dict_path,
+            dict.len(),
+            dict_samples.len()
+        );
+        (dict, level)
+    });
+
+    // Concatenate per-chunk record temps in doc-ID order into the final store,
+    // compressing against the trained dictionary when -records-zstd is set.
     let t2 = Instant::now();
-    concat_chunk_records(&record_paths, n, bin_path, idx_path).expect("concat records");
+    let zstd_cfg = dict_and_level.as_ref().map(|(d, lvl)| (d.as_slice(), *lvl));
+    concat_chunk_records(&record_paths, n, bin_path, idx_path, zstd_cfg).expect("concat records");
     eprintln!(
         "wrote record store {} (+{}) in {:.1}s",
         bin_path,
@@ -909,21 +938,41 @@ fn write_chunk_records(path: &PathBuf, recs: &[Vec<u8>]) -> std::io::Result<()> 
     w.flush()
 }
 
+/// Collects the dictionary-training sample from one chunk's records: every
+/// `stride`-th record by GLOBAL doc id (`lo + local index`), skipping empties.
+/// This is exactly the set the single-pass path samples
+/// (`records.iter().step_by(stride)` then drop-empty), so the trained dictionary —
+/// and therefore the compressed store — is identical regardless of chunk count.
+fn collect_chunk_samples(chunk_recs: &[Vec<u8>], lo: u32, stride: usize, out: &mut Vec<Vec<u8>>) {
+    for (i, rec) in chunk_recs.iter().enumerate() {
+        if (lo as usize + i).is_multiple_of(stride) && !rec.is_empty() {
+            out.push(rec.clone());
+        }
+    }
+}
+
 /// Concatenates the per-chunk record temps (written by [`write_chunk_records`] in
 /// ascending chunk order, each chunk in doc-ID order) into the final record store,
 /// streaming through a [`RecordWriter`] so no chunk's records stay resident — only
 /// one record frame is held at a time. The chunk temps in order reconstruct the
-/// global doc-ID sequence (chunks are contiguous disjoint ranges), giving a store
-/// byte-identical to the single-pass path's [`write_records`] output.
+/// global doc-ID sequence (chunks are contiguous disjoint ranges). With `zstd =
+/// None` the store is byte-identical to the single-pass [`write_records`] output;
+/// with `zstd = Some((dict, level))` each record is framed and compressed against
+/// the shared dictionary, byte-identical to the single-pass [`write_records_zstd`]
+/// output (same records, order, and dictionary).
 fn concat_chunk_records(
     paths: &[PathBuf],
     n: usize,
     bin_path: &str,
     idx_path: &str,
+    zstd: Option<(&[u8], i32)>,
 ) -> std::io::Result<()> {
     let bin = BufWriter::with_capacity(1 << 20, File::create(bin_path)?);
     let idx = BufWriter::with_capacity(1 << 20, File::create(idx_path)?);
-    let mut writer = RecordWriter::new(bin, idx, n as u32)?;
+    let mut writer = match zstd {
+        Some((dict, level)) => RecordWriter::new_zstd(bin, idx, n as u32, dict, level)?,
+        None => RecordWriter::new(bin, idx, n as u32)?,
+    };
 
     for p in paths {
         let mut r = BufReader::with_capacity(1 << 20, File::open(p)?);
@@ -1189,4 +1238,118 @@ fn flag(args: &[String], flag: &str) -> bool {
 /// File size in bytes, or 0 if it can't be stat'd.
 fn file_len(path: &str) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+    use roaringrange::{MemoryFetch, RecordStore};
+
+    /// The chunked dictionary sample (gathered chunk-by-chunk via
+    /// [`collect_chunk_samples`]) is exactly the single-pass selection
+    /// (`step_by(stride)` then drop-empty), so both paths train the same dictionary.
+    #[test]
+    fn chunk_sampling_matches_single_pass_selection() {
+        let recs: Vec<Vec<u8>> = (0..10)
+            .map(|i| {
+                if i == 6 {
+                    Vec::new()
+                } else {
+                    format!("rec-{i}").into_bytes()
+                }
+            })
+            .collect();
+        let stride = 3;
+        let want: Vec<Vec<u8>> = recs
+            .iter()
+            .step_by(stride)
+            .filter(|r| !r.is_empty())
+            .cloned()
+            .collect();
+        // Split into two contiguous chunks [0,4) and [4,10) and gather across both.
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        collect_chunk_samples(&recs[0..4], 0, stride, &mut got);
+        collect_chunk_samples(&recs[4..10], 4, stride, &mut got);
+        assert_eq!(got, want);
+    }
+
+    /// A chunked compressed store (raw temps concatenated through the zstd writer) is
+    /// byte-identical to the single-pass [`write_records_zstd`] store on the same
+    /// records and dictionary, and round-trips through the reader — including the
+    /// zero-length record.
+    #[test]
+    fn chunked_zstd_store_matches_single_pass_and_round_trips() {
+        // Enough realistic, repetitive records for the dictionary trainer; one empty
+        // sprinkled in periodically.
+        let recs: Vec<Vec<u8>> = (0..3000)
+            .map(|i| {
+                if i % 137 == 0 {
+                    Vec::new()
+                } else {
+                    format!(
+                        "{{\"id\":\"W{i}\",\"t\":\"a study of widget number {i} in context\",\"a\":\"Smith, J; Doe, A\",\"y\":{},\"v\":\"Journal of Widgets\",\"c\":{}}}",
+                        1990 + (i % 35),
+                        i % 500
+                    )
+                    .into_bytes()
+                }
+            })
+            .collect();
+        let n = recs.len();
+        let level = 19;
+
+        // Train the dict the chunked way: gather the sample across two chunks.
+        let stride = n.div_ceil(ZSTD_DICT_SAMPLE_CAP).max(1);
+        let mid = n / 2;
+        let mut samples: Vec<Vec<u8>> = Vec::new();
+        collect_chunk_samples(&recs[0..mid], 0, stride, &mut samples);
+        collect_chunk_samples(&recs[mid..n], mid as u32, stride, &mut samples);
+        let sample_refs: Vec<&[u8]> = samples.iter().map(|s| s.as_slice()).collect();
+        let dict = train_record_dict(&sample_refs, 8192).expect("train dict");
+
+        // Single-pass compressed store.
+        let mut bin_s = Vec::new();
+        let mut idx_s = Vec::new();
+        write_records_zstd(&mut bin_s, &mut idx_s, &recs, &dict, level).unwrap();
+
+        // Chunked: two raw temps, then concat through the zstd writer.
+        let dir = std::env::temp_dir();
+        let p0 = dir.join("rr_czstd_p0.recs");
+        let p1 = dir.join("rr_czstd_p1.recs");
+        write_chunk_records(&p0, &recs[0..mid]).unwrap();
+        write_chunk_records(&p1, &recs[mid..n]).unwrap();
+        let bin_p = dir.join("rr_czstd.bin");
+        let idx_p = dir.join("rr_czstd.idx");
+        concat_chunk_records(
+            &[p0.clone(), p1.clone()],
+            n,
+            bin_p.to_str().unwrap(),
+            idx_p.to_str().unwrap(),
+            Some((&dict, level)),
+        )
+        .unwrap();
+        let bin_c = std::fs::read(&bin_p).unwrap();
+        let idx_c = std::fs::read(&idx_p).unwrap();
+
+        assert_eq!(idx_c, idx_s, "chunked idx differs from single-pass");
+        assert_eq!(bin_c, bin_s, "chunked bin differs from single-pass");
+
+        // Round-trips through the reader with the shared dictionary.
+        let store = block_on(RecordStore::open_with_dict(
+            MemoryFetch::new(idx_c),
+            MemoryFetch::new(bin_c),
+            dict,
+        ))
+        .unwrap();
+        assert_eq!(store.len() as usize, n);
+        for (d, rec) in recs.iter().enumerate() {
+            let got = block_on(store.get(d as u32)).unwrap().unwrap_or_default();
+            assert_eq!(&got, rec, "record {d} round-trip mismatch");
+        }
+
+        for p in [p0, p1, bin_p, idx_p] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
