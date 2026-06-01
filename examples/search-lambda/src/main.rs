@@ -14,6 +14,8 @@
 
 use lambda_http::{run, service_fn, Body, Error, Request, RequestExt, Response};
 use roaringrange::{Catalog, FacetIndex, FetchError, RangeFetch};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
 
 /// A reader resource backed by S3 byte-range reads. In-region reads are free and
@@ -50,12 +52,98 @@ impl RangeFetch for S3Fetch {
     }
 }
 
+/// Cap on the in-container range cache, per index object. A warm invocation uses
+/// ~100 MB of the container's gigabytes, so a generous cap holds the hot trigram
+/// postings + dictionary blocks across queries.
+const CACHE_CAP_BYTES: usize = 512 * 1024 * 1024;
+
+/// A byte-capped cache of range reads keyed by `(offset, len)`, FIFO-evicted once
+/// the cap is exceeded. One per S3 object, so identical offsets in the `.rrs` and
+/// `.rrf` never collide.
+struct RangeCache {
+    map: HashMap<(u64, usize), Vec<u8>>,
+    order: VecDeque<(u64, usize)>,
+    bytes: usize,
+    cap: usize,
+}
+
+impl RangeCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            cap,
+        }
+    }
+
+    fn get(&self, k: &(u64, usize)) -> Option<Vec<u8>> {
+        self.map.get(k).cloned()
+    }
+
+    fn put(&mut self, k: (u64, usize), v: Vec<u8>) {
+        if self.map.contains_key(&k) {
+            return;
+        }
+        self.bytes += v.len();
+        self.order.push_back(k);
+        self.map.insert(k, v);
+        while self.bytes > self.cap {
+            match self.order.pop_front() {
+                Some(old) => {
+                    if let Some(ov) = self.map.remove(&old) {
+                        self.bytes -= ov.len();
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+}
+
+/// Wraps a [`RangeFetch`] with an in-memory [`RangeCache`], so a warm container
+/// re-serves a posting (or dictionary block) it already read instead of issuing
+/// another S3 GET. The intersection re-reads the same trigram postings on every
+/// query, so common and overlapping queries skip the S3 round-trips entirely.
+#[derive(Clone)]
+struct CachedFetch<F> {
+    inner: F,
+    cache: Arc<Mutex<RangeCache>>,
+}
+
+impl<F> CachedFetch<F> {
+    fn new(inner: F, cap: usize) -> Self {
+        Self {
+            inner,
+            cache: Arc::new(Mutex::new(RangeCache::new(cap))),
+        }
+    }
+}
+
+impl<F: RangeFetch> RangeFetch for CachedFetch<F> {
+    async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let key = (offset, len);
+        {
+            // Scope the lock so it is never held across the await below.
+            if let Some(v) = self.cache.lock().unwrap().get(&key) {
+                return Ok(v);
+            }
+        }
+        let v = self.inner.read(offset, len).await?;
+        self.cache.lock().unwrap().put(key, v.clone());
+        Ok(v)
+    }
+}
+
 /// The catalog (text index + facet sidecar) is opened once per warm container
 /// (boot reads the index header + sparse dictionary and the facet meta + category
 /// heads), then reused across invocations; each query is just a few ranged reads.
-static CATALOG: OnceCell<Catalog<S3Fetch>> = OnceCell::const_new();
+static CATALOG: OnceCell<Catalog<CachedFetch<S3Fetch>>> = OnceCell::const_new();
 
-async fn catalog() -> Result<&'static Catalog<S3Fetch>, Error> {
+async fn catalog() -> Result<&'static Catalog<CachedFetch<S3Fetch>>, Error> {
     CATALOG
         .get_or_try_init(|| async {
             let cfg = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
@@ -64,16 +152,22 @@ async fn catalog() -> Result<&'static Catalog<S3Fetch>, Error> {
             let index_key = std::env::var("INDEX_KEY").map_err(|_| "INDEX_KEY not set")?;
             let facets_key =
                 std::env::var("INDEX_FACETS_KEY").map_err(|_| "INDEX_FACETS_KEY not set")?;
-            let index = S3Fetch {
-                client: client.clone(),
-                bucket: bucket.clone(),
-                key: index_key,
-            };
-            let facets = S3Fetch {
-                client,
-                bucket,
-                key: facets_key,
-            };
+            let index = CachedFetch::new(
+                S3Fetch {
+                    client: client.clone(),
+                    bucket: bucket.clone(),
+                    key: index_key,
+                },
+                CACHE_CAP_BYTES,
+            );
+            let facets = CachedFetch::new(
+                S3Fetch {
+                    client,
+                    bucket,
+                    key: facets_key,
+                },
+                CACHE_CAP_BYTES,
+            );
             Catalog::open(index)
                 .await
                 .map_err(|e| Error::from(format!("open index: {e}")))?
@@ -88,7 +182,7 @@ async fn catalog() -> Result<&'static Catalog<S3Fetch>, Error> {
 /// `[{"field":name,"cats":[{"name":cat,"count":n}, …]}, …]`. Only non-zero
 /// categories are emitted (the client treats any it doesn't see as zero), so the
 /// payload stays small. Aligned with `Catalog::fields()`.
-fn facets_value(fi: &FacetIndex<S3Fetch>, counts: &[Vec<u64>]) -> serde_json::Value {
+fn facets_value<F: RangeFetch>(fi: &FacetIndex<F>, counts: &[Vec<u64>]) -> serde_json::Value {
     let groups: Vec<serde_json::Value> = fi
         .fields
         .iter()
