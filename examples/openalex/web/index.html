@@ -967,7 +967,8 @@
             const gBytes = rows.reduce((a, s) => a + (s.d.bytes || 0), 0);
             sub = `<span class="pg-sub">${fmtBytes(gBytes)} · ${gMs.toFixed(0)} ms</span>`;
           } else if (grp.key === "rest" && perfModel.headN != null) {
-            sub = `<span class="pg-sub">popular: ${fmt(perfModel.headN)} result${perfModel.headN === 1 ? "" : "s"}</span>`;
+            const note = perfModel.headN < PAGE ? " (less than page size)" : "";
+            sub = `<span class="pg-sub">popular: ${fmt(perfModel.headN)} result${perfModel.headN === 1 ? "" : "s"}${note}</span>`;
           }
           html += `<div class="perfgroup"><span class="pg-title">${grp.title}</span>${sub}</div>` + renderGroup(rows);
         }
