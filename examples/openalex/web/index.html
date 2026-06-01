@@ -228,6 +228,24 @@
       .facets.srvoff .fgroup { opacity: .45; pointer-events: none; }
 
       /* ---- perf bar ---- */
+      .perftoggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 14px;
+        padding: 6px 11px;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 500;
+        color: #5b6680;
+        background: transparent;
+        border: 1px solid #d7deea;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .perftoggle:hover { background: #f3f6fb; color: #3b4658; }
+      .perftoggle svg { transition: transform 0.2s ease; }
+      .perftoggle[aria-expanded="true"] svg { transform: rotate(180deg); }
       .perfbar {
         margin-top: 14px;
         font-family: var(--mono);
@@ -635,7 +653,11 @@
           <span class="srvnote">runs the intersection in a Lambda and returns only result IDs — KB instead of MB for huge result sets (facets off)</span>
         </div>
 
-        <div class="perfbar" id="perfbar" aria-live="polite">
+        <button class="perftoggle" id="perftoggle" type="button" aria-expanded="false" aria-controls="perfbar">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="perftoggle-label">Show performance &amp; request details</span>
+        </button>
+        <div class="perfbar" id="perfbar" aria-live="polite" hidden>
           <div class="perfbar-hdr">
             <span class="perfbar-title">How this search ran</span>
             <span class="perfbar-note" id="m-barnote">all data byte-ranged from static S3</span>
@@ -747,6 +769,7 @@
         pager: $("pager"), prev: $("prev"), next: $("next"), pginfo: $("pginfo"),
         facetgroups: $("facetgroups"), clearfilters: $("clearfilters"),
         facets: $("facets"), menutoggle: $("menutoggle"),
+        perfbar: $("perfbar"), perftoggle: $("perftoggle"),
         perfrows: $("perfrows"), mBarNote: $("m-barnote"), mTotal: $("m-total"), mSummary: $("m-summary"),
         dsWorks: $("ds-works"), dsIndex: $("ds-index"), dsRecords: $("ds-records"),
         servermode: $("servermode"),
@@ -1520,6 +1543,17 @@
       });
       els.prev.addEventListener("click", () => pageTo(offset - PAGE));
       els.next.addEventListener("click", () => pageTo(offset + PAGE));
+      // Perf panel is collapsed by default behind a toggle; remember the choice.
+      const PERF_KEY = "rr-perf-open";
+      function setPerfOpen(open) {
+        els.perfbar.hidden = !open;
+        els.perftoggle.setAttribute("aria-expanded", String(open));
+        els.perftoggle.querySelector(".perftoggle-label").textContent =
+          open ? "Hide performance & request details" : "Show performance & request details";
+        try { localStorage.setItem(PERF_KEY, open ? "1" : "0"); } catch (_) {}
+      }
+      els.perftoggle.addEventListener("click", () => setPerfOpen(els.perfbar.hidden));
+      try { setPerfOpen(localStorage.getItem(PERF_KEY) === "1"); } catch (_) { setPerfOpen(false); }
       // Server-side opt-in: swap the intersection backend. Server mode can't apply
       // facet filters (no client cursor), so clear any and dim the panel.
       els.servermode.addEventListener("change", () => {

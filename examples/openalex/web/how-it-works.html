@@ -107,6 +107,17 @@
         line-height: 1.6;
       }
       .intro b { color: var(--ink); font-weight: 600; }
+      .datamodel p { color: var(--ink-soft); line-height: 1.6; margin: 12px 0 0; max-width: 66ch; }
+      .datamodel p b { color: var(--ink); font-weight: 600; }
+      .datamodel code, .fieldlist code {
+        font-family: var(--mono); font-size: 0.88em;
+        color: var(--accent-ink); background: var(--accent-soft);
+        padding: 1px 5px; border-radius: 5px;
+      }
+      .fieldlist { list-style: none; margin: 10px 0 0; padding: 0; max-width: 66ch; }
+      .fieldlist li { padding: 8px 0; border-bottom: 1px solid var(--line-soft); color: var(--ink-soft); line-height: 1.5; }
+      .fieldlist li:last-child { border-bottom: none; }
+      .fieldlist b { color: var(--ink); font-weight: 600; }
       .intro code {
         font-family: var(--mono);
         font-size: 13px;
@@ -213,6 +224,50 @@
           few small byte-ranges over HTTP — never the whole file. It's powered by the
           <code>roaringrange</code> library.
         </p>
+
+        <section class="step datamodel">
+          <h2>The OpenAlex data, mapped</h2>
+          <p>
+            Each <a href="https://docs.openalex.org/api-entities/works" target="_blank" rel="noopener">OpenAlex <b>Work</b></a>
+            — a paper, book chapter, dataset, preprint, and so on — becomes one ranked document.
+            Documents are numbered by <code>cited_by_count</code> (most-cited first), which is what
+            lets the popular "head" paint instantly.
+          </p>
+
+          <h3>What's indexed</h3>
+          <p>
+            The searchable text is each work's <b>title</b>, its <b>abstract</b> (reconstructed from
+            OpenAlex's <code>abstract_inverted_index</code>), its <b>author names</b>, and its
+            <b>host venue</b> — concatenated and cut into trigrams. A query therefore matches across
+            any of them: a phrase from the abstract, an author, or a journal, not just the title.
+          </p>
+
+          <h3>The five facets</h3>
+          <p>Five fields from each work become filter categories (the <code>.rrf</code> sidecar):</p>
+          <ul class="fieldlist">
+            <li><b>Year</b> — <code>publication_year</code>.</li>
+            <li><b>Type</b> — the work's <code>type</code>: article, book-chapter, dataset, preprint, …</li>
+            <li><b>Open access</b> — <code>open_access.oa_status</code>: gold, green, hybrid, bronze, or closed.</li>
+            <li><b>Language</b> — the work's <code>language</code>, shown as a full name.</li>
+            <li><b>Topic</b> — its <code>primary_topic</code> (falling back to the first concept).</li>
+          </ul>
+          <p>Within a field, categories OR together; across fields they AND — all from doc-ID bitmaps, no backend.</p>
+
+          <h3>What a result stores</h3>
+          <p>The record behind each result keeps just enough to render a card and link out:</p>
+          <ul class="fieldlist">
+            <li><b>id</b> — the OpenAlex work ID, linking back to openalex.org.</li>
+            <li><b>title</b> · <b>authors</b> · <b>year</b> · <b>host venue</b> · <b>citation count</b>.</li>
+            <li><b>abstract</b> — reconstructed and clipped to a preview, when the work has one.</li>
+          </ul>
+
+          <h3>DOI lookup</h3>
+          <p>
+            A small companion index (<code>.rril</code>) maps each work's <b>DOI</b> straight to its
+            document, so pasting a DOI — or a <code>doi.org</code> URL — jumps to the exact work in a
+            couple of byte-range reads instead of a text search.
+          </p>
+        </section>
 
         <section class="step">
           <h2>Searching in the browser</h2>
