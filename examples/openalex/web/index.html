@@ -222,10 +222,6 @@
       .srvtoggle .switch input:checked + .track::after { transform: translateX(14px); }
       .srvtoggle .switch input:focus-visible + .track { outline: 2px solid var(--focus); outline-offset: 2px; }
       .srvnote { font-size: 12px; color: var(--ink-faint); }
-      .srvfacetnote { display: none; font-size: 12px; line-height: 1.45; color: var(--ink-faint); padding: 4px 2px 10px; }
-      .facets.srvoff .srvfacetnote { display: block; }
-      .facets.srvoff #clearfilters { display: none; }
-      .facets.srvoff .fgroup { opacity: .45; pointer-events: none; }
 
       /* ---- perf bar ---- */
       .perftoggle {
@@ -684,7 +680,6 @@
         <div class="layout">
           <aside class="facets" id="facets" aria-label="Filters">
             <button class="clearfilters" id="clearfilters" type="button">Clear all filters</button>
-            <p class="srvfacetnote">Filters run in-browser, on the result bitmap. Turn off <b>Server-side search</b> to use them.</p>
             <div id="facetgroups"></div>
           </aside>
 
@@ -1311,17 +1306,18 @@
          reach the browser. Uses realFetch so it stays out of the ranged byte/request
          counters (it has no Range header anyway); the response size is measured for
          the perf bar. total is exact only on page 0 — the client caches it. */
-      async function lambdaSearch(q, off, limit, mm) {
+      async function lambdaSearch(q, off, limit, mm, filters) {
         const u = new URL(LAMBDA_URL);
         u.searchParams.set("q", q);
         u.searchParams.set("offset", off);
         u.searchParams.set("limit", limit);
         if (mm) u.searchParams.set("max_missing", mm);
+        if (filters && filters.length) u.searchParams.set("filters", JSON.stringify(filters));
         const resp = await realFetch(u.href);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const text = await resp.text();
         const data = JSON.parse(text);
-        return { total: data.total || 0, ids: data.ids || [], bytes: new Blob([text]).size };
+        return { total: data.total || 0, ids: data.ids || [], facets: data.facets || null, bytes: new Blob([text]).size };
       }
 
       /* Server-mode counterpart to goPage: get the page IDs from the Lambda, then
@@ -1332,13 +1328,20 @@
         skeletons(Math.min(PAGE, 8));
         const q = els.q.value.trim();
         const mm = Number.parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
+        // Active filters (field\tcategory) → the Lambda's JSON [[field,category], …].
+        const filters = Array.from(activeFilters).map((k) => k.split("\t"));
         let res;
         const t0 = performance.now();
-        try { res = await lambdaSearch(q, offset, PAGE, mm); }
+        try { res = await lambdaSearch(q, offset, PAGE, mm, filters); }
         catch (e) { if (seq === searchSeq) els.mSummary.textContent = `server search error: ${e}`; return; }
         const lamMs = performance.now() - t0;
         if (seq !== searchSeq) return;
-        if (offset === 0) serverTotal = res.total;   // exact only on page 0; cached for prev/next
+        if (offset === 0) {
+          serverTotal = res.total;   // exact only on page 0; cached for prev/next
+          // Facet counts are computed in-region and returned on page 0; apply them to
+          // the panel exactly as client mode applies the in-wasm counts.
+          applyFacetCounts(res.facets ? JSON.stringify(res.facets) : null);
+        }
         lastTotal = serverTotal;
         tailPending = false;
         const page = res.ids;
@@ -1572,9 +1575,7 @@
       // facet filters (no client cursor), so clear any and dim the panel.
       els.servermode.addEventListener("change", () => {
         serverMode = els.servermode.checked;
-        els.facets.classList.toggle("srvoff", serverMode);
-        if (serverMode && activeFilters.size) { activeFilters.clear(); updateClearButton(); renderFacets(); }
-        runSearch(true);
+        runSearch(true);   // filters + facet counts now work in server mode (via the Lambda)
       });
       els.clearfilters.addEventListener("click", () => {
         activeFilters.clear();
