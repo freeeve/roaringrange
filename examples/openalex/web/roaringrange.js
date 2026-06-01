@@ -114,6 +114,28 @@ export class RrsCatalog {
         return ret;
     }
     /**
+     * Opens the record store (`idx_url` offset index + `bin_url` record blob)
+     * with the shared zstd dictionary `dict` (the `*.dict` sidecar's bytes,
+     * passed as a `Uint8Array`) and attaches it, so a version-2 compressed store
+     * inflates records transparently in [`RrsCatalog::search`]. Requires the
+     * crate to be built with the `zstd` feature for a compressed store; a raw
+     * store ignores the dictionary.
+     * @param {string} idx_url
+     * @param {string} bin_url
+     * @param {Uint8Array} dict
+     * @returns {Promise<void>}
+     */
+    openRecordsWithDict(idx_url, bin_url, dict) {
+        const ptr0 = passStringToWasm0(idx_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(bin_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray8ToWasm0(dict, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.rrscatalog_openRecordsWithDict(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        return ret;
+    }
+    /**
      * Runs the full search flow and resolves to a JS object:
      * `{ ids: Uint32Array, records: Array<Uint8Array|null> | null,
      * facetCounts: Array<{field, cats:[{name, count}]}> | null }`.
@@ -360,6 +382,71 @@ export class RrsIndex {
 if (Symbol.dispose) RrsIndex.prototype[Symbol.dispose] = RrsIndex.prototype.free;
 
 /**
+ * A range-fetchable identifier exact-match index (`RRIL`) exposed to JavaScript:
+ * resolves an ISBN/ASIN/… to the ranked doc IDs of the title(s) carrying it, over
+ * HTTP Range. Pairs with the trigram index, which no longer carries identifiers.
+ */
+export class RrsLookup {
+    static __wrap(ptr) {
+        const obj = Object.create(RrsLookup.prototype);
+        obj.__wbg_ptr = ptr;
+        RrsLookupFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RrsLookupFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_rrslookup_free(ptr, 0);
+    }
+    /**
+     * Whether the index holds no entries.
+     * @returns {boolean}
+     */
+    isEmpty() {
+        const ret = wasm.rrslookup_isEmpty(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Number of index entries.
+     * @returns {number}
+     */
+    len() {
+        const ret = wasm.rrslookup_len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Resolves `identifier` to the doc IDs of the title(s) carrying it (most
+     * popular first), as a `Uint32Array`. Empty if none.
+     * @param {string} identifier
+     * @returns {Promise<Uint32Array>}
+     */
+    lookup(identifier) {
+        const ptr0 = passStringToWasm0(identifier, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrslookup_lookup(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Boots the index at `url` (reads the 16-byte header). Returns a
+     * `Promise<RrsLookup>`.
+     * @param {string} url
+     * @returns {Promise<RrsLookup>}
+     */
+    static open(url) {
+        const ptr0 = passStringToWasm0(url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrslookup_open(ptr0, len0);
+        return ret;
+    }
+}
+if (Symbol.dispose) RrsLookup.prototype[Symbol.dispose] = RrsLookup.prototype.free;
+
+/**
  * A range-fetchable `RRSR` record store exposed to JavaScript: maps a ranked
  * doc ID to its raw record bytes over HTTP Range. The offset index (`.idx`) and
  * the record blob (`.bin`) are each backed by their own [`WasmFetch`] URL.
@@ -446,6 +533,27 @@ export class RrsRecords {
         const ptr1 = passStringToWasm0(bin_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ret = wasm.rrsrecords_open(ptr0, len0, ptr1, len1);
+        return ret;
+    }
+    /**
+     * Boots a record store and attaches the shared zstd dictionary `dict` (the
+     * `*.dict` sidecar's bytes, e.g. fetched once at boot, passed as a
+     * `Uint8Array`), so version-2 compressed records inflate transparently.
+     * Requires the crate to be built with the `zstd` feature for a compressed
+     * store; a raw store ignores the dictionary. Returns a `Promise<RrsRecords>`.
+     * @param {string} idx_url
+     * @param {string} bin_url
+     * @param {Uint8Array} dict
+     * @returns {Promise<RrsRecords>}
+     */
+    static openWithDict(idx_url, bin_url, dict) {
+        const ptr0 = passStringToWasm0(idx_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(bin_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray8ToWasm0(dict, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.rrsrecords_openWithDict(ptr0, len0, ptr1, len1, ptr2, len2);
         return ret;
     }
 }
@@ -723,6 +831,10 @@ function __wbg_get_imports() {
             const ret = RrsIndex.__wrap(arg0);
             return ret;
         },
+        __wbg_rrslookup_new: function(arg0) {
+            const ret = RrsLookup.__wrap(arg0);
+            return ret;
+        },
         __wbg_rrsrecords_new: function(arg0) {
             const ret = RrsRecords.__wrap(arg0);
             return ret;
@@ -779,7 +891,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 168, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 408, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h68218ae5a35c5694);
             return ret;
         },
@@ -838,6 +950,9 @@ const RrsCursorFinalization = (typeof FinalizationRegistry === 'undefined')
 const RrsIndexFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rrsindex_free(ptr, 1));
+const RrsLookupFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_rrslookup_free(ptr, 1));
 const RrsRecordsFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rrsrecords_free(ptr, 1));
