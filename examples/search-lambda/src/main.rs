@@ -1,22 +1,24 @@
 //! Regional search Lambda.
 //!
 //! Runs the roaringrange reader over **in-region** S3 range reads and returns
-//! result IDs, so an explicit "load full results" never egresses the multi-MB
-//! postings to the browser — the postings stay inside the bucket's region and
-//! only a small ID list (KB) crosses the wire. The intersection is the *same*
-//! `Index::search` the WASM build uses; only the `RangeFetch` differs (S3 here,
-//! `fetch()` in the browser), so results are byte-identical.
+//! result IDs + facet counts, so a full-results request never egresses the
+//! multi-MB postings to the browser — they stay inside the bucket's region and
+//! only a small JSON (KB) crosses the wire. The intersection and facet counting
+//! are the *same* `Index`/`FacetIndex` the WASM build uses; only the `RangeFetch`
+//! differs (S3 here, `fetch()` in the browser), so results are byte-identical.
 //!
-//! Env: `INDEX_BUCKET`, `INDEX_KEY` (the `.rrs` object). Front with CloudFront
-//! for a same-origin path + per-query caching; the client calls it only on a
-//! full-results request, so the popular head stays fully client-side.
+//! Env: `INDEX_BUCKET`, `INDEX_KEY` (the `.rrs` object), `INDEX_FACETS_KEY` (the
+//! `.rrf` facet sidecar). Front with CloudFront for a same-origin path + per-query
+//! caching; the client calls it only on a full-results request, so the popular
+//! head stays fully client-side.
 
 use lambda_http::{run, service_fn, Body, Error, Request, RequestExt, Response};
-use roaringrange::{FetchError, Index, RangeFetch};
+use roaringrange::{Catalog, FacetIndex, FetchError, RangeFetch};
 use tokio::sync::OnceCell;
 
-/// An [`Index`] backed by S3 byte-range reads. In-region reads are free and fast,
-/// so the heavy posting traffic never leaves the bucket's region.
+/// A reader resource backed by S3 byte-range reads. In-region reads are free and
+/// fast, so the heavy posting traffic never leaves the bucket's region. One per
+/// object (the index and the facet sidecar are distinct keys).
 #[derive(Clone)]
 struct S3Fetch {
     client: aws_sdk_s3::Client,
@@ -48,31 +50,68 @@ impl RangeFetch for S3Fetch {
     }
 }
 
-/// The index is opened once per warm container (boot reads the header + sparse
-/// index), then reused across invocations; each query is just a few ranged reads.
-static INDEX: OnceCell<Index<S3Fetch>> = OnceCell::const_new();
+/// The catalog (text index + facet sidecar) is opened once per warm container
+/// (boot reads the index header + sparse dictionary and the facet meta + category
+/// heads), then reused across invocations; each query is just a few ranged reads.
+static CATALOG: OnceCell<Catalog<S3Fetch>> = OnceCell::const_new();
 
-async fn index() -> Result<&'static Index<S3Fetch>, Error> {
-    INDEX
+async fn catalog() -> Result<&'static Catalog<S3Fetch>, Error> {
+    CATALOG
         .get_or_try_init(|| async {
             let cfg = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let client = aws_sdk_s3::Client::new(&cfg);
             let bucket = std::env::var("INDEX_BUCKET").map_err(|_| "INDEX_BUCKET not set")?;
-            let key = std::env::var("INDEX_KEY").map_err(|_| "INDEX_KEY not set")?;
-            Index::open(S3Fetch {
+            let index_key = std::env::var("INDEX_KEY").map_err(|_| "INDEX_KEY not set")?;
+            let facets_key =
+                std::env::var("INDEX_FACETS_KEY").map_err(|_| "INDEX_FACETS_KEY not set")?;
+            let index = S3Fetch {
+                client: client.clone(),
+                bucket: bucket.clone(),
+                key: index_key,
+            };
+            let facets = S3Fetch {
                 client,
                 bucket,
-                key,
-            })
-            .await
-            .map_err(|e| Error::from(format!("open index: {e}")))
+                key: facets_key,
+            };
+            Catalog::open(index)
+                .await
+                .map_err(|e| Error::from(format!("open index: {e}")))?
+                .with_facets(facets)
+                .await
+                .map_err(|e| Error::from(format!("open facets: {e}")))
         })
         .await
 }
 
-/// `GET ?q=<query>&offset=<n>&limit=<n>&max_missing=<n>` →
-/// `{"total":N,"offset":O,"ids":[...]}`. `total` is exact only on `offset` 0
-/// (the client caches it); later pages omit the full intersection and stay cheap.
+/// Builds the per-query facet-count JSON in the shape the demo client consumes:
+/// `[{"field":name,"cats":[{"name":cat,"count":n}, …]}, …]`. Only non-zero
+/// categories are emitted (the client treats any it doesn't see as zero), so the
+/// payload stays small. Aligned with `Catalog::fields()`.
+fn facets_value(fi: &FacetIndex<S3Fetch>, counts: &[Vec<u64>]) -> serde_json::Value {
+    let groups: Vec<serde_json::Value> = fi
+        .fields
+        .iter()
+        .zip(counts)
+        .map(|(field, field_counts)| {
+            let cats: Vec<serde_json::Value> = field
+                .categories
+                .iter()
+                .zip(field_counts)
+                .filter(|(_, &n)| n > 0)
+                .map(|(c, &n)| serde_json::json!({ "name": c.name, "count": n }))
+                .collect();
+            serde_json::json!({ "field": field.name, "cats": cats })
+        })
+        .collect();
+    serde_json::Value::Array(groups)
+}
+
+/// `GET ?q=<query>&offset=<n>&limit=<n>&max_missing=<n>&filters=<json>` →
+/// `{"total":N,"offset":O,"ids":[…],"facets":[…]}`. `filters` is a JSON array of
+/// `[field,category]` pairs (within-field OR, across-field AND). `total` and
+/// `facets` are returned only on `offset` 0 (the client caches both across the
+/// query's pages); later pages omit the full tail intersection and stay cheap.
 async fn handler(event: Request) -> Result<Response<Body>, Error> {
     let params = event.query_string_parameters();
     let query = params.first("q").unwrap_or("").trim();
@@ -89,33 +128,50 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(25)
         .min(500);
+    let filters: Vec<(String, String)> = params
+        .first("filters")
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
 
     let body = if query.is_empty() {
-        r#"{"total":0,"ids":[]}"#.to_string()
+        r#"{"total":0,"offset":0,"ids":[],"facets":[]}"#.to_string()
     } else {
-        let idx = index().await?;
-        // Paginate: return just this page of result IDs (a few hundred bytes), not
-        // the whole result set. The exact total needs the full tail intersection,
-        // so compute it only on the first page (offset 0); the client caches it and
-        // later pages stay cheap (the popular head serves early pages with no tail
-        // read). Strict AND when max_missing == 0; fuzzy otherwise.
-        let mut cur = idx
-            .search_cursor(query, max_missing)
+        let cat = catalog().await?;
+        // The intersection runs here, in-region; the browser only ever sees IDs +
+        // facet counts. Strict AND when max_missing == 0; fuzzy threshold otherwise.
+        let resolved = cat
+            .facets()
+            .filter(|_| !filters.is_empty())
+            .map(|f| f.resolve(&filters));
+        let mut cur = cat
+            .index()
+            .search_cursor_filtered(query, max_missing, resolved)
             .await
             .map_err(|e| Error::from(format!("search: {e}")))?;
-        let total = if offset == 0 {
+
+        // The exact total needs the full tail intersection, and facet counts are
+        // computed from the (tail-independent) head result. Both are stable across
+        // the query's pages, so compute them once on page 0; the client caches them
+        // and later pages stay cheap (just this page's IDs).
+        let (total, facets) = if offset == 0 {
             cur.load_tail()
                 .await
                 .map_err(|e| Error::from(format!("load_tail: {e}")))?;
-            cur.loaded()
+            let total = cur.loaded();
+            let facets = match cat.facets() {
+                Some(f) => facets_value(f, &f.counts(cur.head_bitmap())),
+                None => serde_json::Value::Array(vec![]),
+            };
+            (total, facets)
         } else {
-            0 // unknown on later pages; the client keeps the total from page 0
+            (0, serde_json::Value::Array(vec![]))
         };
         let ids = cur
             .page(offset, limit)
             .await
             .map_err(|e| Error::from(format!("page: {e}")))?;
-        serde_json::json!({ "total": total, "offset": offset, "ids": ids }).to_string()
+        serde_json::json!({ "total": total, "offset": offset, "ids": ids, "facets": facets })
+            .to_string()
     };
 
     Ok(Response::builder()
