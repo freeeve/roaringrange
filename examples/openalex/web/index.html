@@ -235,16 +235,91 @@
         background: #0f1422;
         color: #c7d0e0;
         border-radius: 10px;
-        padding: 10px 14px;
-        display: flex;
-        gap: 18px;
-        flex-wrap: wrap;
-        align-items: center;
+        padding: 12px 14px;
       }
-      .perfbar .stat { display: inline-flex; gap: 6px; align-items: baseline; }
-      .perfbar .stat b { color: #fff; font-weight: 500; }
-      .perfbar .lbl { color: #6b7689; }
-      .perfbar .summary { color: #7fe1b0; font-weight: 500; margin-left: auto; }
+      .perfbar-hdr {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
+      }
+      .perfbar-title { color: #fff; font-weight: 600; font-size: 12px; }
+      .perfbar-note { color: #4b5669; font-size: 11px; }
+      .perfbar-srvnote { color: #7fe1b0; font-size: 11px; }
+
+      /* one row per step */
+      .perfrow {
+        display: grid;
+        grid-template-columns: 100px 1fr auto;
+        grid-template-rows: auto auto;
+        column-gap: 10px;
+        row-gap: 2px;
+        align-items: center;
+        margin-bottom: 7px;
+      }
+      .perfrow:last-of-type { margin-bottom: 0; }
+      .perfstep {
+        font-size: 11.5px;
+        font-weight: 600;
+        color: #c7d0e0;
+        white-space: nowrap;
+        grid-column: 1;
+        grid-row: 1;
+      }
+      .perfbar-track {
+        grid-column: 2;
+        grid-row: 1;
+        height: 8px;
+        background: #1e2538;
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .perfbar-fill {
+        height: 100%;
+        border-radius: 4px;
+        background: #3b5bdb;
+        min-width: 2px;
+        transition: width 0.25s ease;
+      }
+      .perfmeta {
+        grid-column: 3;
+        grid-row: 1;
+        font-size: 11px;
+        color: #8b9ab5;
+        white-space: nowrap;
+        text-align: right;
+        padding-left: 8px;
+      }
+      .perfmeta b { color: #fff; font-weight: 500; }
+      .perfdesc {
+        grid-column: 2 / 4;
+        grid-row: 2;
+        font-size: 10.5px;
+        color: #4b5669;
+        padding-bottom: 2px;
+      }
+
+      /* footer totals */
+      .perfbar-footer {
+        margin-top: 9px;
+        padding-top: 8px;
+        border-top: 1px solid #1e2538;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .perfbar-total { color: #7fe1b0; font-weight: 500; font-size: 11.5px; }
+      .perfbar-summary { color: #7fe1b0; font-weight: 500; font-size: 11.5px; }
+
+      @media (max-width: 720px) {
+        .perfrow { grid-template-columns: 90px 1fr; }
+        .perfmeta { grid-column: 1 / 3; grid-row: 2; text-align: left; padding-left: 0; }
+        .perfdesc { grid-row: 3; }
+      }
 
       /* ---- main layout ---- */
       main { padding: 26px 0 60px; }
@@ -393,6 +468,16 @@
         padding: 2px 10px;
         margin-top: 9px;
       }
+      .card .abstract {
+        font-size: 13px;
+        color: var(--ink-soft);
+        line-height: 1.5;
+        margin: 6px 0 0;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
 
       .skeleton .title, .skeleton .meta {
         background: linear-gradient(90deg, var(--line-soft) 25%, #f3f4f7 37%, var(--line-soft) 63%);
@@ -462,7 +547,6 @@
           padding: 9px 14px;
           cursor: pointer;
         }
-        .perfbar .summary { margin-left: 0; }
       }
     </style>
   </head>
@@ -533,11 +617,15 @@
         </div>
 
         <div class="perfbar" id="perfbar" aria-live="polite">
-          <span class="stat"><span class="lbl">boot</span><b id="m-boot">—</b></span>
-          <span class="stat"><span class="lbl">search</span><b id="m-search">—</b></span>
-          <span class="stat"><span class="lbl">tail</span><b id="m-tail">—</b></span>
-          <span class="stat"><span class="lbl">results</span><b id="m-results">—</b></span>
-          <span class="summary" id="m-summary">booting…</span>
+          <div class="perfbar-hdr">
+            <span class="perfbar-title">How this search ran</span>
+            <span class="perfbar-note" id="m-barnote">all data byte-ranged from static S3</span>
+          </div>
+          <div id="perfrows"></div>
+          <div class="perfbar-footer">
+            <span class="perfbar-total" id="m-total"></span>
+            <span class="perfbar-summary" id="m-summary">booting…</span>
+          </div>
         </div>
       </div>
     </header>
@@ -627,7 +715,7 @@
         pager: $("pager"), prev: $("prev"), next: $("next"), pginfo: $("pginfo"),
         facetgroups: $("facetgroups"), clearfilters: $("clearfilters"),
         facets: $("facets"), menutoggle: $("menutoggle"),
-        mBoot: $("m-boot"), mSearch: $("m-search"), mTail: $("m-tail"), mResults: $("m-results"), mSummary: $("m-summary"),
+        perfrows: $("perfrows"), mBarNote: $("m-barnote"), mTotal: $("m-total"), mSummary: $("m-summary"),
         dsWorks: $("ds-works"), dsIndex: $("ds-index"), dsRecords: $("ds-records"),
         servermode: $("servermode"),
       };
@@ -751,20 +839,105 @@
         return map;
       }
 
-      /* -------- perf bar -------- */
+      /* -------- perf bar: model + renderer --------
+         Each step holds { ms, reqs, bytes } or null (hidden).
+         boot holds just ms (a number) or null.
+         Calling setPerf({ ... }) patches the model and re-renders.
+         tail: null clears/hides the "Load all matches" row. */
+      const perfModel = { boot: null, search: null, tail: null, results: null, summary: null };
+
+      /** Render the "How this search ran" rows from perfModel. */
+      function renderPerf() {
+        const steps = [
+          {
+            key: "boot",
+            name: "Open index",
+            desc: "index header + dictionary",
+            color: "#5c85ff",
+            getData: () => perfModel.boot != null
+              ? { ms: perfModel.boot, reqs: null, bytes: null }
+              : null,
+          },
+          {
+            key: "search",
+            name: "Search",
+            desc: serverMode
+              ? "intersection ran in-region; only IDs returned"
+              : "intersect trigrams",
+            color: "#3b5bdb",
+            getData: () => perfModel.search,
+          },
+          {
+            key: "tail",
+            name: "Load all matches",
+            desc: "fetch remaining postings",
+            color: "#f76707",
+            getData: () => (!serverMode && perfModel.tail != null) ? perfModel.tail : null,
+          },
+          {
+            key: "results",
+            name: "Fetch page",
+            desc: "this page's records",
+            color: "#0ca678",
+            getData: () => perfModel.results,
+          },
+        ];
+
+        /* Collect visible rows and find the max bytes to scale bar widths. */
+        const visible = steps.map((s) => ({ ...s, data: s.getData() })).filter((s) => s.data !== null);
+        const maxBytes = visible.reduce((m, s) => Math.max(m, s.data.bytes || 0), 1);
+
+        /* Build rows HTML. */
+        let html = "";
+        for (const s of visible) {
+          const d = s.data;
+          const pct = d.bytes != null && d.bytes > 0
+            ? Math.max(3, Math.round((d.bytes / maxBytes) * 100))
+            : 3;
+          const metaParts = [];
+          if (d.bytes != null) metaParts.push(`<b>${fmtBytes(d.bytes)}</b>`);
+          if (d.reqs != null) metaParts.push(`${d.reqs} req`);
+          metaParts.push(`<b>${d.ms.toFixed(d.ms >= 10 ? 0 : 1)} ms</b>`);
+          html +=
+            `<div class="perfrow">` +
+            `<span class="perfstep">${s.name}</span>` +
+            `<div class="perfbar-track"><div class="perfbar-fill" style="width:${pct}%;background:${s.color}"></div></div>` +
+            `<span class="perfmeta">${metaParts.join(" · ")}</span>` +
+            `<span class="perfdesc">${s.desc}</span>` +
+            `</div>`;
+        }
+        els.perfrows.innerHTML = html;
+
+        /* Footer: total bytes and total ms across visible steps. */
+        const totalBytes = visible.reduce((s, r) => s + (r.data.bytes || 0), 0);
+        const totalMs = visible.reduce((s, r) => s + (r.data.ms || 0), 0);
+        if (visible.length > 0) {
+          els.mTotal.textContent = `${fmtBytes(totalBytes)} moved · ${totalMs.toFixed(0)} ms total`;
+        } else {
+          els.mTotal.textContent = "";
+        }
+
+        /* Bar note: switch caption for server mode. */
+        els.mBarNote.className = serverMode ? "perfbar-srvnote" : "perfbar-note";
+        els.mBarNote.textContent = serverMode
+          ? "server-side: intersection ran in-region; only IDs returned"
+          : "all data byte-ranged from static S3";
+
+        if (perfModel.summary != null) els.mSummary.textContent = perfModel.summary;
+      }
+
+      /**
+       * Update the perf model with new values and re-render.
+       * Accepts the same shape as before: { boot, search, tail, results, summary }.
+       * tail: null clears the tail row; omitting a key leaves its prior value.
+       */
       function setPerf({ boot, search, tail, results, summary } = {}) {
-        if (boot !== undefined) els.mBoot.textContent = `${boot.toFixed(1)} ms`;
-        if (search !== undefined) {
-          els.mSearch.textContent = `${search.ms.toFixed(2)} ms · ${search.reqs} req · ${(search.bytes / 1024).toFixed(1)} KB`;
-        }
-        if (tail !== undefined) {
-          els.mTail.textContent = tail === null ? "—"
-            : `${tail.ms.toFixed(1)} ms · ${tail.reqs} req · ${(tail.bytes / 1024).toFixed(1)} KB`;
-        }
-        if (results !== undefined) {
-          els.mResults.textContent = `${results.ms.toFixed(1)} ms · ${results.reqs} req · ${(results.bytes / 1024).toFixed(1)} KB`;
-        }
-        if (summary !== undefined) els.mSummary.textContent = summary;
+        if (boot !== undefined) perfModel.boot = boot;
+        if (search !== undefined) perfModel.search = search;
+        if (tail !== undefined) perfModel.tail = tail;   // null clears the row
+        if (results !== undefined) perfModel.results = results;
+        if (summary !== undefined) perfModel.summary = summary;
+        renderPerf();
       }
 
       /* -------- facet rendering --------
@@ -940,6 +1113,19 @@
           if (r.v) meta.push(`<span class="venue">${esc(r.v)}</span>`);
           const metaHtml = meta.join(`<span class="sep" aria-hidden="true">·</span>`);
 
+          const abstractHtml = (() => {
+            if (!r.ab || typeof r.ab !== "string") return "";
+            const clean = cleanTitle(r.ab);
+            if (!clean) return "";
+            const MAX = 260;
+            let preview = clean;
+            if (preview.length > MAX) {
+              preview = preview.slice(0, MAX).replace(/\s+\S*$/, "");
+              return `<div class="abstract">${esc(preview)}…</div>`;
+            }
+            return `<div class="abstract">${esc(preview)}</div>`;
+          })();
+
           const cites = Number(r.c) || 0;
           const citesHtml =
             `<span class="cites" title="Cited by ${fmt(cites)}">` +
@@ -950,6 +1136,7 @@
           card.innerHTML =
             `<h2 class="title">${titleHtml}</h2>` +
             `<div class="meta">${metaHtml}</div>` +
+            abstractHtml +
             citesHtml;
           frag.appendChild(card);
         }
