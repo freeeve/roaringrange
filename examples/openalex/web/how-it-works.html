@@ -338,6 +338,18 @@
               format never dictates your data model.
             </figcaption>
           </figure>
+
+          <h3>DOI lookup (RRIL)</h3>
+          <figure class="diagram">
+            <img src="lookup.svg" alt="RRIL DOI lookup file layout" />
+            <figcaption>
+              A companion <code>.rril</code> file maps each work's identifier (its DOI, normalized)
+              to a doc ID: a header, then fixed-size records sorted by hash. A lookup normalizes the
+              query and binary-searches the hashes — a handful of 16-byte ranged reads — and a second
+              "verify" hash rejects collisions, so an exact DOI lands on the exact work (or nothing)
+              with no text search.
+            </figcaption>
+          </figure>
         </section>
       </div>
     </main>

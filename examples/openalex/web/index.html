@@ -899,28 +899,36 @@
          boot holds just ms (a number) or null.
          Calling setPerf({ ... }) patches the model and re-renders.
          tail: null clears/hides the "Load all matches" row. */
-      const perfModel = { index: null, facets: null, recstore: null, lookup: null, search: null, doilookup: null, facetcount: null, tail: null, results: null, summary: null };
+      const perfModel = { index: null, facets: null, recstore: null, lookup: null, search: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null, summary: null };
 
       /** Render the "How this search ran" rows from perfModel. */
       function renderPerf() {
+        const GROUPS = [
+          { key: "startup", title: "Startup · ran once", sub: true },
+          { key: "popular", title: "Load popular" },
+          { key: "rest", title: "Load the rest" },
+        ];
         const steps = [
-          { name: "Open index", desc: "index header + dictionary", once: true, get: () => perfModel.index },
-          { name: "Open facets", desc: "facet sidecar", once: true, get: () => perfModel.facets },
-          { name: "Open records", desc: "record store header", once: true, get: () => perfModel.recstore },
-          { name: "Open lookup", desc: "DOI lookup index", once: true, get: () => perfModel.lookup },
+          { g: "startup", name: "Open index", desc: "index header + dictionary", get: () => perfModel.index },
+          { g: "startup", name: "Open facets", desc: "facet sidecar", get: () => perfModel.facets },
+          { g: "startup", name: "Open records", desc: "record store header", get: () => perfModel.recstore },
+          { g: "startup", name: "Open lookup", desc: "DOI lookup index", get: () => perfModel.lookup },
           {
-            name: "Search",
+            g: "popular",
+            name: "ID fetch",
             desc: serverMode ? "ran in-region; only IDs returned" : "intersect trigrams",
             get: () => perfModel.search,
           },
-          { name: "DOI lookup", desc: "resolve identifier", get: () => perfModel.doilookup },
-          { name: "Facet counts", desc: "count facets in-wasm", get: () => perfModel.facetcount },
+          { g: "popular", name: "DOI lookup", desc: "resolve identifier", get: () => perfModel.doilookup },
+          { g: "popular", name: "Facet counts", desc: "count facets in-wasm", get: () => perfModel.facetcount },
+          { g: "popular", name: "Records fetch", desc: "the popular page's records", get: () => perfModel.results },
           {
-            name: "Load all matches",
+            g: "rest",
+            name: "ID fetch",
             desc: "fetch remaining postings",
             get: () => (!serverMode && perfModel.tail != null) ? perfModel.tail : null,
           },
-          { name: "Fetch page", desc: "this page's records", get: () => perfModel.results },
+          { g: "rest", name: "Records fetch", desc: "the full page's records", get: () => perfModel.tailresults },
         ];
 
         /* Phases split into one-time startup opens (boot) and per-search work. Each
@@ -954,24 +962,26 @@
           return h;
         };
 
-        const once = visible.filter((s) => s.once);
-        const query = visible.filter((s) => !s.once);
         let html = "";
-        if (once.length > 0) {
-          const oMs = once.reduce((a, s) => a + (s.d.ms || 0), 0);
-          const oBytes = once.reduce((a, s) => a + (s.d.bytes || 0), 0);
-          html += `<div class="perfgroup"><span class="pg-title">Startup · ran once</span><span class="pg-sub">${fmtBytes(oBytes)} · ${oMs.toFixed(0)} ms</span></div>` + renderGroup(once);
-        }
-        if (query.length > 0) {
-          html += `<div class="perfgroup"><span class="pg-title">This search</span></div>` + renderGroup(query);
+        for (const grp of GROUPS) {
+          const rows = visible.filter((s) => s.g === grp.key);
+          if (rows.length === 0) continue;
+          let sub = "";
+          if (grp.sub) {
+            const gMs = rows.reduce((a, s) => a + (s.d.ms || 0), 0);
+            const gBytes = rows.reduce((a, s) => a + (s.d.bytes || 0), 0);
+            sub = `<span class="pg-sub">${fmtBytes(gBytes)} · ${gMs.toFixed(0)} ms</span>`;
+          }
+          html += `<div class="perfgroup"><span class="pg-title">${grp.title}</span>${sub}</div>` + renderGroup(rows);
         }
         els.perfrows.innerHTML = html;
 
-        /* Footer total reflects the current search only (startup is one-time). */
-        const tReqs = query.reduce((a, s) => a + (s.d.reqs || 0), 0);
-        const tBytes = query.reduce((a, s) => a + (s.d.bytes || 0), 0);
-        const tMs = query.reduce((a, s) => a + (s.d.ms || 0), 0);
-        els.mTotal.textContent = query.length > 0
+        /* Footer total reflects the live query — everything except one-time startup. */
+        const q = visible.filter((s) => s.g !== "startup");
+        const tReqs = q.reduce((a, s) => a + (s.d.reqs || 0), 0);
+        const tBytes = q.reduce((a, s) => a + (s.d.bytes || 0), 0);
+        const tMs = q.reduce((a, s) => a + (s.d.ms || 0), 0);
+        els.mTotal.textContent = q.length > 0
           ? `this search: ${tReqs} req · ${fmtBytes(tBytes)} · ${tMs.toFixed(0)} ms`
           : "";
 
@@ -991,7 +1001,7 @@
        * row, and omitting a key leaves its prior value untouched.
        */
       function setPerf(patch = {}) {
-        for (const k of ["index", "facets", "recstore", "lookup", "search", "doilookup", "facetcount", "tail", "results", "summary"]) {
+        for (const k of ["index", "facets", "recstore", "lookup", "search", "doilookup", "facetcount", "results", "tail", "tailresults", "summary"]) {
           if (patch[k] !== undefined) perfModel[k] = patch[k];   // null clears the row
         }
         renderPerf();
@@ -1281,7 +1291,11 @@
         if (willLoadTail) {
           // This call fetched the lazy tail — report it on its own; the head's
           // search and results stats from the first render stay put.
-          setPerf({ tail: { ms: idxMs, reqs: idxReqs, bytes: idxBytes }, summary });
+          setPerf({
+            tail: { ms: idxMs, reqs: idxReqs, bytes: idxBytes },
+            tailresults: { ms: recMs, reqs: recReqs, bytes: recBytes },
+            summary,
+          });
         } else {
           setPerf({
             search: { ms: idxMs, reqs: idxReqs, bytes: idxBytes },
@@ -1402,7 +1416,7 @@
           els.pager.hidden = true;
           tailPending = false;
           applyFacetCounts(null);
-          setPerf({ search: null, facetcount: null, tail: null, results: null });
+          setPerf({ search: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null });
           syncUrl();
           return;
         }
@@ -1418,7 +1432,7 @@
           let docs = [];
           try { docs = Array.from(await lookup.lookup(bareDoi)); } catch (_) {}
           if (mySeq !== searchSeq) return;
-          setPerf({ doilookup: { ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 }, search: null, facetcount: null, tail: null });
+          setPerf({ doilookup: { ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 }, search: null, facetcount: null, tail: null, tailresults: null });
           if (docs.length) { cur = null; await showDocs(docs, mySeq, `DOI → ${docs.length} match${docs.length === 1 ? "" : "es"}`); return; }
           // no exact match — fall through to a normal search for the typed string
         } else {
@@ -1427,7 +1441,7 @@
         if (serverMode) {
           // The Lambda runs the intersection; no client cursor, tail, or facet counts.
           serverTotal = 0;
-          setPerf({ tail: null, facetcount: null });   // server mode: no client-side facet count
+          setPerf({ tail: null, tailresults: null, facetcount: null });   // server mode: no client-side facet count
           await goPageServer(resetPaging ? 0 : offset);
           return;
         }
@@ -1447,7 +1461,7 @@
           setPerf({ facetcount: { ms: performance.now() - fcT0, reqs: 0, bytes: 0 } });
           applyFacetCounts(fc);
         } catch (_) {}
-        setPerf({ tail: null });   // new query: clear any prior tail-load stat
+        setPerf({ tail: null, tailresults: null });   // new query: clear any prior tail-load stat
         await goPage(resetPaging ? 0 : offset, openMs, openReqs, openBytes);
         // Auto-pull only when the head can't even fill a page — there the user
         // clearly wants more, and it's the "show the few, then pull the rest"
