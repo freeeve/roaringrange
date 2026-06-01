@@ -7,10 +7,12 @@
 #   ./deploy.sh --data DIR       ALSO upload the built index/record files from DIR
 #   BUCKET=… DISTRIBUTION=… ./deploy.sh   override the defaults below
 #
-# Web assets (this dir's web/) are small and change every build, so they are
-# always synced. Content-types are set explicitly because the defaults matter:
-# .wasm must be application/wasm for streaming compilation, and ES-module .js
-# needs a JavaScript MIME type.
+# The wasm reader (roaringrange.js + roaringrange_bg.wasm) is uploaded under
+# content-hashed names (roaringrange.<hash>.js / roaringrange.<hash>_bg.wasm,
+# immutable) and the HTML is rewritten to reference them, then served no-cache. So
+# a reader rebuild always gets fresh URLs and a cached HTML can never pair with a
+# mismatched reader (no stale-import errors). Content-types are explicit: .wasm
+# needs application/wasm for streaming compilation, ES-module .js a JS MIME type.
 #
 # The data files (openalex-47m.{rrs,rrf}, records-47m.{idx,bin}) total ~20 GB,
 # rarely change, and are built locally by `go run . …` (see main.go). They are
@@ -42,11 +44,33 @@ sync_ct() { # content-type, then sync globs that follow as --include patterns
     --content-type "$ct" --cache-control "$CACHE"
 }
 
-echo "==> web assets -> s3://$BUCKET/"
-sync_ct "text/html; charset=utf-8"       "*.html"
-sync_ct "text/javascript; charset=utf-8" "*.js"
-sync_ct "application/wasm"               "*.wasm"
-sync_ct "image/svg+xml"                  "*.svg"
+# Content hash of the wasm reader (JS + wasm), so a rebuild gets fresh asset URLs
+# and a cached HTML can never pair with a mismatched reader.
+ASSET_HASH="$(cat "$WEB/roaringrange.js" "$WEB/roaringrange_bg.wasm" | shasum -a 256 | cut -c1-10)"
+HTMLCACHE="no-cache"                               # entry HTML always revalidates
+ASSETCACHE="public, max-age=31536000, immutable"   # hashed reader names never change
+
+echo "==> web assets -> s3://$BUCKET/ (reader hash $ASSET_HASH)"
+sync_ct "image/svg+xml" "*.svg"
+
+# Reader under content-hashed names (immutable); the HTML below points at these.
+aws s3 cp "$WEB/roaringrange.js" "s3://$BUCKET/roaringrange.$ASSET_HASH.js" \
+  --content-type "text/javascript; charset=utf-8" --cache-control "$ASSETCACHE"
+aws s3 cp "$WEB/roaringrange_bg.wasm" "s3://$BUCKET/roaringrange.${ASSET_HASH}_bg.wasm" \
+  --content-type "application/wasm" --cache-control "$ASSETCACHE"
+
+# Rewrite each HTML page to reference the hashed reader, then upload it no-cache so
+# the browser always picks up the current build (and its matching reader).
+for h in index.html how-it-works.html; do
+  [[ -f "$WEB/$h" ]] || continue
+  tmp_html="$(mktemp)"
+  sed -e "s|\./roaringrange\.js|./roaringrange.$ASSET_HASH.js|g" \
+      -e "s|roaringrange_bg\.wasm|roaringrange.${ASSET_HASH}_bg.wasm|g" \
+      "$WEB/$h" > "$tmp_html"
+  aws s3 cp "$tmp_html" "s3://$BUCKET/$h" \
+    --content-type "text/html; charset=utf-8" --cache-control "$HTMLCACHE"
+  rm -f "$tmp_html"
+done
 
 if [[ -n "$DATA_DIR" ]]; then
   echo "==> data files <- $DATA_DIR (large; only changed files upload)"
@@ -60,10 +84,10 @@ if [[ -n "$DATA_DIR" ]]; then
   done
 fi
 
-echo "==> invalidating web paths on $DISTRIBUTION (data objects left cached)"
+echo "==> invalidating HTML on $DISTRIBUTION (hashed reader + data left cached)"
 aws cloudfront create-invalidation \
   --distribution-id "$DISTRIBUTION" \
-  --paths /index.html /how-it-works.html "/*.js" "/*.wasm" "/*.svg" \
+  --paths /index.html /how-it-works.html \
   --query "Invalidation.{Id:Id,Status:Status}" --output table
 
 echo "==> done — https://openalex.evefreeman.com/"
