@@ -894,7 +894,7 @@
          boot holds just ms (a number) or null.
          Calling setPerf({ ... }) patches the model and re-renders.
          tail: null clears/hides the "Load all matches" row. */
-      const perfModel = { index: null, facets: null, recstore: null, lookup: null, search: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null, headN: null, summary: null };
+      const perfModel = { index: null, facets: null, recstore: null, lookup: null, search: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null, headN: null, query: null, summary: null };
 
       /** Render the "How this search ran" rows from perfModel. */
       function renderPerf() {
@@ -910,8 +910,8 @@
           { g: "startup", name: "Open lookup", desc: "DOI lookup index", get: () => perfModel.lookup },
           {
             g: "popular",
-            name: "ID fetch",
-            desc: serverMode ? "ran in-region; only IDs returned" : "intersect trigrams",
+            name: serverMode ? "ID fetch (lambda)" : "ID fetch",
+            desc: serverMode ? "IDs + facets returned" : "intersect trigrams",
             get: () => perfModel.search,
           },
           { g: "popular", name: "DOI lookup", desc: "resolve identifier", get: () => perfModel.doilookup },
@@ -969,6 +969,9 @@
           } else if (grp.key === "rest" && perfModel.headN != null) {
             const note = perfModel.headN < PAGE ? " (less than page size)" : "";
             sub = `<span class="pg-sub">popular: ${fmt(perfModel.headN)} result${perfModel.headN === 1 ? "" : "s"}${note}</span>`;
+          } else if (grp.key === "popular" && perfModel.query) {
+            const qd = perfModel.query.length > 40 ? perfModel.query.slice(0, 40) + "…" : perfModel.query;
+            sub = `<span class="pg-sub">query: "${esc(qd)}"</span>`;
           }
           html += `<div class="perfgroup"><span class="pg-title">${grp.title}</span>${sub}</div>` + renderGroup(rows);
         }
@@ -999,7 +1002,7 @@
        * row, and omitting a key leaves its prior value untouched.
        */
       function setPerf(patch = {}) {
-        for (const k of ["index", "facets", "recstore", "lookup", "search", "doilookup", "facetcount", "results", "tail", "tailresults", "headN", "summary"]) {
+        for (const k of ["index", "facets", "recstore", "lookup", "search", "doilookup", "facetcount", "results", "tail", "tailresults", "headN", "query", "summary"]) {
           if (patch[k] !== undefined) perfModel[k] = patch[k];   // null clears the row
         }
         renderPerf();
@@ -1423,10 +1426,11 @@
           els.pager.hidden = true;
           tailPending = false;
           applyFacetCounts(null);
-          setPerf({ search: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null });
+          setPerf({ query: null, search: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null });
           syncUrl();
           return;
         }
+        perfModel.query = q;   // shown in the "Load popular" group header
         const mySeq = ++searchSeq;
         reqs = 0; bytes = 0;
         recCache.clear();
