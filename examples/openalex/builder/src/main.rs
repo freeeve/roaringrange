@@ -26,14 +26,21 @@
 //! in doc-ID order, and the accumulated facets are written. This re-streams the
 //! sources K times — acceptable for an offline build. `-chunks 1` (the default) is
 //! the original single-pass path and stays byte-for-byte unchanged.
+//!
+//! Additive outputs: every record optionally carries a stored `ab` abstract field
+//! (`-abstract-cap`, default 2000 bytes; 0 omits it), a DOI exact-lookup sidecar
+//! (`-lookup`, `RRIL`) maps bare DOIs to doc IDs, and the record store can be
+//! zstd-compressed against a trained shared dictionary (`-records-zstd`, with
+//! `-dict`/`-dict-size`/`-zstd-level`) — all off-by-default for compression so a
+//! plain run is byte-for-byte unchanged save for the new `ab` field and lookup.
 
 use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use roaringrange::build::chunk::{merge_partials_to_rrs, write_partial};
 use roaringrange::build::{
-    split_posting, write_facets, write_index, write_records, FacetCategory, FacetField,
-    RecordWriter, DEFAULT_STRIDE,
+    split_posting, train_record_dict, write_facets, write_index, write_lookup, write_records,
+    write_records_zstd, FacetCategory, FacetField, RecordWriter, DEFAULT_STRIDE,
 };
 use roaringrange::ngram_keys;
 use serde::Deserialize;
@@ -48,6 +55,9 @@ use std::time::{Duration, Instant};
 const GRAM: usize = 3;
 /// Byte cap on the reconstructed abstract, bounding indexed text per work.
 const ABSTRACT_CHAR_CAP: usize = 2000;
+/// Max records sampled to train the shared zstd dictionary in the single-pass
+/// path: enough variety for a good dictionary without holding extra copies.
+const ZSTD_DICT_SAMPLE_CAP: usize = 100_000;
 /// Number of key shards; each is an independently-locked bitmap map, so parse
 /// threads insert with low contention.
 const KEY_SHARDS: usize = 256;
@@ -108,6 +118,8 @@ struct Work {
     cited_by_count: Option<i64>,
     #[serde(default)]
     primary_location: Option<PrimaryLocation>,
+    #[serde(default)]
+    doi: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -131,6 +143,13 @@ struct PrimaryLocation {
     source: Option<Named>,
 }
 
+/// One source's pass-2 output: its `(docID, record bytes)` pairs and its
+/// `(bare DOI, docID)` lookup pairs (only for works that carry a DOI).
+struct SourceOut {
+    recs: Vec<(u32, Vec<u8>)>,
+    dois: Vec<(String, u32)>,
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let in_arg = arg(&args, "-in", "/tmp/openalex/works/*/*.gz");
@@ -138,9 +157,31 @@ fn main() {
     let facets_path = arg(&args, "-facets", "/tmp/openalex.rrf");
     let bin_path = arg(&args, "-bin", "/tmp/openalex-records.bin");
     let idx_path = arg(&args, "-idx", "/tmp/openalex-records.idx");
+    let lookup_path = arg(&args, "-lookup", "/tmp/openalex.rril");
     let limit: usize = arg(&args, "-limit", "0").parse().unwrap_or(0);
     let maxfiles: usize = arg(&args, "-maxfiles", "0").parse().unwrap_or(0);
     let chunks: usize = arg(&args, "-chunks", "1").parse().unwrap_or(1).max(1);
+    // Stored-abstract config: -abstract-cap caps the `ab` record field (0 = omit
+    // it entirely, preserving the lean record). This is independent of the index
+    // text cap (ABSTRACT_CHAR_CAP in build_text), which stays unchanged.
+    let abstract_cap: usize = arg(&args, "-abstract-cap", "2000").parse().unwrap_or(2000);
+    // Record-store zstd config (all no-ops unless -records-zstd is set).
+    let records_zstd = flag(&args, "-records-zstd");
+    let dict_path = arg(&args, "-dict", "/tmp/openalex.dict");
+    let dict_size: usize = arg(&args, "-dict-size", "114688").parse().unwrap_or(114688);
+    let zstd_level: i32 = arg(&args, "-zstd-level", "19").parse().unwrap_or(19);
+
+    // The chunked path concatenates per-chunk record temps raw, so compressing
+    // there would need the trained dictionary before the per-chunk writes (it is
+    // not available until a sample has been gathered). Rather than silently emit a
+    // raw store, refuse the combination and tell the operator to use chunks=1.
+    if records_zstd && chunks > 1 {
+        eprintln!(
+            "-records-zstd is only supported with -chunks 1 (the single-pass path); \
+             got -chunks {chunks}. Re-run with -chunks 1 for a compressed record store."
+        );
+        std::process::exit(2);
+    }
 
     let mut sources = resolve_sources(&in_arg);
     if sources.is_empty() {
@@ -188,6 +229,8 @@ fn main() {
             &facets_path,
             &bin_path,
             &idx_path,
+            &lookup_path,
+            abstract_cap,
             t0,
         );
         return;
@@ -202,26 +245,43 @@ fn main() {
         .map(|_| Mutex::new(HashMap::new()))
         .collect();
 
-    let per_file: Vec<Vec<(u32, Vec<u8>)>> = sources
+    let per_file: Vec<SourceOut> = sources
         .par_iter()
-        .map(|s| build_source(s, &id_to_doc, &shards, &facets))
+        .map(|s| build_source(s, &id_to_doc, &shards, &facets, abstract_cap))
         .collect();
-    let indexed: usize = per_file.iter().map(|v| v.len()).sum();
+    let indexed: usize = per_file.iter().map(|v| v.recs.len()).sum();
     eprintln!(
         "pass2: indexed {} works in {:.1}s",
         indexed,
         t1.elapsed().as_secs_f64()
     );
 
-    // Place records into doc-ID order, then write the record store.
+    // Place records into doc-ID order and gather DOIs across all sources.
     let t2 = Instant::now();
     let mut records: Vec<Vec<u8>> = vec![Vec::new(); n];
+    let mut dois: Vec<(String, u32)> = Vec::new();
     for fr in per_file {
-        for (d, rec) in fr {
+        for (d, rec) in fr.recs {
             records[d as usize] = rec;
         }
+        dois.extend(fr.dois);
     }
-    {
+
+    // Write the record store: optionally zstd-compressed against a shared trained
+    // dictionary, else the original raw (version-1) store byte-for-byte.
+    if records_zstd {
+        let dict = train_dict_from_records(&records, dict_size);
+        std::fs::write(&dict_path, &dict).expect("write dict");
+        eprintln!(
+            "trained zstd dict {} ({} bytes) from {} sampled records",
+            dict_path,
+            dict.len(),
+            sample_count(records.len())
+        );
+        let bin = BufWriter::with_capacity(1 << 20, File::create(&bin_path).expect("create bin"));
+        let idx = BufWriter::with_capacity(1 << 20, File::create(&idx_path).expect("create idx"));
+        write_records_zstd(bin, idx, &records, &dict, zstd_level).expect("write records (zstd)");
+    } else {
         let bin = BufWriter::with_capacity(1 << 20, File::create(&bin_path).expect("create bin"));
         let idx = BufWriter::with_capacity(1 << 20, File::create(&idx_path).expect("create idx"));
         write_records(bin, idx, &records).expect("write records");
@@ -233,6 +293,18 @@ fn main() {
         t2.elapsed().as_secs_f64()
     );
     drop(records);
+
+    // DOI exact-lookup sidecar.
+    let tl = Instant::now();
+    write_doi_lookup(&dois, &lookup_path);
+    eprintln!(
+        "wrote DOI lookup {} ({} entries, {} bytes) in {:.1}s",
+        lookup_path,
+        dois.len(),
+        file_len(&lookup_path),
+        tl.elapsed().as_secs_f64()
+    );
+    drop(dois);
 
     // Split each posting head/tail (parallel across shards) and write the RRS.
     let t3 = Instant::now();
@@ -417,19 +489,21 @@ fn rank_source(src: &Source) -> Vec<(u64, i64)> {
 
 /// Streams one source for pass 2: tokenizes each work and inserts its doc ID into
 /// the shared sharded bitmaps + facet bitmaps (one lock per touched shard/field),
-/// returning the source's `(docID, record bytes)` pairs.
+/// returning the source's records and DOI lookup pairs.
 fn build_source(
     src: &Source,
     id_to_doc: &HashMap<u64, u32>,
     shards: &[Mutex<HashMap<u64, RoaringBitmap>>],
     facets: &[Mutex<HashMap<String, RoaringBitmap>>],
-) -> Vec<(u32, Vec<u8>)> {
+    abstract_cap: usize,
+) -> SourceOut {
     let mut recs = Vec::new();
+    let mut dois = Vec::new();
     let reader = match open_source(src) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("skip {}: {e}", src.label());
-            return recs;
+            return SourceOut { recs, dois };
         }
     };
     // Per-shard key buckets, reused across this source's works to batch locks.
@@ -494,6 +568,10 @@ fn build_source(
             map.lock().unwrap().entry(v).or_default().insert(docid);
         }
 
+        if let Some(doi) = normalize_doi(w.doi.as_deref()) {
+            dois.push((doi, docid));
+        }
+
         let id_trim = trim_openalex_id(&w.id);
         recs.push((
             docid,
@@ -504,10 +582,12 @@ fn build_source(
                 w.publication_year.unwrap_or(0),
                 venue,
                 w.cited_by_count.unwrap_or(0),
+                &abstract_,
+                abstract_cap,
             ),
         ));
     }
-    recs
+    SourceOut { recs, dois }
 }
 
 /// Builds the index in `chunks` contiguous doc-ID ranges, one at a time, so peak
@@ -529,6 +609,8 @@ fn build_chunked(
     facets_path: &str,
     bin_path: &str,
     idx_path: &str,
+    lookup_path: &str,
+    abstract_cap: usize,
     t0: Instant,
 ) {
     let chunk_size = n.div_ceil(chunks);
@@ -544,6 +626,8 @@ fn build_chunked(
     // Running per-(field, value) facet postings, unioned across chunks.
     let mut facet_acc: Vec<HashMap<String, RoaringBitmap>> =
         (0..FACET_FIELDS.len()).map(|_| HashMap::new()).collect();
+    // DOIs gathered across all chunks (each work appears in exactly one chunk).
+    let mut doi_acc: Vec<(String, u32)> = Vec::new();
 
     for c in 0..chunks {
         let lo = (c * chunk_size) as u32;
@@ -561,18 +645,20 @@ fn build_chunked(
             .map(|_| Mutex::new(HashMap::new()))
             .collect();
 
-        let per_file: Vec<Vec<(u32, Vec<u8>)>> = sources
+        let per_file: Vec<SourceOut> = sources
             .par_iter()
-            .map(|s| build_source_range(s, id_to_doc, lo, hi, &shards, &facets))
+            .map(|s| build_source_range(s, id_to_doc, lo, hi, &shards, &facets, abstract_cap))
             .collect();
-        let indexed: usize = per_file.iter().map(|v| v.len()).sum();
+        let indexed: usize = per_file.iter().map(|v| v.recs.len()).sum();
 
-        // Records for this chunk, placed at their offset within [lo, hi).
+        // Records for this chunk, placed at their offset within [lo, hi); gather
+        // this chunk's DOIs into the global accumulator.
         let mut chunk_recs: Vec<Vec<u8>> = vec![Vec::new(); (hi - lo) as usize];
         for fr in per_file {
-            for (d, rec) in fr {
+            for (d, rec) in fr.recs {
                 chunk_recs[(d - lo) as usize] = rec;
             }
+            doi_acc.extend(fr.dois);
         }
         let rpath = tmp_dir.join(format!("rr_chunk_{stamp}_{c}.recs"));
         write_chunk_records(&rpath, &chunk_recs).expect("write chunk records");
@@ -687,6 +773,17 @@ fn build_chunked(
         t4.elapsed().as_secs_f64()
     );
 
+    // DOI exact-lookup sidecar.
+    let tl = Instant::now();
+    write_doi_lookup(&doi_acc, lookup_path);
+    eprintln!(
+        "wrote DOI lookup {} ({} entries, {} bytes) in {:.1}s",
+        lookup_path,
+        doi_acc.len(),
+        file_len(lookup_path),
+        tl.elapsed().as_secs_f64()
+    );
+
     for p in partial_paths.iter().chain(record_paths.iter()) {
         let _ = std::fs::remove_file(p);
     }
@@ -694,8 +791,9 @@ fn build_chunked(
 }
 
 /// Pass-2 worker for a chunk: like [`build_source`] but indexes only works whose
-/// doc ID falls in `[lo, hi)`, returning that source's `(docID, record bytes)`
-/// pairs for the chunk.
+/// doc ID falls in `[lo, hi)`, returning that chunk's records and DOI lookup
+/// pairs.
+#[allow(clippy::too_many_arguments)]
 fn build_source_range(
     src: &Source,
     id_to_doc: &HashMap<u64, u32>,
@@ -703,13 +801,15 @@ fn build_source_range(
     hi: u32,
     shards: &[Mutex<HashMap<u64, RoaringBitmap>>],
     facets: &[Mutex<HashMap<String, RoaringBitmap>>],
-) -> Vec<(u32, Vec<u8>)> {
+    abstract_cap: usize,
+) -> SourceOut {
     let mut recs = Vec::new();
+    let mut dois = Vec::new();
     let reader = match open_source(src) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("skip {}: {e}", src.label());
-            return recs;
+            return SourceOut { recs, dois };
         }
     };
     let mut buckets: Vec<Vec<u64>> = (0..KEY_SHARDS).map(|_| Vec::new()).collect();
@@ -775,6 +875,10 @@ fn build_source_range(
             map.lock().unwrap().entry(v).or_default().insert(docid);
         }
 
+        if let Some(doi) = normalize_doi(w.doi.as_deref()) {
+            dois.push((doi, docid));
+        }
+
         let id_trim = trim_openalex_id(&w.id);
         recs.push((
             docid,
@@ -785,10 +889,12 @@ fn build_source_range(
                 w.publication_year.unwrap_or(0),
                 venue,
                 w.cited_by_count.unwrap_or(0),
+                &abstract_,
+                abstract_cap,
             ),
         ));
     }
-    recs
+    SourceOut { recs, dois }
 }
 
 /// Flushes a chunk's records (in chunk-local doc-ID order) to a temp file as a
@@ -948,8 +1054,12 @@ fn facet_value(w: &Work, fi: usize, topic: &str) -> String {
     }
 }
 
-/// Marshals the stored record JSON (compact keys: id, t, a, y, v, c) with the
-/// same omit-empty rules as the Go loader.
+/// Marshals the stored record JSON (compact keys: id, t, a, y, v, c, ab) with the
+/// same omit-empty rules as the Go loader. The `ab` (abstract) field is appended
+/// only when `abstract_cap > 0` and the work has a non-empty reconstructed
+/// abstract, truncated to `abstract_cap` bytes on a char boundary, so
+/// `-abstract-cap 0` preserves the original lean record byte-for-byte.
+#[allow(clippy::too_many_arguments)]
 fn build_record(
     id: &str,
     title: &str,
@@ -957,6 +1067,8 @@ fn build_record(
     year: i64,
     venue: &str,
     cited: i64,
+    abstract_: &str,
+    abstract_cap: usize,
 ) -> Vec<u8> {
     let mut s = String::with_capacity(160);
     s.push_str("{\"id\":");
@@ -977,13 +1089,87 @@ fn build_record(
     }
     s.push_str(",\"c\":");
     s.push_str(&cited.to_string());
+    if abstract_cap > 0 && !abstract_.is_empty() {
+        let ab = cap_str(abstract_, abstract_cap);
+        if !ab.is_empty() {
+            s.push_str(",\"ab\":");
+            s.push_str(&json_str(ab));
+        }
+    }
     s.push('}');
     s.into_bytes()
+}
+
+/// Truncates `s` to at most `cap` bytes on a UTF-8 char boundary.
+fn cap_str(s: &str, cap: usize) -> &str {
+    if s.len() <= cap {
+        return s;
+    }
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// JSON-encodes a string (quoted + escaped) via serde_json.
 fn json_str(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// Normalizes an OpenAlex DOI for the lookup index: strips a leading
+/// `https://doi.org/` or `http://doi.org/` URL prefix (case-insensitively),
+/// yielding the bare DOI like `10.1234/abcd`. Returns `None` when the input is
+/// absent or empty after stripping. Casing/punctuation beyond the prefix are left
+/// to the reader's `normalize_id` (which uppercases letters and drops
+/// non-alphanumerics); the writer applies it identically, so no extra lowercasing
+/// is needed here.
+fn normalize_doi(doi: Option<&str>) -> Option<String> {
+    let raw = doi?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let lower = raw.to_ascii_lowercase();
+    let bare = if let Some(rest) = lower.strip_prefix("https://doi.org/") {
+        &raw[raw.len() - rest.len()..]
+    } else if let Some(rest) = lower.strip_prefix("http://doi.org/") {
+        &raw[raw.len() - rest.len()..]
+    } else {
+        raw
+    };
+    if bare.is_empty() {
+        None
+    } else {
+        Some(bare.to_string())
+    }
+}
+
+/// Writes the `(DOI, docID)` pairs to the `RRIL` exact-lookup sidecar at `path`.
+fn write_doi_lookup(dois: &[(String, u32)], path: &str) {
+    let out = BufWriter::with_capacity(1 << 20, File::create(path).expect("create lookup"));
+    write_lookup(out, dois).expect("write lookup");
+}
+
+/// Number of records sampled to train the dictionary (capped at
+/// [`ZSTD_DICT_SAMPLE_CAP`]).
+fn sample_count(total: usize) -> usize {
+    total.min(ZSTD_DICT_SAMPLE_CAP)
+}
+
+/// Trains a shared zstd dictionary from a sample of the record bytes. Samples
+/// every Nth non-empty record (stride chosen so at most [`ZSTD_DICT_SAMPLE_CAP`]
+/// records are used) to bound memory and training time while still spanning the
+/// corpus, then trains a dictionary capped at `max_dict_bytes`.
+fn train_dict_from_records(records: &[Vec<u8>], max_dict_bytes: usize) -> Vec<u8> {
+    let total = records.len();
+    let stride = total.div_ceil(ZSTD_DICT_SAMPLE_CAP).max(1);
+    let samples: Vec<&[u8]> = records
+        .iter()
+        .step_by(stride)
+        .filter(|r| !r.is_empty())
+        .map(|r| r.as_slice())
+        .collect();
+    train_record_dict(&samples, max_dict_bytes).expect("train record dict")
 }
 
 /// Returns the value following `flag` in `args`, or `default`.
@@ -993,6 +1179,11 @@ fn arg(args: &[String], flag: &str, default: &str) -> String {
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or_else(|| default.to_string())
+}
+
+/// Returns whether the boolean `flag` is present in `args`.
+fn flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
 }
 
 /// File size in bytes, or 0 if it can't be stat'd.
