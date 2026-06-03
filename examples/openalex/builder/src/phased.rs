@@ -38,7 +38,7 @@ use roaring::RoaringBitmap;
 use roaringrange::build::chunk::{merge_partials_to_rrs, write_partial};
 use roaringrange::build::{
     split_posting, train_record_dict, write_facets, write_lookup_streaming, FacetCategory,
-    FacetField, DEFAULT_STRIDE,
+    FacetField, DEFAULT_HEAD_BOUNDARY, DEFAULT_STRIDE,
 };
 use std::collections::HashMap;
 use std::fs::File;
@@ -290,8 +290,14 @@ fn finalize_text(active: &[usize], work: &Path, rrs_path: &str) {
     let tmp = tmp_path(Path::new(rrs_path));
     {
         let mut f = File::create(&tmp).expect("create rrs tmp");
-        merge_partials_to_rrs(&partials, GRAM as u16, DEFAULT_STRIDE, &mut f)
-            .expect("merge partials");
+        merge_partials_to_rrs(
+            &partials,
+            GRAM as u16,
+            DEFAULT_STRIDE,
+            DEFAULT_HEAD_BOUNDARY,
+            &mut f,
+        )
+        .expect("merge partials");
         f.flush().expect("flush rrs");
     }
     std::fs::rename(&tmp, rrs_path).expect("rename rrs");
@@ -382,7 +388,7 @@ fn finalize_facets(active: &[usize], work: &Path, facets_path: &str) {
                 .into_iter()
                 .map(|(val, bm)| {
                     let card = bm.len() as u32;
-                    let (head, tail) = split_posting(&bm);
+                    let (head, tail) = split_posting(&bm, DEFAULT_HEAD_BOUNDARY);
                     FacetCategory {
                         name: val,
                         card,
@@ -777,7 +783,7 @@ mod tests {
                         .into_iter()
                         .map(|(val, b)| {
                             let card = b.len() as u32;
-                            let (head, tail) = split_posting(&b);
+                            let (head, tail) = split_posting(&b, DEFAULT_HEAD_BOUNDARY);
                             FacetCategory {
                                 name: val,
                                 card,

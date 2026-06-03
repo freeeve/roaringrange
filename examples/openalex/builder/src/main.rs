@@ -46,7 +46,8 @@ use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use roaringrange::build::{
     split_posting, train_record_dict, write_facets, write_index, write_lookup, write_records,
-    write_records_zstd, FacetCategory, FacetField, RecordWriter, DEFAULT_STRIDE,
+    write_records_zstd, FacetCategory, FacetField, RecordWriter, DEFAULT_HEAD_BOUNDARY,
+    DEFAULT_STRIDE,
 };
 use roaringrange::ngram_keys;
 use serde::Deserialize;
@@ -75,8 +76,10 @@ fn init_logging() {
         .init();
 }
 
+mod headtune;
 mod phased;
 mod secondary;
+mod transcode;
 
 /// Trigram size (matches the index/reader contract).
 const GRAM: usize = 3;
@@ -185,6 +188,28 @@ struct SourceOut {
 fn main() {
     init_logging();
     let args: Vec<String> = std::env::args().collect();
+
+    // Head-size tuning analysis: sweep candidate head boundaries against a query
+    // workload over the finished `.rrs`, reporting per-boundary head-serve rate and
+    // modeled slow-mobile latency. Reads only the finished index (no rebuild).
+    if flag(&args, "-analyze-head") {
+        headtune::run(&args);
+        return;
+    }
+
+    // Workload generation: derive a labeled query set from the corpus's own text
+    // (titles, partial titles, subjects, authors, venues) for `-analyze-head`.
+    if flag(&args, "-gen-workload") {
+        headtune::gen_workload(&args);
+        return;
+    }
+
+    // Head-boundary transcode: re-split a finished `.rrs`/`.rrf` at a new head size
+    // without re-indexing (re-split is byte-equivalent to a from-source build at B).
+    if flag(&args, "-transcode") {
+        transcode::run(&args);
+        return;
+    }
 
     // Secondary-index mode: remap the *finished* primary outputs into an alternate
     // sort order (newest-first by `-sort-field`, default "year"), writing a second
@@ -375,7 +400,7 @@ fn main() {
             let map = m.into_inner().unwrap();
             map.into_iter()
                 .map(|(k, bm)| {
-                    let (h, t) = split_posting(&bm);
+                    let (h, t) = split_posting(&bm, DEFAULT_HEAD_BOUNDARY);
                     (k, h, t)
                 })
                 .collect::<Vec<_>>()
@@ -384,7 +409,14 @@ fn main() {
     let ngrams = entries.len();
     {
         let out = BufWriter::with_capacity(1 << 20, File::create(&rrs_path).expect("create rrs"));
-        write_index(out, GRAM as u16, DEFAULT_STRIDE, entries).expect("write index");
+        write_index(
+            out,
+            GRAM as u16,
+            DEFAULT_STRIDE,
+            DEFAULT_HEAD_BOUNDARY,
+            entries,
+        )
+        .expect("write index");
     }
     info!(
         ngrams,
@@ -403,7 +435,7 @@ fn main() {
                 .into_iter()
                 .map(|(val, bm)| {
                     let card = bm.len() as u32;
-                    let (head, tail) = split_posting(&bm);
+                    let (head, tail) = split_posting(&bm, DEFAULT_HEAD_BOUNDARY);
                     FacetCategory {
                         name: val,
                         card,

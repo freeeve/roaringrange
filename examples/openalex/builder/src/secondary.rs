@@ -31,7 +31,9 @@
 
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
-use roaringrange::build::{split_posting, write_facets, write_perm, FacetCategory, FacetField};
+use roaringrange::build::{
+    split_posting, write_facets, write_perm, FacetCategory, FacetField, DEFAULT_HEAD_BOUNDARY,
+};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use tracing::info;
@@ -58,16 +60,16 @@ pub fn read_record_count(idx_path: &str) -> io::Result<u32> {
 
 /// One primary facet field parsed from the `.rrf`: its name and `(category name,
 /// full posting)` pairs (head and tail unioned back into the whole bitmap).
-struct FacetFieldRaw {
-    name: String,
-    cats: Vec<(String, RoaringBitmap)>,
+pub(crate) struct FacetFieldRaw {
+    pub(crate) name: String,
+    pub(crate) cats: Vec<(String, RoaringBitmap)>,
 }
 
 /// Parses the primary `.rrf` (`RRSF`) into per-field categories with full primary
 /// postings. The whole file is read into memory (the facet sidecar is small
 /// relative to the text index); postings are sliced by the category table's
 /// absolute offsets. Mirrors the `write_facets` byte layout.
-fn read_facets(path: &str) -> io::Result<Vec<FacetFieldRaw>> {
+pub(crate) fn read_facets(path: &str) -> io::Result<Vec<FacetFieldRaw>> {
     let buf = std::fs::read(path)?;
     let u16le = |o: usize| u16::from_le_bytes(buf[o..o + 2].try_into().unwrap());
     let u32le = |o: usize| u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
@@ -180,7 +182,7 @@ fn write_secondary_facets(fields: &[FacetFieldRaw], inverse: &[u32], out: &str) 
                 .map(|(name, bm)| {
                     let remapped = remap_bitmap(bm, inverse);
                     let card = remapped.len() as u32;
-                    let (head, tail) = split_posting(&remapped);
+                    let (head, tail) = split_posting(&remapped, DEFAULT_HEAD_BOUNDARY);
                     FacetCategory {
                         name: name.clone(),
                         card,
@@ -215,6 +217,7 @@ fn remap_text_index(in_path: &str, inverse: &[u32], out_path: &str) -> io::Resul
     if &hdr[0..4] != b"RRSI" {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "rrs: bad magic"));
     }
+    let version = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
     let gram = u16::from_le_bytes(hdr[6..8].try_into().unwrap());
     let ngrams = u32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
     let stride = u32::from_le_bytes(hdr[12..16].try_into().unwrap());
@@ -224,9 +227,12 @@ fn remap_text_index(in_path: &str, inverse: &[u32], out_path: &str) -> io::Resul
         ngrams.div_ceil(stride.max(1) as usize)
     };
 
-    // Skip the sparse index (rebuilt from the dictionary below), then read the
-    // dictionary. The cursor lands at the first posting (dictionary order).
-    r.seek(SeekFrom::Current((sparse_count * 8) as i64))?;
+    // A version-2 header carries a trailing 4-byte head_boundary; consume it so the
+    // cursor reaches the sparse index. Skip the sparse index (rebuilt from the
+    // dictionary below) and read the dictionary — the cursor then lands at the first
+    // posting (dictionary order).
+    let header_extra = if version >= 2 { 4i64 } else { 0 };
+    r.seek(SeekFrom::Current(header_extra + (sparse_count * 8) as i64))?;
     let mut keys: Vec<u64> = Vec::with_capacity(ngrams);
     let mut sizes: Vec<(usize, usize)> = Vec::with_capacity(ngrams);
     for _ in 0..ngrams {
@@ -238,7 +244,8 @@ fn remap_text_index(in_path: &str, inverse: &[u32], out_path: &str) -> io::Resul
         sizes.push((hlen, tlen));
     }
 
-    let dict_start = 16 + sparse_count * 8;
+    // Output layout uses the 20-byte version-2 header.
+    let dict_start = 20 + sparse_count * 8;
     let postings_start = (dict_start + ngrams * 24) as u64;
 
     // Write postings first (after the reserved header/dict region), recording the
@@ -267,7 +274,7 @@ fn remap_text_index(in_path: &str, inverse: &[u32], out_path: &str) -> io::Resul
                 let mut bm = RoaringBitmap::deserialize_from(&bytes[..hlen]).expect("head");
                 bm |= RoaringBitmap::deserialize_from(&bytes[hlen..]).expect("tail");
                 let s = remap_bitmap(&bm, inverse);
-                split_posting(&s)
+                split_posting(&s, DEFAULT_HEAD_BOUNDARY)
             })
             .collect();
         // Write in dictionary order.
@@ -285,10 +292,11 @@ fn remap_text_index(in_path: &str, inverse: &[u32], out_path: &str) -> io::Resul
     // Header + sparse index + dictionary (keys already in sorted dictionary order).
     out.seek(SeekFrom::Start(0))?;
     out.write_all(b"RRSI")?;
-    out.write_all(&1u16.to_le_bytes())?;
+    out.write_all(&2u16.to_le_bytes())?;
     out.write_all(&gram.to_le_bytes())?;
     out.write_all(&(ngrams as u32).to_le_bytes())?;
     out.write_all(&stride.to_le_bytes())?;
+    out.write_all(&DEFAULT_HEAD_BOUNDARY.to_le_bytes())?;
     for i in 0..sparse_count {
         out.write_all(&out_dict[i * stride as usize].0.to_le_bytes())?;
     }
@@ -418,21 +426,21 @@ mod tests {
         let bcd = ngram_keys("bcd", 3)[0];
         let entries: Vec<(u64, Vec<u8>, Vec<u8>)> = vec![
             {
-                let (h, t) = split_posting(&bm(&[0, 2, 4]));
+                let (h, t) = split_posting(&bm(&[0, 2, 4]), DEFAULT_HEAD_BOUNDARY);
                 (abc, h, t)
             },
             {
-                let (h, t) = split_posting(&bm(&[1, 2, 3]));
+                let (h, t) = split_posting(&bm(&[1, 2, 3]), DEFAULT_HEAD_BOUNDARY);
                 (bcd, h, t)
             },
         ];
         {
             let w = BufWriter::new(File::create(&rrs_in).unwrap());
-            write_index(w, 3, DEFAULT_STRIDE, entries).unwrap();
+            write_index(w, 3, DEFAULT_STRIDE, DEFAULT_HEAD_BOUNDARY, entries).unwrap();
         }
         // A "year" facet field encoding per-doc years: 2020 -> {1,4}, 2010 -> {0,2}, 1990 -> {3}.
         let mk = |name: &str, b: RoaringBitmap| {
-            let (head, tail) = split_posting(&b);
+            let (head, tail) = split_posting(&b, DEFAULT_HEAD_BOUNDARY);
             FacetCategory {
                 name: name.to_string(),
                 card: b.len() as u32,
