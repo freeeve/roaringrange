@@ -1,0 +1,24 @@
+#!/bin/sh
+# Pre-push: run CI's fast lint gates locally so a lint failure is caught before it
+# reaches CI (which runs `cargo clippy --all-targets -- -D warnings` on the rust crate
+# and the openalex builder, plus `gofmt -s` on the Go package).
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Bypass for one push:     git push --no-verify
+set -e
+repo="$(git rev-parse --show-toplevel)"
+
+echo "[pre-push] rust clippy (--all-targets -D warnings)…"
+( cd "$repo/rust" && cargo clippy --all-targets -- -D warnings )
+
+echo "[pre-push] openalex-builder clippy…"
+( cd "$repo/examples/openalex/builder" && cargo clippy --all-targets -- -D warnings )
+
+echo "[pre-push] go gofmt -s check…"
+unformatted="$(cd "$repo/go" && gofmt -s -l .)"
+if [ -n "$unformatted" ]; then
+	echo "[pre-push] not gofmt'd: $unformatted (run: gofmt -s -w .)" >&2
+	exit 1
+fi
+
+echo "[pre-push] lint gates passed."
