@@ -63,12 +63,13 @@ fn build_rrs(gram_size: u16, stride: u32, entries: &[(u64, RoaringBitmap)]) -> V
     };
 
     let mut out = Vec::new();
-    // Header (16 B).
+    // Header (20 B): magic, version, gram, ngrams, stride, head_boundary.
     out.extend_from_slice(b"RRSI");
-    out.extend_from_slice(&1u16.to_le_bytes()); // version
+    out.extend_from_slice(&2u16.to_le_bytes()); // version
     out.extend_from_slice(&gram_size.to_le_bytes());
     out.extend_from_slice(&ngrams.to_le_bytes());
     out.extend_from_slice(&stride.to_le_bytes());
+    out.extend_from_slice(&HEAD_BOUNDARY.to_le_bytes());
 
     // Sparse index: dict[i*stride].key for i in 0..sparse_count.
     for i in 0..sparse_count {
@@ -77,7 +78,7 @@ fn build_rrs(gram_size: u16, stride: u32, entries: &[(u64, RoaringBitmap)]) -> V
     }
 
     // Dictionary (24 B each); compute absolute posting offsets.
-    let dict_start = 16 + sparse_count * 8;
+    let dict_start = 20 + sparse_count * 8;
     let postings_start = dict_start + postings.len() * 24;
     let mut off = postings_start as u64;
     for p in &postings {

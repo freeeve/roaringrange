@@ -10,24 +10,37 @@
 use roaring::RoaringBitmap;
 use std::io::{self, Write};
 
-/// Head/tail boundary: docs `[0, HEAD_BOUNDARY)` form the head posting (the first
-/// roaring container, i.e. the top-ranked docs), the rest form the tail.
-pub(crate) const HEAD_BOUNDARY: u32 = 65536;
+/// Default head/tail boundary: docs `[0, 65536)` form the head posting (the first
+/// roaring container — the top-ranked docs), the rest the tail. The boundary is a
+/// build parameter (see [`split_posting`]) and is recorded in the index header;
+/// this is the value used when none is chosen. Should be a multiple of 65536.
+pub const DEFAULT_HEAD_BOUNDARY: u32 = 65_536;
+
+/// Internal alias for tests that assert against the default split point.
+#[cfg(test)]
+pub(crate) const HEAD_BOUNDARY: u32 = DEFAULT_HEAD_BOUNDARY;
+
+/// RRS header size: magic[4] + version[2] + gram[2] + ngrams[4] + stride[4] +
+/// head_boundary[4]. Kept in sync with the reader's `index::HEADER_SIZE`.
+pub(crate) const HEADER_SIZE: usize = 20;
+/// RRS format version written into the header.
+pub(crate) const FORMAT_VERSION: u16 = 2;
 
 /// FNV-1a 64-bit offset basis / prime (shared by the facet key derivation).
 const FNV_OFFSET64: u64 = 14695981039346656037;
 const FNV_PRIME64: u64 = 1099511628211;
 
-/// Splits `bm` into the head bitmap (docs `[0, 65536)`) and tail bitmap (docs
-/// `[65536, ∞)`), each serialized as a portable RoaringBitmap. Mirrors the Go
-/// `splitBitmap`: intersect a head-range mask for the head, clone-and-trim for
-/// the tail (avoids materializing a full-range mask per posting).
-pub fn split_posting(bm: &RoaringBitmap) -> (Vec<u8>, Vec<u8>) {
+/// Splits `bm` into the head bitmap (docs `[0, head_boundary)`) and tail bitmap
+/// (docs `[head_boundary, ∞)`), each serialized as a portable RoaringBitmap.
+/// `head_boundary` should be a multiple of 65536 (whole roaring containers); the
+/// head holds the top-ranked docs. Mirrors the Go `splitBitmap`: intersect a
+/// head-range mask for the head, clone-and-trim for the tail.
+pub fn split_posting(bm: &RoaringBitmap, head_boundary: u32) -> (Vec<u8>, Vec<u8>) {
     let mut head = RoaringBitmap::new();
-    head.insert_range(0..HEAD_BOUNDARY);
+    head.insert_range(0..head_boundary);
     head &= bm;
     let mut tail = bm.clone();
-    tail.remove_range(0..HEAD_BOUNDARY);
+    tail.remove_range(0..head_boundary);
 
     let mut hb = Vec::with_capacity(head.serialized_size());
     head.serialize_into(&mut hb).expect("serialize head bitmap");
@@ -66,6 +79,7 @@ pub fn write_index<W: Write>(
     mut w: W,
     gram_size: u16,
     stride: u32,
+    head_boundary: u32,
     mut entries: Vec<(u64, Vec<u8>, Vec<u8>)>,
 ) -> io::Result<()> {
     entries.sort_by_key(|e| e.0);
@@ -76,15 +90,16 @@ pub fn write_index<W: Write>(
     } else {
         (ngrams as usize).div_ceil(stride as usize)
     };
-    let dict_start = 16 + sparse_count * 8;
+    let dict_start = HEADER_SIZE + sparse_count * 8;
     let postings_start = dict_start + entries.len() * 24;
 
-    // Header (16 B).
+    // Header: magic, version, gram, ngrams, stride, head_boundary.
     w.write_all(b"RRSI")?;
-    w.write_all(&1u16.to_le_bytes())?;
+    w.write_all(&FORMAT_VERSION.to_le_bytes())?;
     w.write_all(&gram_size.to_le_bytes())?;
     w.write_all(&ngrams.to_le_bytes())?;
     w.write_all(&stride.to_le_bytes())?;
+    w.write_all(&head_boundary.to_le_bytes())?;
 
     // Sparse index: dict[i*stride].key.
     for i in 0..sparse_count {
@@ -673,7 +688,7 @@ const COL_ENTRY_SORTCOLS: usize = 24;
 /// so peak memory is one key's postings plus a small dictionary — not the whole
 /// index — and the reader/format are unchanged.
 pub mod chunk {
-    use super::{split_posting, DEFAULT_STRIDE};
+    use super::{split_posting, DEFAULT_STRIDE, FORMAT_VERSION, HEADER_SIZE};
     use roaring::RoaringBitmap;
     use std::fs::File;
     use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
@@ -756,6 +771,7 @@ pub mod chunk {
         paths: &[PathBuf],
         gram_size: u16,
         stride: u32,
+        head_boundary: u32,
         out: &mut File,
     ) -> io::Result<()> {
         let stride = if stride == 0 { DEFAULT_STRIDE } else { stride };
@@ -774,7 +790,7 @@ pub mod chunk {
         } else {
             n.div_ceil(stride as usize)
         };
-        let dict_start = 16 + sparse_count * 8;
+        let dict_start = HEADER_SIZE + sparse_count * 8;
         let postings_start = (dict_start + n * 24) as u64;
 
         // Pass B: k-way merge by key, writing postings; record dict entries in order.
@@ -796,7 +812,7 @@ pub mod chunk {
                     c.advance()?;
                 }
             }
-            let (head, tail) = split_posting(&merged);
+            let (head, tail) = split_posting(&merged, head_boundary);
             out.write_all(&head)?;
             out.write_all(&tail)?;
             dict.push((key, off, head.len() as u32, tail.len() as u32));
@@ -806,10 +822,11 @@ pub mod chunk {
         // Header + sparse index + dictionary (dict is already key-sorted).
         out.seek(SeekFrom::Start(0))?;
         out.write_all(b"RRSI")?;
-        out.write_all(&1u16.to_le_bytes())?;
+        out.write_all(&FORMAT_VERSION.to_le_bytes())?;
         out.write_all(&gram_size.to_le_bytes())?;
         out.write_all(&(n as u32).to_le_bytes())?;
         out.write_all(&stride.to_le_bytes())?;
+        out.write_all(&head_boundary.to_le_bytes())?;
         for i in 0..sparse_count {
             out.write_all(&dict[i * stride as usize].0.to_le_bytes())?;
         }
@@ -845,12 +862,12 @@ mod tests {
         let posts: Vec<(u64, Vec<u8>, Vec<u8>)> = entries
             .iter()
             .map(|(k, b)| {
-                let (h, t) = split_posting(b);
+                let (h, t) = split_posting(b, HEAD_BOUNDARY);
                 (*k, h, t)
             })
             .collect();
         let mut out = Vec::new();
-        write_index(&mut out, 3, 2, posts).unwrap();
+        write_index(&mut out, 3, 2, HEAD_BOUNDARY, posts).unwrap();
         out
     }
 
@@ -882,7 +899,7 @@ mod tests {
         let buf = {
             let mut out = Vec::new();
             let mk = |name: &str, card: u32, b: RoaringBitmap| {
-                let (head, tail) = split_posting(&b);
+                let (head, tail) = split_posting(&b, HEAD_BOUNDARY);
                 FacetCategory {
                     name: name.to_string(),
                     card,
@@ -991,7 +1008,8 @@ mod tests {
         .unwrap();
 
         let mut out = File::create(&op).unwrap();
-        chunk::merge_partials_to_rrs(&[p0.clone(), p1.clone()], 3, 2, &mut out).unwrap();
+        chunk::merge_partials_to_rrs(&[p0.clone(), p1.clone()], 3, 2, HEAD_BOUNDARY, &mut out)
+            .unwrap();
         drop(out);
 
         let mut buf = Vec::new();

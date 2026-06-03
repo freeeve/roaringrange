@@ -214,12 +214,12 @@ mod tests {
         let posts: Vec<(u64, Vec<u8>, Vec<u8>)> = entries
             .iter()
             .map(|(k, b)| {
-                let (h, t) = split_posting(b);
+                let (h, t) = split_posting(b, HEAD_BOUNDARY);
                 (*k, h, t)
             })
             .collect();
         let mut out = Vec::new();
-        write_index(&mut out, 3, 2, posts).unwrap();
+        write_index(&mut out, 3, 2, HEAD_BOUNDARY, posts).unwrap();
         MemoryFetch::new(out)
     }
 
@@ -239,7 +239,7 @@ mod tests {
                 cats: cats
                     .iter()
                     .map(|(cname, b)| {
-                        let (head, tail) = split_posting(b);
+                        let (head, tail) = split_posting(b, HEAD_BOUNDARY);
                         FacetCategory {
                             name: cname.to_string(),
                             card: b.len() as u32,

@@ -19,12 +19,11 @@ use std::fmt;
 
 /// `RRS` magic.
 const MAGIC: &[u8; 4] = b"RRSI";
-/// Header size in bytes.
-const HEADER_SIZE: usize = 16;
+/// Header size in bytes: magic[4] + version[2] + gram[2] + ngrams[4] + stride[4] +
+/// head_boundary[4]. Kept in sync with `build::HEADER_SIZE`.
+const HEADER_SIZE: usize = 20;
 /// Dictionary entry size in bytes: key(8) + headOffset(8) + headSize(4) + tailSize(4).
 const DICT_ENTRY: usize = 24;
-/// Doc-ID boundary between head (first roaring container) and tail.
-const HEAD_BOUNDARY: u64 = 65536;
 
 /// An error from opening or querying an index.
 #[derive(Debug)]
@@ -108,6 +107,8 @@ pub struct Index<F: RangeFetch> {
     ngrams: u32,
     /// Sparse-index stride.
     stride: u32,
+    /// Doc-ID boundary between head and tail: the head holds docs `[0, head_boundary)`.
+    head_boundary: u32,
     /// First byte of the dictionary block.
     dict_start: u64,
     /// In-memory sparse index: `sparse_keys[i] == dict[i*stride].key`.
@@ -126,12 +127,13 @@ impl<F: RangeFetch> Index<F> {
             return Err(IndexError::BadMagic(m));
         }
         let version = read_u16(&header, 4);
-        if version != 1 {
+        if version != 2 {
             return Err(IndexError::BadVersion(version));
         }
         let gram_size = read_u16(&header, 6);
         let ngrams = read_u32(&header, 8);
         let stride = read_u32(&header, 12);
+        let head_boundary = read_u32(&header, 16);
 
         let sparse_count = sparse_count(ngrams, stride);
         let sparse_bytes = fetch.read(HEADER_SIZE as u64, sparse_count * 8).await?;
@@ -146,6 +148,7 @@ impl<F: RangeFetch> Index<F> {
             gram_size,
             ngrams,
             stride,
+            head_boundary,
             dict_start,
             sparse_keys,
         })
@@ -154,6 +157,12 @@ impl<F: RangeFetch> Index<F> {
     /// Number of n-grams in the dictionary.
     pub fn ngram_count(&self) -> u32 {
         self.ngrams
+    }
+
+    /// Doc-ID boundary between head and tail postings: the head holds docs
+    /// `[0, head_boundary)`. Recorded in the header at build time.
+    pub fn head_boundary(&self) -> u32 {
+        self.head_boundary
     }
 
     /// Computes the dictionary block that would contain `key`, purely from the
@@ -355,7 +364,7 @@ impl<F: RangeFetch> Index<F> {
             .collect();
         let tail_and = crate::posting::tail_intersect_and(&self.fetch, &tail_ranges).await?;
         for doc in tail_and.iter() {
-            if doc < HEAD_BOUNDARY as u32 {
+            if doc < self.head_boundary {
                 continue; // malformed tail; the head already covers sub-boundary docs
             }
             if out.len() >= limit {

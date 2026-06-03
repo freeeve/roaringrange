@@ -1,4 +1,4 @@
-# RRS — roaring range search index (`RRSI`, version 1)
+# RRS — roaring range search index (`RRSI`, version 2)
 
 Range-fetchable layout for a [roaringsearch](https://github.com/freeeve/roaringsearch)
 trigram index. Designed so a browser queries a multi-million-doc index over HTTP Range
@@ -10,19 +10,20 @@ All integers little-endian. Postings are standard **portable** RoaringBitmaps
 (Go `bm.ToBytes()` ⇄ Rust `RoaringBitmap::deserialize_from` — same spec, zero glue).
 
 ## Layout
-**Header — 16 B**
+**Header — 20 B**
 | field | type | bytes | notes |
 |---|---|---|---|
 | magic | char[4] | 4 | `"RRSI"` |
-| version | u16 | 2 | `1` |
+| version | u16 | 2 | `2` |
 | gramSize | u16 | 2 | `3` |
 | ngrams | u32 | 4 | dictionary entry count |
 | stride | u32 | 4 | sparse-index stride (e.g. 512) |
+| headBoundary | u32 | 4 | doc-ID head/tail split — multiple of 65536, default 65536 |
 
-**Sparse index** — `sparseCount = ceil(ngrams/stride)` entries × 8 B, at offset `16`:
+**Sparse index** — `sparseCount = ceil(ngrams/stride)` entries × 8 B, at offset `20`:
 each entry is `key u64` = `dict[i*stride].key`. Downloaded once (tens of KB) and cached.
 
-**Dictionary** — `ngrams` × 24 B, **sorted by key asc**, at `dictStart = 16 + sparseCount*8`:
+**Dictionary** — `ngrams` × 24 B, **sorted by key asc**, at `dictStart = 20 + sparseCount*8`:
 | field | type | bytes |
 |---|---|---|
 | key | u64 | 8 |
@@ -34,15 +35,17 @@ Tail is at `headOffset+headSize`, length `tailSize`. `fullSize = headSize + tail
 
 **Postings** — at `postingsStart = dictStart + ngrams*24`; per entry in dict order:
 `[ head bytes ][ tail bytes ]`, where
-- `head` = the posting restricted to docs `[0,65536)` (the first roaring container)
-- `tail` = the posting restricted to docs `[65536, ∞)`
+- `head` = the posting restricted to docs `[0, headBoundary)`
+- `tail` = the posting restricted to docs `[headBoundary, ∞)`
 
-Both are independently-deserializable portable RoaringBitmaps. Doc IDs are assigned at
-build time in **descending rank (popularity)**, so the head holds the 65,536 most-popular
-docs — i.e. the top-K for any ranked query lives in the head (≤ ~8 KB).
+Both are independently-deserializable portable RoaringBitmaps. `headBoundary` (from the
+header) is a multiple of 65536 — a whole number of roaring containers; it defaults to
+65536 (one container) and may be raised for larger corpora. Doc IDs are assigned at build
+time in **descending rank (popularity)**, so the head holds the `headBoundary` most-popular
+docs — the top-K for any ranked query lives in the head.
 
 ## Reader
-- **boot:** read header (16 B) + sparse index (`sparseCount*8` B); keep keys in memory.
+- **boot:** read header (20 B) + sparse index (`sparseCount*8` B); keep keys + headBoundary in memory.
 - **lookup(key):** `b` = largest `i` with `sparseKeys[i] <= key` (in-memory binary search) →
   read dict block `[dictStart + b*stride*24, + min(stride, ngrams-b*stride)*24)` →
   binary-search the block for `key` → `(headOffset, headSize, tailSize)`.
