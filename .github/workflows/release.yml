@@ -2,7 +2,15 @@ name: Release (PyPI)
 
 # Build the Python extension wheels for every platform and publish them to PyPI
 # on a version tag. The crate builds an abi3 wheel (one per platform, good for
-# CPython 3.8+), so there is no per-Python-version matrix here.
+# CPython 3.8+), so there is no per-Python-version matrix here — only a
+# per-platform/arch one.
+#
+# abi3 targets the GIL stable ABI (Limited API): these wheels do NOT support
+# free-threaded CPython (3.13t / 3.14t), which has no stable ABI — maturin/pyo3
+# cannot build or install abi3 there. The build below pins a standard (GIL) 3.12
+# interpreter so the abi3 build is deterministic on Windows/macOS (the runner's
+# default Python must never be a free-threaded one). Free-threaded support would
+# need dropping abi3 for non-abi3, per-version wheels (`-i python3.13t`, …).
 #
 # Publishing uses PyPI Trusted Publishing (OIDC) — no API token. One-time setup
 # on PyPI: create the `roaringrange` project's trusted publisher pointing at this
@@ -36,6 +44,12 @@ jobs:
           - { runner: windows-latest, target: x64, manylinux: '' }
     steps:
       - uses: actions/checkout@v4
+      # Pin a standard (GIL) interpreter for the native macOS/Windows abi3 build
+      # so it never picks up a free-threaded default. Ignored by the Linux
+      # manylinux container build (which builds abi3 with its own interpreter).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:

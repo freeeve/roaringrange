@@ -89,8 +89,9 @@ jobs:
           path: python/dist/*.whl
 
   # Install the prebuilt abi3 wheel and run the test suite on each supported
-  # CPython (3.12–3.14). No Rust build here — it validates that the one wheel
-  # imports and works across versions.
+  # CPython (3.12–3.14, standard GIL builds — abi3 has no free-threaded ABI, so
+  # 3.13t/3.14t are out of scope). No Rust build here — it validates that the one
+  # wheel imports and works across versions.
   python-test:
     needs: python-build
     runs-on: ubuntu-latest
