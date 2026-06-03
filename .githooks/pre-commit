@@ -19,12 +19,19 @@ if [ -n "$gofiles" ]; then
   fi
 fi
 
-# Rust: if any reader source is staged, the crate must be rustfmt-clean.
-if git diff --cached --name-only --diff-filter=ACM | grep -q '^reader/.*\.rs$'; then
-  if ! ( cd reader && cargo fmt --check >/dev/null 2>&1 ); then
-    echo "✗ rustfmt needed in reader/  —  fix: (cd reader && cargo fmt)"
-    fail=1
-  fi
+# Rust: if any source under a crate dir is staged, that crate must be
+# rustfmt-clean. Mirrors the crates CI and the pre-push hook run
+# `cargo fmt --check` on (the old `reader/` path predated the move to `rust/`).
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$' || true)
+if [ -n "$staged_rs" ]; then
+  for dir in rust examples/openalex/builder; do
+    if printf '%s\n' "$staged_rs" | grep -q "^$dir/"; then
+      if ! ( cd "$dir" && cargo fmt --check >/dev/null 2>&1 ); then
+        echo "✗ rustfmt needed in $dir/  —  fix: (cd $dir && cargo fmt)"
+        fail=1
+      fi
+    fi
+  done
 fi
 
 [ "$fail" -eq 0 ] || { echo "pre-commit: formatting issues — commit aborted."; exit 1; }
