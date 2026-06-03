@@ -1,24 +1,24 @@
 #!/bin/sh
-# Pre-push: run CI's fast lint gates locally so a lint failure is caught before it
-# reaches CI (which runs `cargo clippy --all-targets -- -D warnings` on the rust crate
-# and the openalex builder, plus `gofmt -s` on the Go package).
+# Pre-push: run CI's fmt + lint gates locally so a failure is caught before it
+# reaches CI. CI runs `cargo fmt --check` and `cargo clippy --all-targets -- -D
+# warnings` on the rust crate and the openalex builder, and `gofmt -s` on the Go
+# sources.
 #
 # Enable once per clone:   git config core.hooksPath .githooks
 # Bypass for one push:     git push --no-verify
 set -e
 repo="$(git rev-parse --show-toplevel)"
 
-echo "[pre-push] rust clippy (--all-targets -D warnings)…"
-( cd "$repo/rust" && cargo clippy --all-targets -- -D warnings )
+for dir in rust examples/openalex/builder; do
+	echo "[pre-push] $dir: cargo fmt --check + clippy…"
+	(cd "$repo/$dir" && cargo fmt --check && cargo clippy --all-targets -- -D warnings)
+done
 
-echo "[pre-push] openalex-builder clippy…"
-( cd "$repo/examples/openalex/builder" && cargo clippy --all-targets -- -D warnings )
-
-echo "[pre-push] go gofmt -s check…"
-unformatted="$(cd "$repo/go" && gofmt -s -l .)"
+echo "[pre-push] go: gofmt -s check…"
+unformatted="$(cd "$repo" && gofmt -s -l .)"
 if [ -n "$unformatted" ]; then
 	echo "[pre-push] not gofmt'd: $unformatted (run: gofmt -s -w .)" >&2
 	exit 1
 fi
 
-echo "[pre-push] lint gates passed."
+echo "[pre-push] fmt + lint gates passed."
