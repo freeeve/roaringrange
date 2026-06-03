@@ -9,6 +9,12 @@ repository = "https://github.com/freeeve/roaringrange"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# The RRVI query harness needs the (non-default) `vector` feature; gating it here
+# keeps `cargo build --examples` / `clippy --all-targets` green without it.
+[[example]]
+name = "rrvi_query"
+required-features = ["vector"]
+
 [dependencies]
 roaring = "0.11"
 # Unicode general-category lookup so the tokenizer filters exactly on letters

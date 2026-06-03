@@ -7,8 +7,11 @@
 #![cfg(feature = "vector")]
 
 use futures::executor::block_on;
-use roaringrange::vector::VectorIndex;
-use roaringrange::{build_ivfpq, IvfpqParams, MemoryFetch, VectorBuildError, VectorHit};
+use roaringrange::vector::{VectorIndex, METRIC_L2};
+use roaringrange::{
+    build_ivfpq, build_ivfpq_from_parts, IvfpqParams, IvfpqParts, MemoryFetch, VectorBuildError,
+    VectorHit,
+};
 
 /// A tiny deterministic PRNG (xorshift64*) so the synthetic corpora and queries
 /// are reproducible without a dependency.
@@ -232,6 +235,86 @@ fn identity_opq_matches_no_opq() {
             y.score
         );
     }
+}
+
+#[test]
+fn from_parts_matches_hand_computed_adc() {
+    // Feed already-"trained" parts (as a FAISS export would) and check the reader
+    // reproduces ADC distances computed by hand. L2 metric => score == -dist, so
+    // the scores are directly comparable. dim=4, m=2 (dsub=2), nbits=2 (ksub=4),
+    // nlist=2; each PQ subspace codebook is {[0,0],[1,0],[0,1],[1,1]}.
+    let codebook_2d: [f32; 8] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+    let mut codebooks = Vec::new();
+    codebooks.extend_from_slice(&codebook_2d); // subspace 0
+    codebooks.extend_from_slice(&codebook_2d); // subspace 1
+    let centroids = vec![0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0]; // c0, c1
+
+    // (id, cluster, [code0, code1])
+    let ids = vec![10u32, 11, 12, 13];
+    let assignments = vec![0u32, 0, 1, 1];
+    let codes = vec![3u8, 3, 0, 0, 0, 0, 3, 3];
+
+    let parts = IvfpqParts {
+        dim: 4,
+        nlist: 2,
+        m: 2,
+        nbits: 2,
+        metric: METRIC_L2,
+        centroids,
+        codebooks,
+        opq: None,
+        ids,
+        assignments,
+        codes,
+    };
+    let idx = {
+        let built = build_ivfpq_from_parts(parts).expect("from_parts");
+        assert_eq!(built.len(), 4);
+        block_on(VectorIndex::open(MemoryFetch::new(built.to_bytes()))).unwrap()
+    };
+
+    let q = [0.2f32, 0.3, 1.6, 1.7];
+    let hits = block_on(idx.search(&q, 4, 2)).expect("search");
+
+    // Hand-computed squared-L2 ADC distances (see comment above).
+    let expect: [(u32, f32); 4] = [
+        (10, 1.98),  // table0[3]+table1[3] = 1.13 + 0.85
+        (11, 5.58),  // table0[0]+table1[0] = 0.13 + 5.45
+        (12, 6.38),  // c1: 6.13 + 0.25
+        (13, 18.78), // c1: 15.13 + 3.65
+    ];
+    assert_eq!(hits.len(), 4);
+    for (h, (id, dist)) in hits.iter().zip(&expect) {
+        assert_eq!(h.doc_id, *id, "order mismatch: {hits:?}");
+        assert!(
+            (h.score - (-dist)).abs() < 1e-4,
+            "doc {id}: score {} != {}",
+            h.score,
+            -dist
+        );
+    }
+}
+
+#[test]
+fn from_parts_rejects_inconsistent_arrays() {
+    // A short codes array (should be n*m) is rejected, not written.
+    let parts = IvfpqParts {
+        dim: 4,
+        nlist: 2,
+        m: 2,
+        nbits: 2,
+        metric: METRIC_L2,
+        centroids: vec![0.0; 8],
+        codebooks: vec![0.0; 2 * 4 * 2],
+        opq: None,
+        ids: vec![0, 1],
+        assignments: vec![0, 1],
+        codes: vec![0u8; 3], // should be 2*2 = 4
+    };
+    assert!(matches!(
+        build_ivfpq_from_parts(parts),
+        Err(VectorBuildError::BadParams(_))
+    ));
 }
 
 #[test]

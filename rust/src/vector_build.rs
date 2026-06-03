@@ -311,6 +311,121 @@ pub fn build_ivfpq(
     })
 }
 
+/// Already-trained IVFPQ parts for [`build_ivfpq_from_parts`] — the output of an
+/// external trainer (e.g. FAISS `OPQ,IVF,PQ`) ready to serialize without
+/// re-training. All arrays are row-major and in the (optionally OPQ-rotated)
+/// space the centroids/codebooks live in.
+pub struct IvfpqParts {
+    /// Vector dimensionality.
+    pub dim: usize,
+    /// Number of coarse (IVF) clusters.
+    pub nlist: usize,
+    /// PQ subquantizers (`dim % m == 0`).
+    pub m: usize,
+    /// Bits per PQ code (`1..=8`); `ksub = 1<<nbits`.
+    pub nbits: u8,
+    /// Metric tag ([`METRIC_IP`] / [`crate::vector::METRIC_L2`]).
+    pub metric: u8,
+    /// Coarse centroids, `nlist × dim`.
+    pub centroids: Vec<f32>,
+    /// PQ codebooks, `m × ksub × (dim/m)`.
+    pub codebooks: Vec<f32>,
+    /// Optional OPQ rotation, `dim × dim` row-major (the reader applies `q' = R·q`).
+    pub opq: Option<Vec<f32>>,
+    /// Per-vector doc IDs, length `n`.
+    pub ids: Vec<u32>,
+    /// Per-vector coarse-cluster assignment (`< nlist`), length `n`.
+    pub assignments: Vec<u32>,
+    /// Per-vector PQ codes, `n × m` bytes row-major.
+    pub codes: Vec<u8>,
+}
+
+/// Assembles an [`Ivfpq`] from already-trained `parts` (e.g. exported from FAISS),
+/// scattering each vector's code into its assigned cluster's list — no training.
+/// The result is ready to [`Ivfpq::write`]. Validates that every array length is
+/// consistent with `dim`/`nlist`/`m`/`nbits` and that assignments and codes are in
+/// range, so a malformed export is rejected rather than written.
+pub fn build_ivfpq_from_parts(parts: IvfpqParts) -> Result<Ivfpq, VectorBuildError> {
+    let IvfpqParts {
+        dim,
+        nlist,
+        m,
+        nbits,
+        metric,
+        centroids,
+        codebooks,
+        opq,
+        ids,
+        assignments,
+        codes,
+    } = parts;
+
+    if dim == 0 || m == 0 || !dim.is_multiple_of(m) {
+        return Err(VectorBuildError::BadParams("dim/m: need dim>0, m>0, m|dim"));
+    }
+    if nbits == 0 || nbits > 8 {
+        return Err(VectorBuildError::BadParams("nbits must be in 1..=8"));
+    }
+    if nlist == 0 {
+        return Err(VectorBuildError::BadParams("nlist must be >= 1"));
+    }
+    let ksub = 1usize << nbits;
+    let dsub = dim / m;
+    if centroids.len() != nlist * dim {
+        return Err(VectorBuildError::BadParams("centroids length != nlist*dim"));
+    }
+    if codebooks.len() != m * ksub * dsub {
+        return Err(VectorBuildError::BadParams(
+            "codebooks length != m*ksub*dsub",
+        ));
+    }
+    if let Some(r) = &opq {
+        if r.len() != dim * dim {
+            return Err(VectorBuildError::BadParams("opq length != dim*dim"));
+        }
+    }
+    let n = ids.len();
+    if assignments.len() != n {
+        return Err(VectorBuildError::BadParams(
+            "assignments length != ids length",
+        ));
+    }
+    if codes.len() != n * m {
+        return Err(VectorBuildError::BadParams(
+            "codes length != ids length * m",
+        ));
+    }
+    if assignments.iter().any(|&a| a as usize >= nlist) {
+        return Err(VectorBuildError::BadParams("an assignment >= nlist"));
+    }
+    if (nbits < 8) && codes.iter().any(|&c| c as usize >= ksub) {
+        return Err(VectorBuildError::BadParams("a code >= ksub (1<<nbits)"));
+    }
+
+    // Scatter each vector's id + code into its assigned cluster's list.
+    let mut list_ids: Vec<Vec<u32>> = vec![Vec::new(); nlist];
+    let mut list_codes: Vec<Vec<u8>> = vec![Vec::new(); nlist];
+    for (i, &a) in assignments.iter().enumerate() {
+        let a = a as usize;
+        list_ids[a].push(ids[i]);
+        list_codes[a].extend_from_slice(&codes[i * m..(i + 1) * m]);
+    }
+
+    Ok(Ivfpq {
+        dim,
+        nlist,
+        m,
+        nbits,
+        metric,
+        n: n as u64,
+        opq,
+        centroids,
+        codebooks,
+        list_ids,
+        list_codes,
+    })
+}
+
 /// Runs Lloyd's k-means on `n` points of `dim` dims (flattened row-major) into
 /// `k` clusters for `iters` iterations, returning the `k × dim` centroids and the
 /// final per-point assignment. Centroids are seeded from random points; empty

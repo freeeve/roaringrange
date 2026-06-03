@@ -46,7 +46,9 @@ pub use sortcols::{ColInfo, SortCols, Value, ValueType};
 #[cfg(feature = "vector")]
 pub use vector::{VectorHit, VectorIndex};
 #[cfg(all(feature = "vector", not(target_arch = "wasm32")))]
-pub use vector_build::{build_ivfpq, Ivfpq, IvfpqParams, VectorBuildError};
+pub use vector_build::{
+    build_ivfpq, build_ivfpq_from_parts, Ivfpq, IvfpqParams, IvfpqParts, VectorBuildError,
+};
 
 #[cfg(feature = "wasm")]
 mod wasm;
