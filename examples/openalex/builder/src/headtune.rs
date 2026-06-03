@@ -337,8 +337,8 @@ fn eval_text(
     let mut refs: Vec<&RoaringBitmap> = Vec::with_capacity(entries.len());
     for e in &entries {
         dict_bytes += e.dict_block_bytes;
-        for i in 0..nb {
-            head_sum[i] += e.head_sizes[i];
+        for (s, hs) in head_sum.iter_mut().zip(&e.head_sizes) {
+            *s += *hs;
         }
         tail_sizes_refs.push(&e.tail_sizes);
         refs.push(&e.full);

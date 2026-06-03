@@ -966,7 +966,7 @@ mod tests {
         write_lookup(&mut want, &entries).unwrap();
         let mut got = Vec::new();
         // Owned iterator (no backing slice retained) — the streaming path.
-        write_lookup_streaming(&mut got, entries.into_iter()).unwrap();
+        write_lookup_streaming(&mut got, entries).unwrap();
         assert_eq!(got, want, "streaming lookup differs from slice writer");
     }
 

@@ -85,7 +85,7 @@ fn main() {
                 *per_block.entry((d >> 16) as u16).or_default() += 1;
             }
             let (mut posting, mut minb, mut inv_blocks) = (0u64, 0u64, 0usize);
-            for (_, &card) in &per_block {
+            for &card in per_block.values() {
                 let p = block_bytes(card);
                 let c = block_bytes(65536 - card);
                 posting += p;
