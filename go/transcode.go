@@ -12,9 +12,10 @@ const (
 	// Magic is the RRS index magic.
 	Magic = "RRSI"
 	// Version is the RRS format version number.
-	Version = 1
-	// headerSize is the fixed RRS header size in bytes.
-	headerSize = 16
+	Version = 2
+	// headerSize is the fixed RRS header size in bytes (magic[4] + version[2] +
+	// gramSize[2] + ngrams[4] + stride[4] + headBoundary[4]).
+	headerSize = 20
 	// dictEntry is the size of one RRS dictionary entry in bytes:
 	// key(8) + headOffset(8) + headSize(4) + tailSize(4).
 	dictEntry = 24
@@ -144,6 +145,7 @@ func writeIndex(dst io.Writer, gramSize uint16, stride int, entries []splitEntry
 	binary.LittleEndian.PutUint16(header[6:8], gramSize)
 	binary.LittleEndian.PutUint32(header[8:12], uint32(n))
 	binary.LittleEndian.PutUint32(header[12:16], uint32(stride))
+	binary.LittleEndian.PutUint32(header[16:20], headLimit)
 	if _, err := dst.Write(header); err != nil {
 		return err
 	}
