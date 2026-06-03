@@ -12,9 +12,15 @@ full-text search on roaring bitmaps. One crate, three roles:
   bundles all three; each answers a query with a few small ranged reads.
 - **WASM bindings** (the `wasm` feature, [`wasm.rs`](src/wasm.rs)) — `RrsIndex` /
   `RrsCatalog` / `RrsRecords` for the browser, built with `wasm-pack`.
+- **vector search** (the `vector` feature, off by default) — a range-fetchable
+  IVFPQ **similarity** index: the pure-Rust reader [`VectorIndex`](src/vector.rs)
+  (boot → `nprobe` nearest clusters → asymmetric-distance scan → top-k, wasm-safe)
+  and a native, dependency-free IVFPQ trainer/writer [`build_ivfpq`](src/vector_build.rs).
+  Adds no third-party dependencies. See [`../VECTORS.md`](../VECTORS.md).
 
 See [`../FORMAT.md`](../FORMAT.md), [`../FACETS.md`](../FACETS.md), and
-[`../RECORDS.md`](../RECORDS.md) for the frozen on-disk specs.
+[`../RECORDS.md`](../RECORDS.md) for the frozen on-disk specs (and
+[`../VECTORS.md`](../VECTORS.md) for the `RRVI` vector index).
 
 ## How a query reads
 
@@ -54,6 +60,9 @@ tests as-is:
 cargo test
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
+# vector (similarity) search is behind a non-default feature:
+cargo test  --features vector
+cargo clippy --all-targets --features vector -- -D warnings
 ```
 
 Browser bundle:

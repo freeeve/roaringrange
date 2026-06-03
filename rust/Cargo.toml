@@ -52,6 +52,10 @@ zstd = { version = "0.13", optional = true, features = ["zdict_builder"] }
 # `cfg(target_arch = "wasm32")`) under `wasm-pack test --node`, proving the ruzstd
 # decode path runs in a wasm runtime.
 wasm-bindgen-test = "0.3"
+# `block_on` for the native integration tests (e.g. tests/vector.rs, which drives
+# the async `RangeFetch` reader). Already a crate dependency; declared here too so
+# the separate test crate can reach it. No new external crate is pulled in.
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
 
 [dependencies.web-sys]
 version = "0.3"
@@ -88,3 +92,10 @@ zstd = [
     # gates on the encode/train code, and Cargo will not pull it for that target.
     "dep:zstd",
 ]
+
+# Range-fetchable similarity (vector) search: the `RRVI` IVFPQ reader and the
+# native build-side trainer/writer. Pure Rust — adds NO dependencies — so it
+# compiles for wasm too (only the reader; the trainer is native-only via a cfg).
+# Off by default to keep the core lean; enable with `--features vector`. CI and
+# the pre-push hook run the crate's gates a second time with this feature on.
+vector = []

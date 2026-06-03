@@ -39,6 +39,10 @@ pub enum IndexError {
     /// A header or offset field was internally inconsistent — out of bounds or
     /// overflowing — as from a truncated or tampered file.
     Malformed(&'static str),
+    /// A query argument was invalid for this index (e.g. a query vector whose
+    /// dimensionality does not match the index's). Distinct from [`Malformed`],
+    /// which describes a corrupt file rather than a bad caller argument.
+    BadQuery(&'static str),
 }
 
 impl fmt::Display for IndexError {
@@ -49,6 +53,7 @@ impl fmt::Display for IndexError {
             IndexError::BadVersion(v) => write!(f, "unsupported version {v}"),
             IndexError::Roaring(e) => write!(f, "roaring deserialize: {e}"),
             IndexError::Malformed(m) => write!(f, "malformed index: {m}"),
+            IndexError::BadQuery(m) => write!(f, "bad query: {m}"),
         }
     }
 }

@@ -16,12 +16,22 @@ pub mod records;
 pub mod secondary;
 pub mod sortcols;
 
+/// The `RRVI` range-fetchable similarity (vector) search reader. Behind the
+/// `vector` feature; adds no dependencies (pure-Rust IVFPQ ADC over `RangeFetch`).
+#[cfg(feature = "vector")]
+pub mod vector;
+
 /// Container-level ranged reads into tail postings (search-fetch reduction).
 mod posting;
 
 /// Native build-side writers for the `RRS`/`RRSF` formats (excluded from wasm).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod build;
+
+/// Native build-side IVFPQ trainer/writer for the `RRVI` format (excluded from
+/// wasm). Behind the `vector` feature.
+#[cfg(all(feature = "vector", not(target_arch = "wasm32")))]
+pub mod vector_build;
 
 pub use catalog::{Catalog, SearchPage};
 pub use facet::FacetIndex;
@@ -32,6 +42,11 @@ pub use ngram::ngram_keys;
 pub use records::RecordStore;
 pub use secondary::{SecondaryCursor, SecondaryIndex};
 pub use sortcols::{ColInfo, SortCols, Value, ValueType};
+
+#[cfg(feature = "vector")]
+pub use vector::{VectorHit, VectorIndex};
+#[cfg(all(feature = "vector", not(target_arch = "wasm32")))]
+pub use vector_build::{build_ivfpq, Ivfpq, IvfpqParams, VectorBuildError};
 
 #[cfg(feature = "wasm")]
 mod wasm;

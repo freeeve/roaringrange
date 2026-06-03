@@ -14,6 +14,11 @@ for dir in rust examples/openalex/builder; do
 	(cd "$repo/$dir" && cargo fmt --check && cargo clippy --all-targets -- -D warnings)
 done
 
+# The crate's `vector` feature is off by default, so the default clippy above
+# does not compile it; lint it explicitly to match CI's vector-feature gate.
+echo "[pre-push] rust: cargo clippy --features vector…"
+(cd "$repo/rust" && cargo clippy --all-targets --features vector -- -D warnings)
+
 echo "[pre-push] go: gofmt -s check…"
 unformatted="$(cd "$repo" && gofmt -s -l .)"
 if [ -n "$unformatted" ]; then
