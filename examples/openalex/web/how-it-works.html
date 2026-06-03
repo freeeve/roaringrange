@@ -1,363 +1,1059 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>How it works — OpenAlex static in-browser search</title>
-    <!-- system font stack; no external font CDN (avoids the SRI advisory) -->
-    <style>
-      :root {
-        --bg: #f7f8fa;
-        --panel: #ffffff;
-        --ink: #1a1d24;
-        --ink-soft: #5b6472;
-        --ink-faint: #8b94a3;
-        --line: #e4e7ec;
-        --line-soft: #eef0f3;
-        --accent: #3b5bdb;
-        --accent-soft: #edf0fd;
-        --accent-ink: #2b44a8;
-        --focus: #3b5bdb;
-        --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-        --radius: 12px;
-        --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
-      }
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>How it works — OpenAlex static in-browser search</title>
+<meta name="description" content="How a static, no-backend, in-browser full-text search over 47.8M OpenAlex works is built from byte-range reads — powered by roaringrange." />
+<!-- system font stack only; no external font/CDN dependency (keeps the page self-contained) -->
+<style>
+  :root{
+    --bg:#f4f5f7;
+    --panel:#ffffff;
+    --panel-2:#fafbfc;
+    --ink:#14171d;
+    --ink-soft:#4c5563;
+    --ink-faint:#8a92a1;
+    --line:#e3e6ec;
+    --line-soft:#eef0f4;
+    --accent:#3b5bdb;
+    --accent-ink:#2b44a8;
+    --accent-soft:#edf0fd;
+    --amber:#b45309;
+    --amber-soft:#fef6e7;
+    --serif:ui-serif,"Iowan Old Style","Palatino Linotype",Palatino,Cambria,Georgia,serif;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,"Cascadia Mono",Consolas,monospace;
+    --radius:14px;
+    --shadow:0 1px 2px rgba(16,24,40,.04),0 6px 20px -12px rgba(16,24,40,.18);
+    --maxw:1160px;
+    --colw:860px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  html{scroll-behavior:smooth;}
+  @media (prefers-reduced-motion: reduce){html{scroll-behavior:auto;}}
+  body{
+    font-family:var(--sans);
+    color:var(--ink);
+    background:var(--bg);
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+  }
+  a{color:var(--accent);text-decoration:none;}
+  a:hover{text-decoration:underline;text-underline-offset:2px;}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:5px;}
+  code,.mono-i{font-family:var(--mono);}
+  p code,li code,.lead code,figcaption code{
+    font-family:var(--mono);font-size:.86em;
+    color:var(--accent-ink);background:var(--accent-soft);
+    padding:1px 6px;border-radius:6px;white-space:nowrap;
+  }
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 32px;}
 
-      * { box-sizing: border-box; }
-      html, body { margin: 0; padding: 0; }
-      body {
-        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-        color: var(--ink);
-        background: var(--bg);
-        line-height: 1.5;
-        -webkit-font-smoothing: antialiased;
-      }
-      a { color: var(--accent); text-decoration: none; }
-      a:hover { text-decoration: underline; }
-      :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+  /* scroll progress */
+  #progress{position:fixed;top:0;left:0;height:2px;width:0;background:var(--accent);z-index:60;transition:width .08s linear;}
 
-      /* ---- header ---- */
-      header.site {
-        background: var(--panel);
-        border-bottom: 1px solid var(--line);
-        padding: 22px 0 18px;
-      }
-      .wrap { max-width: 880px; margin: 0 auto; padding: 0 24px; }
-      .topbar {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 16px;
-        flex-wrap: wrap;
-      }
-      .brand { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-      .brand h1 {
-        font-size: 22px;
-        font-weight: 700;
-        letter-spacing: -0.01em;
-        margin: 0;
-      }
-      .brand .mark {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 30px; height: 30px;
-        border-radius: 8px;
-        background: var(--accent);
-        color: #fff;
-        font-weight: 700;
-        font-size: 15px;
-        flex: none;
-      }
-      .backlink {
-        display: inline-flex;
-        align-items: center;
-        gap: 7px;
-        font-size: 13px;
-        font-weight: 600;
-        color: var(--ink);
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        padding: 9px 14px;
-        box-shadow: var(--shadow);
-        white-space: nowrap;
-      }
-      .backlink:hover { border-color: #cfd6e4; color: var(--accent-ink); text-decoration: none; }
-      .tagline {
-        margin: 10px 0 0;
-        color: var(--ink-soft);
-        font-size: 13.5px;
-      }
-      .tagline code {
-        font-family: var(--mono);
-        font-size: 12px;
-        color: var(--accent-ink);
-        background: var(--accent-soft);
-        padding: 1px 6px;
-        border-radius: 5px;
-      }
+  /* ---------- header ---------- */
+  header.site{
+    position:sticky;top:0;z-index:50;
+    background:rgba(244,245,247,.82);
+    backdrop-filter:saturate(140%) blur(10px);
+    -webkit-backdrop-filter:saturate(140%) blur(10px);
+    border-bottom:1px solid var(--line);
+  }
+  .bar{display:flex;align-items:center;justify-content:space-between;gap:16px;height:60px;}
+  .brand{display:flex;align-items:center;gap:12px;min-width:0;}
+  .mark{
+    display:inline-flex;align-items:center;justify-content:center;
+    width:30px;height:30px;border-radius:8px;flex:none;
+    background:var(--ink);color:#fff;font-family:var(--mono);font-weight:600;font-size:13px;letter-spacing:.02em;
+  }
+  .wordmark{display:flex;flex-direction:column;line-height:1.15;min-width:0;}
+  .wordmark .w1{font-weight:650;font-size:14px;letter-spacing:-.01em;}
+  .wordmark .w2{font-family:var(--mono);font-size:11px;color:var(--ink-faint);letter-spacing:.01em;}
+  .bar-links{display:flex;align-items:center;gap:8px;}
+  .navlink{
+    display:inline-flex;align-items:center;gap:7px;
+    font-size:13px;font-weight:600;color:var(--ink);
+    border:1px solid var(--line);background:var(--panel);
+    border-radius:9px;padding:8px 13px;white-space:nowrap;
+  }
+  .navlink:hover{border-color:#c9d1e0;color:var(--accent-ink);text-decoration:none;}
+  .navlink.ghost{border-color:transparent;background:transparent;}
+  .navlink.ghost:hover{background:var(--panel);border-color:var(--line);}
+  .navlink svg{width:15px;height:15px;flex:none;}
 
-      /* ---- content ---- */
-      main { padding: 30px 0 64px; }
-      .intro {
-        font-size: 16px;
-        color: var(--ink-soft);
-        margin: 0 0 30px;
-        line-height: 1.6;
-      }
-      .intro b { color: var(--ink); font-weight: 600; }
-      .datamodel p { color: var(--ink-soft); line-height: 1.6; margin: 12px 0 0; max-width: 66ch; }
-      .datamodel p b { color: var(--ink); font-weight: 600; }
-      .datamodel code, .fieldlist code {
-        font-family: var(--mono); font-size: 0.88em;
-        color: var(--accent-ink); background: var(--accent-soft);
-        padding: 1px 5px; border-radius: 5px;
-      }
-      .fieldlist { list-style: none; margin: 10px 0 0; padding: 0; max-width: 66ch; }
-      .fieldlist li { padding: 8px 0; border-bottom: 1px solid var(--line-soft); color: var(--ink-soft); line-height: 1.5; }
-      .fieldlist li:last-child { border-bottom: none; }
-      .fieldlist b { color: var(--ink); font-weight: 600; }
-      .intro code {
-        font-family: var(--mono);
-        font-size: 13px;
-        color: var(--accent-ink);
-        background: var(--accent-soft);
-        padding: 1px 6px;
-        border-radius: 5px;
-      }
+  /* ---------- hero ---------- */
+  .hero{padding:72px 0 18px;}
+  .eyebrow{
+    font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--accent);font-weight:600;margin:0 0 22px;display:flex;align-items:center;gap:12px;
+  }
+  .eyebrow::before{content:"";width:26px;height:1px;background:var(--accent);opacity:.5;display:inline-block;}
+  h1.hero-title{
+    font-family:var(--serif);font-weight:600;
+    font-size:clamp(38px,6vw,68px);line-height:1.04;letter-spacing:-.02em;
+    margin:0;color:var(--ink);max-width:18ch;text-wrap:balance;
+  }
+  h1.hero-title em{font-style:italic;color:var(--accent-ink);}
+  .lead{
+    font-size:19px;line-height:1.62;color:var(--ink-soft);
+    max-width:62ch;margin:26px 0 0;text-wrap:pretty;
+  }
+  .lead b{color:var(--ink);font-weight:600;}
 
-      section.step { margin-bottom: 30px; }
-      section.step > h2 {
-        font-size: 16px;
-        font-weight: 700;
-        letter-spacing: -0.005em;
-        margin: 0 0 14px;
-        display: flex;
-        align-items: center;
-        gap: 11px;
-      }
-      section.step > h3 {
-        font-size: 14px;
-        font-weight: 600;
-        color: var(--ink);
-        margin: 28px 0 10px;
-      }
-      section.step > h3:first-of-type { margin-top: 0; }
-      figure.diagram + figure.diagram { margin-top: 16px; }
+  /* spec strip */
+  .specs{
+    display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
+    background:var(--line);border:1px solid var(--line);border-radius:var(--radius);
+    overflow:hidden;margin:44px 0 8px;box-shadow:var(--shadow);
+  }
+  .spec{background:var(--panel);padding:22px 22px;}
+  .spec .num{font-family:var(--mono);font-size:30px;font-weight:600;letter-spacing:-.02em;color:var(--ink);line-height:1;}
+  .spec .num small{font-size:18px;color:var(--ink-faint);font-weight:500;}
+  .spec .lbl{font-size:13px;color:var(--ink-soft);margin-top:9px;}
+  @media (max-width:720px){.specs{grid-template-columns:repeat(2,1fr);}}
 
-      figure.diagram {
-        margin: 0;
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        box-shadow: var(--shadow);
-        padding: 22px 20px 16px;
-      }
-      figure.diagram img {
-        max-width: 100%;
-        height: auto;
-        display: block;
-        margin: 0 auto;
-        background: #fff;
-        border: 1px solid var(--line-soft);
-        border-radius: 10px;
-        padding: 14px;
-      }
-      figure.diagram figcaption {
-        margin: 16px auto 0;
-        max-width: 680px;
-        text-align: center;
-        font-size: 13.5px;
-        color: var(--ink-soft);
-        line-height: 1.55;
-      }
+  /* ---------- layout with sticky TOC ---------- */
+  .layout{display:grid;grid-template-columns:200px minmax(0,1fr);gap:60px;padding:64px 0 40px;align-items:start;}
+  .toc{position:sticky;top:84px;}
+  .toc-h{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);margin:0 0 14px;padding-left:14px;}
+  .toc ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;}
+  .toc a{
+    display:flex;gap:11px;align-items:baseline;
+    font-size:13.5px;color:var(--ink-soft);font-weight:500;
+    padding:7px 13px;border-left:2px solid var(--line);border-radius:0 7px 7px 0;
+    transition:color .15s,border-color .15s,background .15s;
+  }
+  .toc a .tn{font-family:var(--mono);font-size:11px;color:var(--ink-faint);}
+  .toc a:hover{color:var(--ink);text-decoration:none;background:var(--panel-2);}
+  .toc a.active{color:var(--accent-ink);border-left-color:var(--accent);background:var(--accent-soft);font-weight:600;}
+  .toc a.active .tn{color:var(--accent);}
+  @media (max-width:980px){.layout{grid-template-columns:1fr;gap:0;}.toc{display:none;}}
 
-      footer.foot {
-        border-top: 1px solid var(--line);
-        background: var(--panel);
-        padding: 22px 0;
-        text-align: center;
-        font-size: 13px;
-        color: var(--ink-faint);
-      }
+  main{min-width:0;max-width:var(--colw);}
 
-      @media (max-width: 720px) {
-        figure.diagram { padding: 16px 12px 12px; }
-        figure.diagram img { padding: 10px; }
-        .topbar { align-items: flex-start; }
-      }
-    </style>
-  </head>
-  <body>
-    <header class="site">
-      <div class="wrap">
-        <div class="topbar">
-          <div class="brand">
-            <span class="mark" aria-hidden="true">OA</span>
-            <h1>How it works</h1>
-          </div>
-          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-            <a class="backlink" href="index.html">
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <path d="M15 18l-6-6 6-6" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-              Back to search
-            </a>
-            <a class="backlink" href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener">
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.8 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.5-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
-              GitHub
-            </a>
-          </div>
-        </div>
-        <p class="tagline">
-          OpenAlex — static in-browser search · powered by <code>roaringrange</code>
-        </p>
+  /* ---------- sections ---------- */
+  .sect{padding:8px 0 56px;scroll-margin-top:80px;}
+  .sect + .sect{border-top:1px solid var(--line);padding-top:52px;}
+  .sect-head{margin:0 0 26px;}
+  .sect-kicker{display:flex;align-items:center;gap:12px;margin-bottom:14px;}
+  .sect-num{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--accent);border:1px solid var(--accent-soft);background:var(--accent-soft);border-radius:7px;padding:4px 9px;}
+  .sect-tag{font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint);}
+  h2.sect-title{font-family:var(--serif);font-weight:600;font-size:clamp(27px,3.6vw,36px);line-height:1.1;letter-spacing:-.015em;margin:0;color:var(--ink);text-wrap:balance;}
+  .sect-intro{font-size:17px;color:var(--ink-soft);max-width:64ch;margin:16px 0 0;text-wrap:pretty;}
+  .sect-intro b{color:var(--ink);font-weight:600;}
+
+  h3.sub{font-size:13px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-faint);margin:40px 0 16px;display:flex;align-items:center;gap:10px;}
+  h3.sub::after{content:"";flex:1;height:1px;background:var(--line);}
+  p.body{font-size:16px;color:var(--ink-soft);max-width:64ch;margin:0 0 14px;text-wrap:pretty;}
+  p.body b{color:var(--ink);font-weight:600;}
+
+  /* indexed fields -> trigrams */
+  .pipe{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:6px 0 8px;}
+  .pchip{font-family:var(--mono);font-size:13px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;box-shadow:var(--shadow);}
+  .pchip span{color:var(--ink-faint);}
+  .parrow{color:var(--ink-faint);font-size:18px;line-height:1;}
+  .pout{font-family:var(--mono);font-size:13px;font-weight:600;color:#fff;background:var(--accent);border-radius:8px;padding:8px 13px;}
+
+  /* facets grid */
+  .facets-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:14px;margin:6px 0 22px;}
+  .facet{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 16px 15px;box-shadow:var(--shadow);}
+  .facet .fname{font-size:15px;font-weight:650;color:var(--ink);margin-bottom:4px;}
+  .facet .fkey{font-family:var(--mono);font-size:11.5px;color:var(--accent-ink);background:var(--accent-soft);border-radius:5px;padding:1px 6px;display:inline-block;margin-bottom:9px;}
+  .facet .fdesc{font-size:13px;color:var(--ink-soft);line-height:1.5;}
+  .facet .fdesc code{font-family:var(--mono);font-size:11.5px;background:var(--line-soft);color:var(--ink-soft);padding:1px 4px;border-radius:4px;}
+
+  /* logic rule callout */
+  .rule{display:flex;gap:14px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:16px 18px;margin:4px 0 6px;box-shadow:var(--shadow);}
+  .rule .rk{font-family:var(--mono);font-weight:700;font-size:12px;color:var(--accent);letter-spacing:.08em;padding-top:2px;white-space:nowrap;}
+  .rule .rt{font-size:15px;color:var(--ink-soft);}
+  .rule .rt b{color:var(--ink);}
+  .rule .rt .or,.rule .rt .and{font-family:var(--mono);font-weight:700;color:var(--accent-ink);}
+
+  /* sample result card */
+  .demo-label{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint);margin:0 0 10px;}
+  .result{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 24px;box-shadow:var(--shadow);max-width:680px;position:relative;}
+  .result .r-top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;}
+  .result .r-title{font-size:18px;font-weight:650;color:var(--ink);line-height:1.35;letter-spacing:-.01em;margin:0;max-width:46ch;}
+  .result .r-cite{font-family:var(--mono);font-size:12px;color:var(--ink-soft);text-align:right;white-space:nowrap;flex:none;}
+  .result .r-cite b{display:block;font-size:18px;color:var(--ink);font-weight:600;}
+  .result .r-authors{font-size:14px;color:var(--ink-soft);margin:9px 0 0;}
+  .result .r-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0 0;font-size:12.5px;}
+  .result .r-meta .dot{color:var(--line);}
+  .result .r-meta .m{color:var(--ink-soft);}
+  .oa{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.03em;color:#0a7a4b;background:#e7f6ee;border:1px solid #bfe6d1;border-radius:999px;padding:2px 9px;}
+  .result .r-abs{font-size:13.5px;color:var(--ink-soft);line-height:1.55;margin:14px 0 0;max-width:62ch;}
+  .result .r-id{font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);margin:14px 0 0;border-top:1px solid var(--line-soft);padding-top:12px;}
+  .result .r-id b{color:var(--accent-ink);font-weight:600;}
+  .field-tag{font-family:var(--mono);font-size:9.5px;color:var(--accent);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:middle;margin-left:6px;font-weight:600;letter-spacing:.02em;}
+
+  /* ---------- figures ---------- */
+  .fig{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden;margin:0 0 22px;}
+  .fig-head{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line-soft);background:var(--panel-2);}
+  .chip{font-family:var(--mono);font-size:11.5px;font-weight:600;color:var(--accent-ink);background:var(--accent-soft);border:1px solid #dbe2fb;border-radius:6px;padding:2px 8px;flex:none;}
+  .fig-name{font-size:13.5px;font-weight:600;color:var(--ink);}
+  .fig-name .muted{color:var(--ink-faint);font-weight:500;}
+  .fig-canvas{padding:22px 22px 18px;overflow-x:auto;}
+  .fig-canvas svg{display:block;width:100%;height:auto;min-width:600px;}
+  figcaption{padding:0 22px 20px;font-size:13.5px;color:var(--ink-soft);line-height:1.6;max-width:78ch;}
+  figcaption b{color:var(--ink);font-weight:600;}
+
+  /* styling injected into the inline diagrams (scoped) */
+  .fig-canvas svg text{fill:var(--ink);}
+  .fig-canvas svg .sub,.fig-canvas svg .note,.fig-canvas svg .req,.fig-canvas svg .step,.fig-canvas svg .rest,.fig-canvas svg .lbl,.fig-canvas svg .box,.fig-canvas svg .file,.fig-canvas svg .boot{fill:var(--ink-soft);}
+  .fig-canvas svg .sub{fill:var(--ink-faint);}
+  .fig-canvas svg .title{font-weight:700;fill:var(--ink);}
+  .fig-canvas svg .seg{fill:#fff;}
+  .fig-canvas svg .mono{font-family:var(--mono);}
+  .fig-canvas svg [fill="#3b5bdb"]{}
+  .fig-lead{font-size:16px;color:var(--ink-soft);max-width:64ch;margin:0 0 16px;text-wrap:pretty;}
+  .fig-lead b{color:var(--ink);font-weight:600;}
+
+  /* reveal animation (only when JS on; reduced-motion safe) */
+  .js .reveal{opacity:0;transform:translateY(16px);transition:opacity .7s cubic-bezier(.2,.7,.2,1),transform .7s cubic-bezier(.2,.7,.2,1);}
+  .js .reveal.in{opacity:1;transform:none;}
+  @media (prefers-reduced-motion: reduce){.js .reveal{opacity:1;transform:none;transition:none;}}
+
+  /* ---------- footer ---------- */
+  footer.foot{border-top:1px solid var(--line);background:var(--panel);margin-top:24px;}
+  .foot-in{display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between;padding:30px 0;}
+  .foot-meta{font-family:var(--mono);font-size:12.5px;color:var(--ink-faint);display:flex;flex-wrap:wrap;gap:10px;align-items:center;}
+  .foot-meta .dot{opacity:.5;}
+  .foot-links{display:flex;gap:18px;font-size:13.5px;font-weight:600;}
+
+  @media (max-width:720px){
+    .wrap{padding:0 20px;}
+    .hero{padding:48px 0 8px;}
+    .layout{padding:44px 0 28px;}
+    .fig-canvas{padding:16px 14px 12px;}
+    figcaption{padding:0 16px 16px;}
+  }
+</style>
+</head>
+<body>
+<div id="progress" aria-hidden="true"></div>
+
+<header class="site">
+  <div class="wrap">
+    <div class="bar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">OA</span>
+        <span class="wordmark">
+          <span class="w1">OpenAlex search</span>
+          <span class="w2">how it works</span>
+        </span>
       </div>
-    </header>
+      <nav class="bar-links">
+        <a class="navlink ghost" href="index.html">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M15 18l-6-6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Back to search
+        </a>
+        <a class="navlink" href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.8 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.5-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
+          roaringrange
+        </a>
+      </nav>
+    </div>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <p class="eyebrow">OpenAlex · in-browser search</p>
+    <h1 class="hero-title">Searching 47.8 million papers, with <em>no server.</em></h1>
+    <p class="lead">
+      This demo searches <b>~47.8M OpenAlex works</b> entirely in your browser, with <b>no backend</b>.
+      The index is one static file on S3, and a query fetches just a few small byte-ranges over HTTP —
+      never the whole file. It's powered by the <code>roaringrange</code> library.
+    </p>
+    <div class="specs reveal">
+      <div class="spec"><div class="num">47.8<small>M</small></div><div class="lbl">OpenAlex works indexed</div></div>
+      <div class="spec"><div class="num">0</div><div class="lbl">servers &middot; backends</div></div>
+      <div class="spec"><div class="num">~3<small>MB</small></div><div class="lbl">downloaded at boot</div></div>
+      <div class="spec"><div class="num">KB&ndash;MB</div><div class="lbl">fetched per query</div></div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap">
+  <div class="layout">
+    <aside class="toc" aria-label="Contents">
+      <p class="toc-h">Contents</p>
+      <ol>
+        <li><a href="#data"><span class="tn">01</span><span>The data, mapped</span></a></li>
+        <li><a href="#search"><span class="tn">02</span><span>Searching in the browser</span></a></li>
+        <li><a href="#formats"><span class="tn">03</span><span>The file formats</span></a></li>
+      </ol>
+    </aside>
 
     <main>
-      <div class="wrap">
-        <p class="intro">
-          This demo searches <b>~47.8M OpenAlex works</b> entirely in your browser, with
-          <b>no backend</b>. The index is one static file on S3, and a query fetches just a
-          few small byte-ranges over HTTP — never the whole file. It's powered by the
-          <code>roaringrange</code> library.
+      <!-- ====================== 01 ====================== -->
+      <section class="sect" id="data">
+        <div class="sect-head">
+          <div class="sect-kicker"><span class="sect-num">01</span><span class="sect-tag">From work to document</span></div>
+          <h2 class="sect-title">The OpenAlex data, mapped</h2>
+          <p class="sect-intro">
+            Each <a href="https://docs.openalex.org/api-entities/works" target="_blank" rel="noopener">OpenAlex <b>Work</b></a> — a paper, book chapter, dataset, preprint — becomes one ranked document.
+            Documents are numbered by <code>cited_by_count</code>, most-cited first, which is exactly what lets the popular &ldquo;head&rdquo; paint instantly.
+          </p>
+        </div>
+
+        <h3 class="sub">What&rsquo;s indexed</h3>
+        <p class="body">
+          The searchable text of each work is concatenated and cut into <b>trigrams</b>, so a query matches across any field —
+          a phrase from the abstract, an author, or a journal, not just the title.
         </p>
+        <div class="pipe reveal">
+          <span class="pchip">title</span>
+          <span class="pchip">abstract <span>&larr; abstract_inverted_index</span></span>
+          <span class="pchip">author names</span>
+          <span class="pchip">host venue</span>
+          <span class="parrow">&rarr;</span>
+          <span class="pout">trigrams</span>
+        </div>
 
-        <section class="step datamodel">
-          <h2>The OpenAlex data, mapped</h2>
-          <p>
-            Each <a href="https://docs.openalex.org/api-entities/works" target="_blank" rel="noopener">OpenAlex <b>Work</b></a>
-            — a paper, book chapter, dataset, preprint, and so on — becomes one ranked document.
-            Documents are numbered by <code>cited_by_count</code> (most-cited first), which is what
-            lets the popular "head" paint instantly.
+        <h3 class="sub">The five facets</h3>
+        <p class="body">Five fields from each work become filter categories — the <code>.rrf</code> sidecar. Counts are free; selecting one fetches a single small posting.</p>
+        <div class="facets-grid reveal">
+          <div class="facet"><div class="fname">Year</div><span class="fkey">publication_year</span><div class="fdesc">The work&rsquo;s publication year.</div></div>
+          <div class="facet"><div class="fname">Type</div><span class="fkey">type</span><div class="fdesc"><code>article</code>, <code>book-chapter</code>, <code>dataset</code>, <code>preprint</code>, &hellip;</div></div>
+          <div class="facet"><div class="fname">Open access</div><span class="fkey">oa_status</span><div class="fdesc">gold, green, hybrid, bronze, or closed.</div></div>
+          <div class="facet"><div class="fname">Language</div><span class="fkey">language</span><div class="fdesc">Shown as a full language name.</div></div>
+          <div class="facet"><div class="fname">Topic</div><span class="fkey">primary_topic</span><div class="fdesc">Falls back to the first concept.</div></div>
+        </div>
+        <div class="rule">
+          <span class="rk">OR / AND</span>
+          <span class="rt">Within a field, categories <span class="or">OR</span> together; across fields they <span class="and">AND</span> — all computed from doc-ID bitmaps, with no backend.</span>
+        </div>
+
+        <h3 class="sub">What a result stores</h3>
+        <p class="body">The record behind each hit keeps just enough to render a card and link out — opaque bytes the format never inspects.</p>
+        <p class="demo-label">Example result card</p>
+        <article class="result reveal">
+          <div class="r-top">
+            <h4 class="r-title">Deep Residual Learning for Image Recognition<span class="field-tag">title</span></h4>
+            <div class="r-cite"><b>211,420</b>citations</div>
+          </div>
+          <p class="r-authors">Kaiming He, Xiangyu Zhang, Shaoqing Ren, Jian Sun <span class="field-tag">authors</span></p>
+          <div class="r-meta">
+            <span class="m">2016 <span class="field-tag">year</span></span><span class="dot">&bull;</span>
+            <span class="m">IEEE CVPR <span class="field-tag">host venue</span></span><span class="dot">&bull;</span>
+            <span class="oa">green OA</span>
+          </div>
+          <p class="r-abs">Deeper neural networks are more difficult to train. We present a residual learning framework to ease the training of networks that are substantially deeper than those used previously&hellip; <span class="field-tag">abstract</span></p>
+          <p class="r-id">id&nbsp; <b>W2194775991</b>&nbsp; &rarr; openalex.org/W2194775991</p>
+        </article>
+
+        <h3 class="sub">DOI lookup</h3>
+        <p class="body">
+          A small companion index — the <code>.rril</code> file — maps each work&rsquo;s <b>DOI</b> straight to its document.
+          Pasting a DOI, or a <code>doi.org</code> URL, jumps to the exact work in a couple of byte-range reads instead of a text search.
+          The format appears in <a href="#formats">section&nbsp;03</a>.
+        </p>
+      </section>
+
+      <!-- ====================== 02 ====================== -->
+      <section class="sect" id="search">
+        <div class="sect-head">
+          <div class="sect-kicker"><span class="sect-num">02</span><span class="sect-tag">Query &rarr; range reads</span></div>
+          <h2 class="sect-title">Searching in the browser</h2>
+          <p class="sect-intro">
+            A query tokenizes into trigrams, fetches matching dictionary blocks and head postings as parallel HTTP <code>Range</code> requests,
+            <b>AND</b>s the roaring bitmaps, and reads the page&rsquo;s records — a few KB&ndash;MB in total. The multi-GB file is never downloaded whole.
           </p>
+        </div>
 
-          <h3>What's indexed</h3>
-          <p>
-            The searchable text is each work's <b>title</b>, its <b>abstract</b> (reconstructed from
-            OpenAlex's <code>abstract_inverted_index</code>), its <b>author names</b>, and its
-            <b>host venue</b> — concatenated and cut into trigrams. A query therefore matches across
-            any of them: a phrase from the abstract, an author, or a journal, not just the title.
+        <p class="fig-lead">One query, a near-constant number of round-trips — <b>independent of corpus size.</b></p>
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">flow</span><span class="fig-name">In-browser search <span class="muted">&middot; HTTP range reads</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 576" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="In-browser search via HTTP range reads">
+  <defs>
+    
+    <marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b5bdb"></path></marker>
+    <marker id="a3" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#94a3b8"></path></marker>
+  </defs>
+
+  <text x="32" y="38" class="title">In-browser search over HTTP range reads — no backend</text>
+  <text x="32" y="60" class="sub">a query touches a few KB–MB and a near-constant number of round-trips, independent of corpus size</text>
+
+  
+  <rect x="32" y="92" width="318" height="408" rx="10" fill="#eef2ff" stroke="#3b5bdb"></rect>
+  <text x="52" y="120" class="box">Browser — WASM reader (Rust)</text>
+  <line x1="52" y1="130" x2="330" y2="130" stroke="#c7d2fe"></line>
+  <text x="52" y="158" class="step"><tspan class="wave">①</tspan> boot once: read header + sparse</text>
+  <text x="68" y="176" class="step">index → keep keys in memory (~50 KB)</text>
+  <text x="52" y="208" class="step"><tspan class="wave">②</tspan> query <tspan class="mono">&#34;lattes&#34;</tspan> → trigrams</text>
+  <text x="68" y="226" class="step mono" font-size="12">lat · att · tte · tes</text>
+  <text x="52" y="258" class="step"><tspan class="wave">③</tspan> in-memory binary search → which</text>
+  <text x="68" y="276" class="step">dictionary block holds each trigram</text>
+  <text x="52" y="318" class="step"><tspan class="wave">④</tspan> deserialize roaring bitmaps,</text>
+  <text x="68" y="336" class="step"><tspan class="mono">AND</tspan> them → top-K doc IDs</text>
+  <text x="68" y="354" class="step" fill="#64748b">(2–14 µs compute)</text>
+  <text x="52" y="396" class="step"><tspan class="wave">⑥</tspan> fetch record JSON for the page</text>
+  <text x="68" y="414" class="step">→ render result cards</text>
+  <rect x="52" y="438" width="278" height="46" rx="7" fill="#fff" stroke="#c7d2fe"></rect>
+  <text x="64" y="458" class="req">the multi-GB file is <tspan font-weight="700">never</tspan> downloaded whole;</text>
+  <text x="64" y="474" class="req">waves run in parallel via <tspan class="mono">Range:</tspan> requests</text>
+
+  
+  <text x="700" y="84" class="box" text-anchor="middle">CloudFront → S3</text>
+  <rect x="706" y="92" width="180" height="300" rx="8" fill="#fff" stroke="#cbd5e1"></rect>
+  <rect x="706" y="92" width="180" height="52" rx="8" fill="#3b5bdb"></rect>
+  <rect x="706" y="148" width="180" height="92" fill="#64748b"></rect>
+  <rect x="706" y="244" width="180" height="56" fill="#64748b"></rect>
+  <rect x="706" y="304" width="180" height="84" rx="8" fill="#94a3b8"></rect>
+  <text x="796" y="123" class="seg" text-anchor="middle">header + sparse index</text>
+  <text x="796" y="198" class="seg" text-anchor="middle">dictionary</text>
+  <text x="796" y="276" class="seg" text-anchor="middle">head postings</text>
+  <text x="796" y="350" class="seg" text-anchor="middle">tail postings</text>
+  <text x="796" y="410" class="sub mono" text-anchor="middle" font-size="11">index.rrs (multi-GB)</text>
+
+  
+  <rect x="706" y="438" width="180" height="46" rx="8" fill="#64748b"></rect>
+  <text x="796" y="466" class="seg mono" text-anchor="middle" font-size="11">records.bin</text>
+
+  
+  <line x1="350" y1="150" x2="704" y2="118" stroke="#3b5bdb" stroke-width="1.6" marker-end="url(#a2)"></line>
+  <text x="372" y="138" class="req"><tspan class="wave">①</tspan> GET <tspan class="mono">bytes=0-51k</tspan> (boot, once)</text>
+
+  <line x1="350" y1="262" x2="704" y2="194" stroke="#3b5bdb" stroke-width="1.6" marker-end="url(#a2)"></line>
+  <text x="372" y="250" class="req"><tspan class="wave">③</tspan> GET dict blocks ×N (parallel)</text>
+
+  <line x1="350" y1="322" x2="704" y2="272" stroke="#3b5bdb" stroke-width="1.6" marker-end="url(#a2)"></line>
+  <text x="372" y="312" class="req"><tspan class="wave">④</tspan> GET head postings ×N (parallel)</text>
+
+  <line x1="350" y1="360" x2="704" y2="346" stroke="#94a3b8" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#a3)"></line>
+  <text x="372" y="378" class="req" fill="#64748b"><tspan fill="#94a3b8" font-weight="700">⑤</tspan> GET tail postings — only if needed</text>
+
+  <line x1="350" y1="402" x2="704" y2="460" stroke="#3b5bdb" stroke-width="1.6" marker-end="url(#a2)"></line>
+  <text x="372" y="420" class="req"><tspan class="wave">⑥</tspan> GET records (coalesced ranges)</text>
+
+  
+  <rect x="372" y="486" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
+  <text x="390" y="496" class="req">loaded at boot</text>
+  <rect x="500" y="486" width="12" height="12" rx="3" fill="#64748b"></rect>
+  <text x="518" y="496" class="req">range-fetched on demand</text>
+
+  <text x="32" y="540" class="req"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">Catalog::open(f).with_facets(f).with_records(f, f).search(q, offset, len, max_missing, filter) → SearchPage { ids, records, facet_counts }</tspan></text>
+</svg></div>
+          <figcaption>A query tokenizes into trigrams, fetches the matching dictionary blocks and head postings as parallel <code>Range</code> requests, ANDs the roaring bitmaps, and reads the page&rsquo;s records. <b>The multi-GB file is never downloaded whole.</b></figcaption>
+        </figure>
+
+        <p class="fig-lead">Two tiers in time: the popular head paints first, then the full tail fills itself in.</p>
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">head / tail</span><span class="fig-name">Two-tier search <span class="muted">&middot; instant top-K, then the rest</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 560" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="Two-tier AND: the popular head answers instantly, the full tail loads on demand via container-level range reads">
+  <defs>
+    
+  </defs>
+
+  <text x="32" y="36" class="title">Two tiers in time: popular results paint instantly, then the full set fills itself in</text>
+  <text x="32" y="58" class="sub">doc IDs are numbered by citation count, so the most-cited works sit in the head — a ranked top-K is free and paints first</text>
+
+  
+  <rect x="32" y="78" width="150" height="46" rx="6" fill="#3b5bdb"></rect>
+  <text x="107" y="99" class="seg" text-anchor="middle">head</text>
+  <text x="107" y="115" class="seg" text-anchor="middle" font-weight="400">top 65,536</text>
+  <rect x="186" y="78" width="762" height="46" rx="6" fill="#cbd5e1"></rect>
+  <text x="567" y="99" class="box" text-anchor="middle" fill="#334155">tail — the rest of the corpus (→ 492M)</text>
+  <text x="567" y="116" class="req" text-anchor="middle">one roaring container per 65,536 doc IDs, sorted by key</text>
+  <text x="32" y="146" class="req">doc IDs ascending = most-cited → least   <tspan class="mono" fill="#94a3b8">[0 … 65,536) head · [65,536 … N) tail</tspan></text>
+
+  
+  <rect x="32" y="166" width="448" height="344" rx="10" fill="#eef2ff" stroke="#3b5bdb"></rect>
+  <text x="52" y="194" class="box"><tspan class="tag" fill="#3b5bdb">①</tspan> First — the popular head (instant)</text>
+  <line x1="52" y1="204" x2="460" y2="204" stroke="#c7d2fe"></line>
+  <text x="52" y="230" class="step"><tspan class="mono">AND</tspan> each trigram&#39;s <tspan font-weight="700">head</tspan> posting</text>
+  <text x="68" y="248" class="step">(each is ≤ one 8 KB roaring container)</text>
+  <text x="52" y="280" class="step">→ the most-cited matches, already in</text>
+  <text x="68" y="298" class="step">rank order — render the first page</text>
+  <text x="52" y="330" class="step"><tspan font-weight="700">the tail isn&#39;t fetched yet</tspan></text>
+  <rect x="52" y="352" width="408" height="58" rx="8" fill="#fff" stroke="#c7d2fe"></rect>
+  <text x="68" y="376" class="step"><tspan font-weight="700">6 popular results</tspan>  <tspan fill="#3b5bdb">· loading the rest…</tspan></text>
+  <text x="68" y="396" class="req">first paint, in one wave</text>
+  <text x="52" y="442" class="req" fill="#3b5bdb" font-weight="700">cost: ~tens of KB · one wave · instant</text>
+
+  
+  <rect x="500" y="166" width="448" height="344" rx="10" fill="#f8fafc" stroke="#94a3b8"></rect>
+  <text x="520" y="194" class="box"><tspan class="tag" fill="#64748b">②</tspan> Then — the full tail (automatic)</text>
+  <text x="520" y="212" class="req">auto-loads after a sparse head; on demand for a big result set</text>
+  <line x1="520" y1="222" x2="928" y2="222" stroke="#e2e8f0"></line>
+  <text x="520" y="246" class="step">read the <tspan font-weight="700">rarest</tspan> trigram&#39;s tail in full</text>
+  <text x="536" y="264" class="step">→ a small candidate set of doc IDs</text>
+  <text x="520" y="294" class="step">for every other tail, fetch <tspan font-weight="700">only</tspan> the</text>
+  <text x="520" y="312" class="step">containers whose key still has a candidate:</text>
+
+  
+  <g>
+    <rect x="520" y="324" width="30" height="22" rx="2" fill="#cbd5e1"></rect>
+    <rect x="554" y="324" width="30" height="22" rx="2" fill="#cbd5e1"></rect>
+    <rect x="588" y="324" width="30" height="22" rx="2" fill="#3b5bdb"></rect>
+    <rect x="622" y="324" width="30" height="22" rx="2" fill="#3b5bdb"></rect>
+    <rect x="656" y="324" width="30" height="22" rx="2" fill="#cbd5e1"></rect>
+    <rect x="690" y="324" width="30" height="22" rx="2" fill="#cbd5e1"></rect>
+    <rect x="724" y="324" width="30" height="22" rx="2" fill="#cbd5e1"></rect>
+    <rect x="758" y="324" width="30" height="22" rx="2" fill="#3b5bdb"></rect>
+    <rect x="792" y="324" width="30" height="22" rx="2" fill="#cbd5e1"></rect>
+    <rect x="826" y="324" width="30" height="22" rx="2" fill="#cbd5e1"></rect>
+    <rect x="860" y="324" width="30" height="22" rx="2" fill="#cbd5e1"></rect>
+    <rect x="894" y="324" width="30" height="22" rx="2" fill="#cbd5e1"></rect>
+  </g>
+  <text x="520" y="368" class="req">a tail posting is a sorted directory of containers; an offset table makes any one seekable</text>
+  <text x="520" y="388" class="req">adjacent fetched containers coalesce into one <tspan class="mono">Range</tspan> read</text>
+  <text x="520" y="418" class="step"><tspan class="mono">AND</tspan> → the complete result set + exact count</text>
+  <text x="520" y="456" class="req" fill="#334155" font-weight="700">cost: ~hundreds of KB across a few dozen reads —</text>
+  <text x="520" y="474" class="req">not the tens of MB of reading every full tail</text>
+
+  
+  <rect x="32" y="524" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
+  <text x="50" y="534" class="req">fetched (candidate keys)</text>
+  <rect x="210" y="524" width="12" height="12" rx="3" fill="#cbd5e1"></rect>
+  <text x="228" y="534" class="req">skipped</text>
+  <text x="320" y="534" class="req"><tspan font-weight="700" fill="#3b5bdb">Why it used to be slow:</tspan> a rare phrase of common trigrams matches no popular doc, so the old path intersected every full tail. Now the head answers first; the tail fetches only what survivors touch.</text>
+</svg></div>
+          <figcaption>Doc IDs are numbered by citation count, so the most-cited matches live in the head and a ranked top-K paints instantly from one cheap wave. Once the query settles, the tail auto-loads — intersecting the rarest posting first, then fetching only the roaring containers surviving candidates still touch (adjacent ones coalesced into single reads). <b>A rare phrase of common trigrams costs a few hundred KB, not the tens of MB of reading every full tail.</b></figcaption>
+        </figure>
+
+        <p class="fig-lead">Boot is cheap because only the small top of each file loads up front.</p>
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">boot</span><span class="fig-name">What boots <span class="muted">&middot; versus what stays in S3</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 392" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="What loads at boot versus what stays in S3 and is range-fetched on demand">
+  <defs>
+    
+    <pattern id="hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#eef2f7"></rect>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#d3dae6" stroke-width="3"></line>
+    </pattern>
+  </defs>
+
+  <text x="32" y="34" class="title">What boots, and what stays in S3</text>
+  <text x="32" y="55" class="sub">the browser downloads only the small top of each file once (~3 MB total); the multi-GB bulk is range-fetched per query, never up front</text>
+
+  
+  <rect x="70" y="96" width="150" height="176" rx="5" fill="url(#hatch)" stroke="#cbd5e1"></rect>
+  <rect x="70" y="96" width="150" height="18" rx="5" fill="#3b5bdb"></rect>
+  <text x="145" y="109" class="seg" text-anchor="middle">header + sparse</text>
+  <text x="145" y="200" class="rest" text-anchor="middle">dictionary +</text>
+  <text x="145" y="216" class="rest" text-anchor="middle">postings</text>
+  <text x="145" y="294" class="file" text-anchor="middle">index.rrs</text>
+  <text x="145" y="312" class="boot" text-anchor="middle">boot ~0.5 MB</text>
+  <text x="145" y="327" class="rest mono" text-anchor="middle" font-size="10">of 12.3 GB</text>
+
+  
+  <rect x="285" y="96" width="150" height="176" rx="5" fill="url(#hatch)" stroke="#cbd5e1"></rect>
+  <rect x="285" y="96" width="150" height="26" rx="5" fill="#3b5bdb"></rect>
+  <text x="360" y="106" class="seg" text-anchor="middle">facet meta</text>
+  <text x="360" y="118" class="seg" text-anchor="middle">+ top heads</text>
+  <text x="360" y="205" class="rest" text-anchor="middle">facet tails</text>
+  <text x="360" y="294" class="file" text-anchor="middle">index.rrf</text>
+  <text x="360" y="312" class="boot" text-anchor="middle">boot ~2.4 MB</text>
+  <text x="360" y="327" class="rest mono" text-anchor="middle" font-size="10">of 231 MB</text>
+
+  
+  <rect x="500" y="96" width="150" height="176" rx="5" fill="url(#hatch)" stroke="#cbd5e1"></rect>
+  <rect x="500" y="96" width="150" height="12" rx="5" fill="#3b5bdb"></rect>
+  <text x="575" y="105" class="seg" text-anchor="middle" font-size="9">.idx header</text>
+  <text x="575" y="197" class="rest" text-anchor="middle">offset table +</text>
+  <text x="575" y="213" class="rest" text-anchor="middle">record blobs</text>
+  <text x="575" y="294" class="file" text-anchor="middle">records.idx / .bin</text>
+  <text x="575" y="312" class="boot" text-anchor="middle">boot ~16 B</text>
+  <text x="575" y="327" class="rest mono" text-anchor="middle" font-size="10">of 9.3 GB</text>
+
+  <line x1="70" y1="352" x2="650" y2="352" stroke="#e2e8f0"></line>
+  <rect x="70" y="362" width="13" height="13" rx="3" fill="#3b5bdb"></rect>
+  <text x="90" y="373" class="note">loaded at boot</text>
+  <rect x="196" y="362" width="13" height="13" rx="3" fill="url(#hatch)" stroke="#cbd5e1"></rect>
+  <text x="216" y="373" class="note">stays in S3, range-fetched on demand</text>
+  <text x="650" y="373" class="note" text-anchor="end" font-style="italic">bars not to scale</text>
+</svg></div>
+          <figcaption>At boot the browser downloads only the small top of each file — the index header + sparse index, the facet metadata + top category heads, and the record store&rsquo;s header — <b>a few MB total.</b> Everything else (dictionary + postings, facet tails, record blobs — tens of GB) stays in S3 and is range-fetched only as a query needs it.</figcaption>
+        </figure>
+      </section>
+
+      <!-- ====================== 03 ====================== -->
+      <section class="sect" id="formats">
+        <div class="sect-head">
+          <div class="sect-kicker"><span class="sect-num">03</span><span class="sect-tag">One index, three sidecars</span></div>
+          <h2 class="sect-title">The file formats</h2>
+          <p class="sect-intro">
+            One static text index plus a family of companion files. Every box below loads by HTTP byte-range; nothing runs server-side.
+            Doc IDs are assigned by citation count throughout, so the most-cited works sit in the &ldquo;head&rdquo; and top-K is free.
           </p>
+        </div>
 
-          <h3>The five facets</h3>
-          <p>Five fields from each work become filter categories (the <code>.rrf</code> sidecar):</p>
-          <ul class="fieldlist">
-            <li><b>Year</b> — <code>publication_year</code>.</li>
-            <li><b>Type</b> — the work's <code>type</code>: article, book-chapter, dataset, preprint, …</li>
-            <li><b>Open access</b> — <code>open_access.oa_status</code>: gold, green, hybrid, bronze, or closed.</li>
-            <li><b>Language</b> — the work's <code>language</code>, shown as a full name.</li>
-            <li><b>Topic</b> — its <code>primary_topic</code> (falling back to the first concept).</li>
-          </ul>
-          <p>Within a field, categories OR together; across fields they AND — all from doc-ID bitmaps, no backend.</p>
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">.rrs</span><span class="fig-name">Text index <span class="muted">&middot; one static file</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 540" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRS text index file format, RRSI v2">
+  <defs>
+    <marker id="arF" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#475569"></path>
+    </marker>
+  </defs>
 
-          <h3>What a result stores</h3>
-          <p>The record behind each result keeps just enough to render a card and link out:</p>
-          <ul class="fieldlist">
-            <li><b>id</b> — the OpenAlex work ID, linking back to openalex.org.</li>
-            <li><b>title</b> · <b>authors</b> · <b>year</b> · <b>host venue</b> · <b>citation count</b>.</li>
-            <li><b>abstract</b> — reconstructed and clipped to a preview, when the work has one.</li>
-          </ul>
+  <text x="32" y="38" class="title">Text index — one static file (<tspan class="mono">.rrs</tspan>)</text>
+  <text x="32" y="60" class="sub">a trigram dictionary + popularity-split postings; a few small ranged reads per query, independent of corpus size</text>
 
-          <h3>DOI lookup</h3>
-          <p>
-            A small companion index (<code>.rril</code>) maps each work's <b>DOI</b> straight to its
-            document, so pasting a DOI — or a <code>doi.org</code> URL — jumps to the exact work in a
-            couple of byte-range reads instead of a text search.
-          </p>
-        </section>
+  <rect x="648" y="26" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
+  <text x="666" y="36" class="note">loaded at boot</text>
+  <rect x="792" y="26" width="12" height="12" rx="3" fill="#64748b"></rect>
+  <text x="810" y="36" class="note">range-fetched</text>
 
-        <section class="step">
-          <h2>Searching in the browser</h2>
-          <figure class="diagram">
-            <img src="search.svg" alt="In-browser search via HTTP range reads" />
-            <figcaption>
-              A query tokenizes into trigrams, fetches the matching dictionary blocks and head
-              postings as parallel HTTP Range requests, ANDs the roaring bitmaps, and reads the
-              page's records — a few KB–MB total. The multi-GB file is never downloaded whole.
-            </figcaption>
-          </figure>
-          <figure class="diagram">
-            <img src="search-detail.svg" alt="Two-tier search: the popular head paints instantly, then the full tail auto-loads via container-level range reads" />
-            <figcaption>
-              Two tiers in time. Doc IDs are numbered by citation count, so the most-cited matches
-              live in the “head” and a ranked top-K paints instantly from one cheap wave. The rest of
-              the corpus is the “tail”; once the query settles it auto-loads in the background —
-              intersecting the rarest posting first, then fetching only the roaring containers the
-              surviving candidates still touch (adjacent ones coalesced into single range reads). A
-              rare phrase of common trigrams costs a few hundred KB instead of the tens of MB of
-              reading every full tail.
-            </figcaption>
-          </figure>
-          <figure class="diagram">
-            <img src="boot.svg" alt="What loads at boot versus what stays in S3" />
-            <figcaption>
-              That's why boot is cheap: the browser downloads only the small top of each
-              file — the index header + sparse index, the facet metadata + top category
-              heads, and the record store's header — a few MB in total. Everything else
-              (the dictionary + postings, the facet tails, and the record blobs — tens of
-              GB) stays in S3 and is range-fetched only as a query needs it.
-            </figcaption>
-          </figure>
-        </section>
+  
+  <g>
+    <rect x="32" y="86" width="110" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="146" y="86" width="170" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="320" y="86" width="230" height="56" rx="6" fill="#64748b"></rect>
+    <rect x="554" y="86" width="394" height="56" rx="6" fill="#64748b"></rect>
+    <text x="87" y="112" class="seg" text-anchor="middle">Header</text>
+    <text x="87" y="128" class="seg mono" text-anchor="middle" font-size="11">20 B</text>
+    <text x="231" y="112" class="seg" text-anchor="middle">Sparse index</text>
+    <text x="231" y="128" class="seg mono" text-anchor="middle" font-size="11">8 B × ⌈ngrams/stride⌉</text>
+    <text x="435" y="112" class="seg" text-anchor="middle">Dictionary</text>
+    <text x="435" y="128" class="seg mono" text-anchor="middle" font-size="11">24 B/entry · key-sorted</text>
+    <text x="751" y="112" class="seg" text-anchor="middle">Postings</text>
+    <text x="751" y="128" class="seg mono" text-anchor="middle" font-size="11">per trigram · [ head ][ tail ]</text>
+  </g>
+  <text x="32" y="172" class="lbl mono">magic &#34;RRSI&#34; · version · gramSize · ngrams · stride · headBoundary</text>
 
-        <section class="step">
-          <h2>File formats</h2>
+  
+  <line x1="435" y1="142" x2="256" y2="210" stroke="#64748b" stroke-width="1.5"></line>
+  <rect x="32" y="210" width="448" height="152" rx="8" fill="#eef0fd" stroke="#3b5bdb"></rect>
+  <text x="48" y="236" class="lbl" font-weight="700">one dictionary entry — 24 B, sorted by key</text>
+  <g>
+    <rect x="48" y="252" width="138" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
+    <text x="117" y="274" class="note mono" text-anchor="middle" font-size="12">key</text>
+    <text x="117" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u64 · 8 B</text>
+    <rect x="190" y="252" width="138" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
+    <text x="259" y="274" class="note mono" text-anchor="middle" font-size="12">headOffset</text>
+    <text x="259" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u64 · 8 B</text>
+    <rect x="332" y="252" width="64" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
+    <text x="364" y="274" class="note mono" text-anchor="middle" font-size="12">headSize</text>
+    <text x="364" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u32</text>
+    <rect x="400" y="252" width="64" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
+    <text x="432" y="274" class="note mono" text-anchor="middle" font-size="12">tailSize</text>
+    <text x="432" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u32</text>
+  </g>
+  <rect x="48" y="306" width="416" height="52" rx="5" fill="#dbe3fb"></rect>
+  <text x="60" y="326" class="note" font-size="12">tail at <tspan class="mono">headOffset + headSize</tspan>, length <tspan class="mono">tailSize</tspan></text>
+  <text x="60" y="346" class="note" font-size="12"><tspan class="mono">fullSize = headSize + tailSize</tspan></text>
 
-          <h3>Text index (RRS)</h3>
-          <figure class="diagram">
-            <img src="format.svg" alt="RRS index file layout" />
-            <figcaption>
-              The index is one static file: a header, a small sparse index loaded once, a
-              key-sorted dictionary, then popularity-split postings. Doc IDs are assigned by
-              citation count, so the most-cited works sit in the "head" and top-K is free.
-            </figcaption>
-          </figure>
+  
+  <line x1="751" y1="142" x2="751" y2="210" stroke="#64748b" stroke-width="1.5" marker-end="url(#arF)"></line>
+  <rect x="496" y="210" width="452" height="152" rx="8" fill="#f1f5f9" stroke="#64748b"></rect>
+  <text x="512" y="236" class="lbl" font-weight="700">postings — per trigram: <tspan class="mono">[ head ][ tail ]</tspan></text>
+  <rect x="512" y="252" width="160" height="46" rx="5" fill="#64748b"></rect>
+  <text x="592" y="274" class="seg" text-anchor="middle" font-size="13">head</text>
+  <text x="592" y="290" class="seg mono" text-anchor="middle" font-size="10">docs [0, headBoundary)</text>
+  <rect x="676" y="252" width="256" height="46" rx="5" fill="#94a3b8"></rect>
+  <text x="804" y="274" class="seg" text-anchor="middle" font-size="13">tail</text>
+  <text x="804" y="290" class="seg mono" text-anchor="middle" font-size="10">docs ≥ headBoundary</text>
+  <text x="512" y="324" class="note" font-size="13"><tspan class="mono" fill="#3b5bdb">headBoundary</tspan> — dynamic, a multiple of 65,536 (default</text>
+  <text x="512" y="344" class="note" font-size="13">65,536). Doc IDs descend by popularity → head = top-K.</text>
 
-          <h3>Facets (RRSF) — filtering without a backend</h3>
-          <figure class="diagram">
-            <img src="facets.svg" alt="RRSF facet sidecar layout" />
-            <figcaption>
-              A companion <code>.rrf</code> file maps each category (year, type, language, …) to
-              a doc-ID bitmap. The header, tables, and names load once, so listing categories and
-              their full-corpus counts is free; selecting one fetches a single small "head"
-              posting. Within a field categories OR together; across fields they AND.
-            </figcaption>
-          </figure>
+  
+  <rect x="32" y="384" width="916" height="86" rx="8" fill="#f8fafc" stroke="#cbd5e1"></rect>
+  <text x="48" y="406" class="note" font-weight="700">Reader</text>
+  <text x="120" y="406" class="note">— two range-fetch tiers over one static file.</text>
+  <text x="48" y="426" class="note" font-size="13"><tspan font-weight="700" fill="#3b5bdb">boot</tspan>  header (20 B) + sparse index → kept in memory, ~tens of KB.</text>
+  <text x="48" y="446" class="note" font-size="13"><tspan font-weight="700" fill="#64748b">per query</tspan>  binary-search the sparse index → fetch one dictionary block → the head postings per trigram (AND smallest-first).</text>
+  <text x="48" y="462" class="note" font-size="12" fill="#94a3b8">tails fetched only when a query needs more than the head&#39;s top-K.</text>
 
-          <h3>Record store (RRSR)</h3>
-          <figure class="diagram">
-            <img src="records.svg" alt="RRSR record store layout" />
-            <figcaption>
-              A search returns ranked doc IDs; the record store turns each back into its stored
-              fields. An offset index (<code>.idx</code>) maps a doc ID to a byte range in the
-              record blob (<code>.bin</code>) — two ranged reads, and a results page of consecutive
-              IDs is one contiguous slice. Records are opaque bytes (here, compact JSON), so the
-              format never dictates your data model.
-            </figcaption>
-          </figure>
+  <text x="32" y="500" class="sub">Boot is ~tens of KB; each query is a handful of small ranged reads — independent of corpus size.</text>
+  <text x="32" y="528" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">write  build::write_index(w, gram, stride, entries)      read  Index::open(f).search(q, limit)</tspan></text>
+</svg></div>
+          <figcaption>A 20-byte header, a small sparse index loaded once, a key-sorted dictionary, then popularity-split postings. The header now carries <code>headBoundary</code> &mdash; a <b>dynamic head/tail split</b> (a multiple of 65,536, raised for larger corpora) &mdash; so the head holds the most-popular docs and top-K stays free. Boot keeps the header + sparse index in memory; each query binary-searches it, fetches one dictionary block, then the head postings per trigram.</figcaption>
+        </figure>
 
-          <h3>DOI lookup (RRIL)</h3>
-          <figure class="diagram">
-            <img src="lookup.svg" alt="RRIL DOI lookup file layout" />
-            <figcaption>
-              A companion <code>.rril</code> file maps each work's identifier (its DOI, normalized)
-              to a doc ID: a header, then fixed-size records sorted by hash. A lookup normalizes the
-              query and binary-searches the hashes — a handful of 16-byte ranged reads — and a second
-              "verify" hash rejects collisions, so an exact DOI lands on the exact work (or nothing)
-              with no text search.
-            </figcaption>
-          </figure>
-        </section>
-      </div>
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">.rrf</span><span class="fig-name">Facet sidecar <span class="muted">&middot; filtering without a backend</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 584" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRSF facet sidecar layout">
+  <defs>
+    
+    <marker id="arr-facets" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#475569"></path>
+    </marker>
+  </defs>
+
+  <text x="32" y="38" class="title">Facet sidecar — companion file (<tspan class="mono">.rrf</tspan>)</text>
+  <text x="32" y="60" class="sub">categorical filters (year, type, language, …) with free counts — same range-fetch model as the index</text>
+
+  
+  <rect x="32" y="524" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
+  <text x="50" y="534" class="note">loaded at boot</text>
+  <rect x="180" y="524" width="12" height="12" rx="3" fill="#64748b"></rect>
+  <text x="198" y="534" class="note">range-fetched on demand</text>
+
+  
+  <g>
+    <rect x="32" y="86" width="84" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="120" y="86" width="120" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="244" y="86" width="300" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="548" y="86" width="110" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="662" y="86" width="286" height="56" rx="6" fill="#64748b"></rect>
+    <text x="74" y="112" class="seg" text-anchor="middle">Header</text>
+    <text x="74" y="128" class="seg mono" text-anchor="middle" font-size="11">24 B</text>
+    <text x="180" y="112" class="seg" text-anchor="middle">Field table</text>
+    <text x="180" y="128" class="seg mono" text-anchor="middle" font-size="11">16 B/field</text>
+    <text x="394" y="112" class="seg" text-anchor="middle">Category table</text>
+    <text x="394" y="128" class="seg mono" text-anchor="middle" font-size="11">36 B/category, key-sorted</text>
+    <text x="603" y="112" class="seg" text-anchor="middle">Strings</text>
+    <text x="603" y="128" class="seg mono" text-anchor="middle" font-size="11">names</text>
+    <text x="805" y="112" class="seg" text-anchor="middle">Postings</text>
+    <text x="805" y="128" class="seg mono" text-anchor="middle" font-size="11">per category, range-fetched</text>
+  </g>
+
+  
+  <text x="32" y="172" class="lbl mono">magic &#34;RRSF&#34; · ver · #fields · #cats · strBytes</text>
+  <text x="120" y="190" class="note">Header + tables + strings (a few KB) load once at boot →</text>
+  <text x="120" y="206" class="note">listing categories and their full-corpus counts is then free.</text>
+
+  
+  <line x1="394" y1="142" x2="324" y2="250" stroke="#3b5bdb" stroke-width="1.5"></line>
+  <rect x="120" y="250" width="408" height="112" rx="8" fill="#eef0fd" stroke="#3b5bdb"></rect>
+  <text x="136" y="271" class="lbl" font-weight="700">one category entry (36 B)</text>
+  <text x="136" y="291" class="lbl mono" font-size="12">key u64 · headOff u64 · headSize u32 · tailSize u32</text>
+  <text x="136" y="309" class="lbl mono" font-size="12">cardinality u32 · nameOff u32 · nameLen u16</text>
+  <rect x="132" y="322" width="384" height="30" rx="5" fill="#dbe3fb"></rect>
+  <text x="142" y="342" class="note" font-weight="700">cardinality = full-corpus doc count → facet counts are free (no fetch)</text>
+
+  
+  <line x1="805" y1="142" x2="805" y2="250" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr-facets)"></line>
+  <rect x="556" y="250" width="392" height="150" rx="8" fill="#f1f5f9" stroke="#64748b"></rect>
+  <text x="572" y="272" class="lbl" font-weight="700">per category: <tspan class="mono">[ head ][ tail ]</tspan></text>
+  <rect x="572" y="284" width="150" height="40" rx="5" fill="#64748b"></rect>
+  <text x="647" y="303" class="seg" text-anchor="middle" font-size="12">head</text>
+  <text x="647" y="318" class="seg mono" text-anchor="middle" font-size="10">docs [0, headBoundary)</text>
+  <rect x="726" y="284" width="206" height="40" rx="5" fill="#94a3b8"></rect>
+  <text x="829" y="303" class="seg" text-anchor="middle" font-size="12">tail</text>
+  <text x="829" y="318" class="seg mono" text-anchor="middle" font-size="10">docs ≥ headBoundary</text>
+  <text x="572" y="346" class="note" font-size="12">Split tracks the index&#39;s <tspan class="mono" fill="#3b5bdb">headBoundary</tspan> — a multiple of</text>
+  <text x="572" y="362" class="note" font-size="12">65,536 (default 65,536), raised for larger corpora.</text>
+  <text x="572" y="382" class="note" font-size="12">A ≤ ~8 KB head per category; tails only when paging in.</text>
+
+  
+  <rect x="32" y="410" width="916" height="68" rx="8" fill="#f8fafc" stroke="#cbd5e1"></rect>
+  <text x="48" y="432" class="note" font-weight="700">Filter semantics — mirrors a BitmapFilter.</text>
+  <text x="48" y="450" class="note">Within a field, selected categories OR together; distinct fields AND. Result = textMatch AND filter, applied to the head first.</text>
+  <text x="48" y="468" class="note">Live (search-filtered) counts = |resultBitmap ∩ categoryHead|, computed in memory over the query&#39;s head result.</text>
+
+  <text x="32" y="506" class="sub">Doc IDs share the index&#39;s popularity order, so facet postings split at the same dynamic <tspan class="mono">headBoundary</tspan> and range-fetch the same way (see <tspan class="mono">format.svg</tspan>).</text>
+
+  <text x="32" y="568" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">write  build::write_facets(w, fields)      read  FacetIndex::open(f).counts(result)</tspan></text>
+</svg></div>
+          <figcaption>Maps each category (year, type, language, &hellip;) to a doc-ID bitmap. Header, tables, and names load once — so listing categories and their full-corpus counts is free; selecting one fetches a single small head posting. Because facet doc IDs share the index&rsquo;s popularity order, postings split at the <b>same dynamic <code>headBoundary</code></b> as the text index. <b>Within a field categories OR; across fields they AND.</b></figcaption>
+        </figure>
+
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">.idx / .bin</span><span class="fig-name">Record store <span class="muted">&middot; doc ID &rarr; stored fields</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 584" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRSR record store layout">
+  <defs>
+    
+    <marker id="arr-records" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#475569"></path>
+    </marker>
+  </defs>
+
+  <text x="32" y="38" class="title">Record store — a hit&#39;s stored fields (<tspan class="mono">.idx</tspan> + <tspan class="mono">.bin</tspan>)</text>
+  <text x="32" y="60" class="sub">a search returns ranked doc IDs; the store maps each to its record bytes over HTTP Range — search → details, no backend</text>
+
+  
+  <rect x="32" y="508" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
+  <text x="50" y="518" class="note">loaded at boot</text>
+  <rect x="180" y="508" width="12" height="12" rx="3" fill="#64748b"></rect>
+  <text x="198" y="518" class="note">range-fetched on demand</text>
+
+  
+  <text x="32" y="98" class="lbl mono" font-weight="700">records.idx — offset index</text>
+  <rect x="32" y="108" width="120" height="50" rx="6" fill="#3b5bdb"></rect>
+  <rect x="156" y="108" width="792" height="50" rx="6" fill="#64748b"></rect>
+  <text x="92" y="130" class="seg" text-anchor="middle">Header</text>
+  <text x="92" y="146" class="seg mono" text-anchor="middle" font-size="11">16 B</text>
+  <text x="552" y="130" class="seg" text-anchor="middle">Offsets — (N+1) × u64, one per doc ID</text>
+  <text x="552" y="146" class="seg mono" text-anchor="middle" font-size="11">off[d] … off[d+1] bound record d</text>
+  <text x="32" y="178" class="lbl mono">magic &#34;RRSR&#34; · ver · count N</text>
+
+  
+  <text x="32" y="218" class="lbl mono" font-weight="700">records.bin — record blob, in doc-ID (rank) order</text>
+  <rect x="32" y="228" width="916" height="50" rx="6" fill="#64748b"></rect>
+  <line x1="176" y1="228" x2="176" y2="278" stroke="#f1f5f9" stroke-width="2"></line>
+  <line x1="300" y1="228" x2="300" y2="278" stroke="#f1f5f9" stroke-width="2"></line>
+  <line x1="470" y1="228" x2="470" y2="278" stroke="#f1f5f9" stroke-width="2"></line>
+  <line x1="600" y1="228" x2="600" y2="278" stroke="#f1f5f9" stroke-width="2"></line>
+  <line x1="772" y1="228" x2="772" y2="278" stroke="#f1f5f9" stroke-width="2"></line>
+  <text x="104" y="257" class="seg mono" text-anchor="middle" font-size="11">rec 0</text>
+  <text x="238" y="257" class="seg mono" text-anchor="middle" font-size="11">rec 1</text>
+  <text x="385" y="257" class="seg mono" text-anchor="middle" font-size="11">rec 2</text>
+  <text x="535" y="257" class="seg mono" text-anchor="middle" font-size="11">rec 3</text>
+  <text x="686" y="257" class="seg mono" text-anchor="middle" font-size="11">…</text>
+  <text x="860" y="257" class="seg mono" text-anchor="middle" font-size="11">rec N-1</text>
+
+  
+  <line x1="470" y1="158" x2="470" y2="228" stroke="#475569" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arr-records)"></line>
+
+  
+  <rect x="120" y="306" width="740" height="92" rx="8" fill="#f1f5f9" stroke="#64748b"></rect>
+  <text x="136" y="328" class="lbl" font-weight="700">lookup(doc id d) — two ranged reads</text>
+  <text x="136" y="348" class="note mono">1.  read 16 B at  idx[16 + d*8]  →  (off[d], off[d+1])</text>
+  <text x="136" y="366" class="note mono">2.  read  bin[off[d] … off[d+1])  →  record bytes</text>
+  <text x="136" y="388" class="note">A results page is consecutive doc IDs → one contiguous blob slice (a single fetch).</text>
+
+  
+  <rect x="32" y="424" width="916" height="68" rx="8" fill="#fffbeb" stroke="#f59e0b"></rect>
+  <text x="48" y="446" class="note" font-weight="700">Records are opaque to the library — the container is standard, the encoding is yours.</text>
+  <text x="48" y="464" class="note">The store frames bytes for O(1) lookup by doc ID; what&#39;s inside (JSON, msgpack, …) and which fields it holds is the application&#39;s choice.</text>
+  <text x="48" y="482" class="note">RecordStore (the reader) returns the raw bytes; the app decodes them.</text>
+
+  <text x="32" y="552" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">write  build::write_records(bin, idx, recs)      read  RecordStore::open(idx, bin).get_many(ids)</tspan></text>
+</svg></div>
+          <figcaption>A search returns ranked doc IDs; the store turns each back into its fields. An offset index (<code>.idx</code>) maps a doc ID to a byte range in the record blob (<code>.bin</code>) — two ranged reads, and a page of consecutive IDs is one contiguous slice. <b>Records are opaque bytes, so the format never dictates your data model.</b></figcaption>
+        </figure>
+
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">.rril</span><span class="fig-name">DOI lookup <span class="muted">&middot; identifier &rarr; doc ID</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 452" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRIL DOI lookup file layout and binary search">
+  <defs>
+    <marker id="arL" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#475569"></path>
+    </marker>
+  </defs>
+
+  <text x="32" y="38" class="title">DOI lookup — an exact identifier straight to a doc ID (<tspan class="mono">.rril</tspan>)</text>
+  <text x="32" y="60" class="sub">paste a DOI or a doi.org URL; a handful of 16-byte ranged reads land on the exact work — no text search</text>
+
+  <rect x="700" y="26" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
+  <text x="718" y="36" class="note">loaded at boot</text>
+  <rect x="828" y="26" width="12" height="12" rx="3" fill="#64748b"></rect>
+  <text x="846" y="36" class="note">range-fetched</text>
+
+  <text x="32" y="96" class="lbl mono" font-weight="700">work.rril — identifier index, sorted by hash</text>
+  <rect x="32" y="106" width="150" height="50" rx="6" fill="#3b5bdb"></rect>
+  <text x="107" y="128" class="seg" text-anchor="middle">Header</text>
+  <text x="107" y="144" class="seg mono" text-anchor="middle" font-size="11">16 B</text>
+  <rect x="186" y="106" width="762" height="50" rx="6" fill="#64748b"></rect>
+  <text x="567" y="128" class="seg" text-anchor="middle">Records — fixed 16 B each, sorted by hash64(doi)</text>
+  <text x="567" y="144" class="seg mono" text-anchor="middle" font-size="11">hash64 u64 · verify u32 · docId u32</text>
+  <text x="32" y="176" class="lbl mono">magic &#34;RRIL&#34; · ver · count N</text>
+
+  <text x="32" y="214" class="lbl" font-weight="700">binary-search the sorted hashes — halve the window per 16 B probe</text>
+  <text x="948" y="214" class="note mono" text-anchor="end" font-size="11" fill="#94a3b8">≈ ⌈log₂ N⌉ ≈ 26 probes for 47.8M</text>
+
+  <g>
+    <rect x="32" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="89" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="146" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="203" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="260" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="317" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="374" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="431" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="488" y="230" width="54" height="34" rx="4" fill="#3b5bdb" stroke="#3b5bdb"></rect>
+    <rect x="545" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="602" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="659" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="716" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="773" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="830" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="887" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <text x="515" y="251" class="seg mono" text-anchor="middle" font-size="11">probe</text>
+  </g>
+
+  <path d="M287,278 l-5,-9 l10,0 z" fill="#3b5bdb"></path>
+  <text x="287" y="294" class="note mono" text-anchor="middle" font-size="11">lo</text>
+  <path d="M515,278 l-5,-9 l10,0 z" fill="#3b5bdb"></path>
+  <text x="515" y="294" class="note mono" text-anchor="middle" font-size="11">mid</text>
+  <path d="M743,278 l-5,-9 l10,0 z" fill="#3b5bdb"></path>
+  <text x="743" y="294" class="note mono" text-anchor="middle" font-size="11">hi</text>
+
+  <rect x="32" y="312" width="916" height="124" rx="8" fill="#f1f5f9" stroke="#64748b"></rect>
+  <text x="48" y="334" class="lbl" font-weight="700">resolve a DOI in four steps — each probe is one 16 B Range read</text>
+  <text x="48" y="356" class="note mono">1.  normalize — strip the <tspan font-weight="700">doi.org / https</tspan> prefix, lower-case  →  hash64(doi)</text>
+  <text x="48" y="374" class="note mono">2.  binary-search the record hashes  →  the candidate record</text>
+  <text x="48" y="392" class="note mono">3.  verify — a second hash rejects collisions  (a miss → no result)</text>
+  <text x="48" y="410" class="note mono">4.  docId  →  the record store renders the exact work</text>
+  <text x="48" y="430" class="note">An exact identifier lands on an exact work — or nothing — without ever touching the text index.</text>
+</svg></div>
+          <figcaption>Maps each work&rsquo;s normalized DOI to a doc ID: a header, then fixed-size records sorted by hash. A lookup normalizes the query and binary-searches the hashes — a handful of 16-byte ranged reads — and a second &ldquo;verify&rdquo; hash rejects collisions. <b>An exact DOI lands on the exact work, or nothing, with no text search.</b></figcaption>
+        </figure>
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">.rrsc</span><span class="fig-name">Sort columns <span class="muted">&middot; secondary indexes &amp; client-side re-rank</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 524" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRSC sort columns / secondary index layout and client-side re-rank">
+  <defs>
+    <marker id="arS" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#475569"></path>
+    </marker>
+  </defs>
+
+  <text x="32" y="38" class="title">Sort columns — re-rank by a secondary key (<tspan class="mono">RRSC</tspan>)</text>
+  <text x="32" y="60" class="sub">a dense value-per-doc column; fetch a candidate set&#39;s values over HTTP Range and top-K client-side — sort by date, rating, any metric</text>
+
+  <rect x="700" y="26" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
+  <text x="718" y="36" class="note">loaded at boot</text>
+  <rect x="828" y="26" width="12" height="12" rx="3" fill="#64748b"></rect>
+  <text x="846" y="36" class="note">range-fetched</text>
+
+  
+  <text x="32" y="96" class="lbl mono" font-weight="700">work.rrsc — dense columns, indexed by doc ID</text>
+  <rect x="32" y="106" width="118" height="50" rx="6" fill="#3b5bdb"></rect>
+  <text x="91" y="128" class="seg" text-anchor="middle">Header</text>
+  <text x="91" y="144" class="seg mono" text-anchor="middle" font-size="11">16 B</text>
+  <rect x="154" y="106" width="196" height="50" rx="6" fill="#3b5bdb"></rect>
+  <text x="252" y="128" class="seg" text-anchor="middle">Column table</text>
+  <text x="252" y="144" class="seg mono" text-anchor="middle" font-size="11">24 B / column</text>
+  <rect x="354" y="106" width="120" height="50" rx="6" fill="#3b5bdb"></rect>
+  <text x="414" y="128" class="seg" text-anchor="middle">Names</text>
+  <text x="414" y="144" class="seg mono" text-anchor="middle" font-size="11">string blob</text>
+  <rect x="478" y="106" width="470" height="50" rx="6" fill="#64748b"></rect>
+  <text x="713" y="128" class="seg" text-anchor="middle">Dense data — one column per sort key</text>
+  <text x="713" y="144" class="seg mono" text-anchor="middle" font-size="11">rows × width · doc-ID order</text>
+  <text x="32" y="176" class="lbl mono">magic &#34;RRSC&#34; · ver · colCount · rows N · strBytes</text>
+  <text x="560" y="176" class="lbl mono" fill="#3b5bdb">value(d) = data[ dataOff + d·width ]</text>
+
+  
+  <text x="32" y="210" class="lbl" font-weight="700">Re-rank a materialized candidate set — fetch values, then top-K in the browser</text>
+  <rect x="32" y="222" width="916" height="238" rx="10" fill="#fafbfc" stroke="#e2e8f0"></rect>
+
+  <text x="52" y="250" class="step"><tspan class="tag" fill="#3b5bdb" font-weight="700">①</tspan>  fetch each candidate&#39;s <tspan class="mono">value(d)</tspan></text>
+  <text x="52" y="268" class="note">offsets sorted &amp; coalesced into a few spans → one concurrent wave, mirroring the record store</text>
+
+  
+  <g>
+    <rect x="52" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="88" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="124" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="160" y="282" width="34" height="30" rx="3" fill="#3b5bdb" stroke="#3b5bdb"></rect>
+    <rect x="196" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="232" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="268" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="304" y="282" width="34" height="30" rx="3" fill="#3b5bdb" stroke="#3b5bdb"></rect>
+    <rect x="340" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="376" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="412" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="448" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="484" y="282" width="34" height="30" rx="3" fill="#3b5bdb" stroke="#3b5bdb"></rect>
+    <rect x="520" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="556" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="592" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="628" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="664" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="700" y="282" width="34" height="30" rx="3" fill="#3b5bdb" stroke="#3b5bdb"></rect>
+    <rect x="736" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="772" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="808" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="844" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="880" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <text x="177" y="302" class="seg mono" text-anchor="middle" font-size="10">2019</text>
+    <text x="321" y="302" class="seg mono" text-anchor="middle" font-size="10">2021</text>
+    <text x="501" y="302" class="seg mono" text-anchor="middle" font-size="10">2015</text>
+    <text x="717" y="302" class="seg mono" text-anchor="middle" font-size="10">2023</text>
+    <text x="177" y="328" class="note mono" text-anchor="middle" font-size="10">d3</text>
+    <text x="321" y="328" class="note mono" text-anchor="middle" font-size="10">d7</text>
+    <text x="501" y="328" class="note mono" text-anchor="middle" font-size="10">d12</text>
+    <text x="717" y="328" class="note mono" text-anchor="middle" font-size="10">d18</text>
+    <text x="914" y="302" class="note mono" text-anchor="end" font-size="10" fill="#94a3b8">pub_date column</text>
+  </g>
+
+  
+  <text x="52" y="360" class="step"><tspan class="tag" fill="#3b5bdb" font-weight="700">②</tspan>  <tspan class="mono">topk(candidates, k, descending)</tspan> — partial-sort client-side</text>
+  <text x="52" y="384" class="note">candidates · citation rank</text>
+  <g font-family="ui-monospace, Menlo, monospace">
+    <rect x="52" y="392" width="48" height="26" rx="5" fill="#fff" stroke="#cbd5e1"></rect>
+    <text x="76" y="409" class="note mono" text-anchor="middle" font-size="12">d3</text>
+    <rect x="106" y="392" width="48" height="26" rx="5" fill="#fff" stroke="#cbd5e1"></rect>
+    <text x="130" y="409" class="note mono" text-anchor="middle" font-size="12">d7</text>
+    <rect x="160" y="392" width="48" height="26" rx="5" fill="#fff" stroke="#cbd5e1"></rect>
+    <text x="184" y="409" class="note mono" text-anchor="middle" font-size="12">d12</text>
+    <rect x="214" y="392" width="48" height="26" rx="5" fill="#fff" stroke="#cbd5e1"></rect>
+    <text x="238" y="409" class="note mono" text-anchor="middle" font-size="12">d18</text>
+  </g>
+  <line x1="278" y1="405" x2="372" y2="405" stroke="#475569" stroke-width="1.5" marker-end="url(#arS)"></line>
+  <text x="325" y="397" class="note mono" text-anchor="middle" font-size="11">pub_date ↓</text>
+  <text x="392" y="384" class="note" fill="#3b5bdb" font-weight="700">re-ranked · newest first</text>
+  <g>
+    <rect x="392" y="392" width="48" height="26" rx="5" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <text x="416" y="409" class="note mono" text-anchor="middle" font-size="12" fill="#2b44a8">d18</text>
+    <rect x="446" y="392" width="48" height="26" rx="5" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <text x="470" y="409" class="note mono" text-anchor="middle" font-size="12" fill="#2b44a8">d7</text>
+    <rect x="500" y="392" width="48" height="26" rx="5" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <text x="524" y="409" class="note mono" text-anchor="middle" font-size="12" fill="#2b44a8">d3</text>
+    <rect x="554" y="392" width="48" height="26" rx="5" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <text x="578" y="409" class="note mono" text-anchor="middle" font-size="12" fill="#2b44a8">d12</text>
+  </g>
+  <text x="640" y="409" class="note">ties keep primary rank → &amp;ldquo;newest, then most-cited&amp;rdquo;</text>
+  <text x="52" y="440" class="note">A few KB per page; the multi-GB column data is never read whole — only the candidates&#39; cells.</text>
+
+  
+  <rect x="32" y="472" width="916" height="44" rx="8" fill="#edf0fd" stroke="#c7d2fe"></rect>
+  <text x="48" y="492" class="note"><tspan font-weight="700">Full second index</tspan> — a second <tspan class="mono">.rrs</tspan> reindexed in secondary order + a <tspan class="mono">u32</tspan> permutation column (<tspan class="mono">secondary_docid → primary_docid</tspan>).</text>
+  <text x="48" y="509" class="note">A result page is a contiguous run, so <tspan class="mono">slice_u32(start, len)</tspan> maps it back to primary IDs in one ranged read. Records &amp; facets stay keyed by primary ID.</text>
+</svg></div>
+          <figcaption>An optional, range-fetchable store of <b>dense values per doc ID</b> — the build-time counterpart of an alternate sort key. A search returns IDs in citation rank; an <code>.rrsc</code> column lets the reader fetch one value per candidate and <b>top-K client-side</b> (sort by date, rating, any metric), ties broken by doc ID. The same container also backs a full second index: a <code>u32</code> permutation column maps <code>secondary_docid &rarr; primary_docid</code>, so a results page — a contiguous run — resolves back to primary IDs in a single ranged read.</figcaption>
+        </figure>
+      </section>
     </main>
+  </div>
+</div>
 
-    <footer class="foot">
-      <div class="wrap">
-        no backend · range-fetched from S3 · <a href="index.html">back to search</a>
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot-in">
+      <div class="foot-meta">
+        <span>no backend</span><span class="dot">&middot;</span>
+        <span>range-fetched from S3</span><span class="dot">&middot;</span>
+        <span>powered by roaringrange</span>
       </div>
-    </footer>
-  </body>
+      <div class="foot-links">
+        <a href="index.html">Back to search</a>
+        <a href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script>
+  document.documentElement.classList.add('js');
+
+  // scroll progress
+  var prog = document.getElementById('progress');
+  function onScroll(){
+    var h = document.documentElement;
+    var max = h.scrollHeight - h.clientHeight;
+    var p = max > 0 ? (h.scrollTop || document.body.scrollTop) / max : 0;
+    prog.style.width = (p * 100) + '%';
+  }
+  window.addEventListener('scroll', onScroll, {passive:true});
+  window.addEventListener('resize', onScroll);
+  onScroll();
+
+  // reveals
+  var reveals = [].slice.call(document.querySelectorAll('.reveal'));
+  if ('IntersectionObserver' in window){
+    var ro = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add('in'); ro.unobserve(e.target); } });
+    }, {rootMargin:'0px 0px -8% 0px', threshold:0.08});
+    reveals.forEach(function(el){ ro.observe(el); });
+  } else {
+    reveals.forEach(function(el){ el.classList.add('in'); });
+  }
+
+  // active TOC section
+  var links = [].slice.call(document.querySelectorAll('.toc a'));
+  var map = {};
+  links.forEach(function(a){ map[a.getAttribute('href').slice(1)] = a; });
+  var sections = [].slice.call(document.querySelectorAll('main .sect'));
+  if ('IntersectionObserver' in window){
+    var so = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if(e.isIntersecting){
+          links.forEach(function(a){ a.classList.remove('active'); });
+          var a = map[e.target.id]; if(a) a.classList.add('active');
+        }
+      });
+    }, {rootMargin:'-45% 0px -50% 0px', threshold:0});
+    sections.forEach(function(s){ so.observe(s); });
+  }
+</script>
+</body>
 </html>

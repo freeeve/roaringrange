@@ -1,57 +1,78 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 336" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="RRS index file format">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 540" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRS text index file format, RRSI v2">
   <defs>
-    <style>
-      .lbl{font-size:13px;font-weight:700;fill:#1a1d24}
-      .sub{font-size:11px;fill:#5b6472}
-      .byte{font-size:10.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;fill:#8b94a3}
-      .seg{font-size:12px;font-weight:600;fill:#fff}
-      .note{font-size:11px;fill:#5b6472}
-    </style>
+    <marker id="arF" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#475569"></path>
+    </marker>
   </defs>
 
-  <text x="20" y="28" class="lbl">RRS index — one static file, fetched by byte range</text>
+  <text x="32" y="38" class="title">Text index — one static file (<tspan class="mono">.rrs</tspan>)</text>
+  <text x="32" y="60" class="sub">a trigram dictionary + popularity-split postings; a few small ranged reads per query, independent of corpus size</text>
 
-  <!-- file layout bar: colour encodes WHEN each part is fetched -->
-  <!-- indigo = loaded once at boot · slate = range-fetched on demand per query -->
+  <rect x="648" y="26" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
+  <text x="666" y="36" class="note">loaded at boot</text>
+  <rect x="792" y="26" width="12" height="12" rx="3" fill="#64748b"></rect>
+  <text x="810" y="36" class="note">range-fetched</text>
+
+  
   <g>
-    <rect x="20" y="44" width="90" height="48" rx="5" fill="#3b5bdb"/>
-    <text x="65" y="72" text-anchor="middle" class="seg">header</text>
-
-    <rect x="114" y="44" width="150" height="48" rx="5" fill="#3b5bdb"/>
-    <text x="189" y="68" text-anchor="middle" class="seg">sparse</text>
-    <text x="189" y="82" text-anchor="middle" class="seg">index</text>
-
-    <rect x="268" y="44" width="180" height="48" rx="5" fill="#64748b"/>
-    <text x="358" y="68" text-anchor="middle" class="seg">dictionary</text>
-    <text x="358" y="82" text-anchor="middle" class="seg">(key-sorted)</text>
-
-    <rect x="452" y="44" width="248" height="48" rx="5" fill="#64748b"/>
-    <text x="576" y="72" text-anchor="middle" class="seg">postings (head ∥ tail)</text>
+    <rect x="32" y="86" width="110" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="146" y="86" width="170" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="320" y="86" width="230" height="56" rx="6" fill="#64748b"></rect>
+    <rect x="554" y="86" width="394" height="56" rx="6" fill="#64748b"></rect>
+    <text x="87" y="112" class="seg" text-anchor="middle">Header</text>
+    <text x="87" y="128" class="seg mono" text-anchor="middle" font-size="11">20 B</text>
+    <text x="231" y="112" class="seg" text-anchor="middle">Sparse index</text>
+    <text x="231" y="128" class="seg mono" text-anchor="middle" font-size="11">8 B × ⌈ngrams/stride⌉</text>
+    <text x="435" y="112" class="seg" text-anchor="middle">Dictionary</text>
+    <text x="435" y="128" class="seg mono" text-anchor="middle" font-size="11">24 B/entry · key-sorted</text>
+    <text x="751" y="112" class="seg" text-anchor="middle">Postings</text>
+    <text x="751" y="128" class="seg mono" text-anchor="middle" font-size="11">per trigram · [ head ][ tail ]</text>
   </g>
+  <text x="32" y="172" class="lbl mono">magic &#34;RRSI&#34; · version · gramSize · ngrams · stride · headBoundary</text>
 
-  <!-- colour legend -->
-  <rect x="20" y="102" width="12" height="12" rx="3" fill="#3b5bdb"/>
-  <text x="38" y="112" class="note">loaded once at boot</text>
-  <rect x="170" y="102" width="12" height="12" rx="3" fill="#64748b"/>
-  <text x="188" y="112" class="note">range-fetched on demand, per query</text>
+  
+  <line x1="435" y1="142" x2="256" y2="210" stroke="#64748b" stroke-width="1.5"></line>
+  <rect x="32" y="210" width="448" height="152" rx="8" fill="#eef0fd" stroke="#3b5bdb"></rect>
+  <text x="48" y="236" class="lbl" font-weight="700">one dictionary entry — 24 B, sorted by key</text>
+  <g>
+    <rect x="48" y="252" width="138" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
+    <text x="117" y="274" class="note mono" text-anchor="middle" font-size="12">key</text>
+    <text x="117" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u64 · 8 B</text>
+    <rect x="190" y="252" width="138" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
+    <text x="259" y="274" class="note mono" text-anchor="middle" font-size="12">headOffset</text>
+    <text x="259" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u64 · 8 B</text>
+    <rect x="332" y="252" width="64" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
+    <text x="364" y="274" class="note mono" text-anchor="middle" font-size="12">headSize</text>
+    <text x="364" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u32</text>
+    <rect x="400" y="252" width="64" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
+    <text x="432" y="274" class="note mono" text-anchor="middle" font-size="12">tailSize</text>
+    <text x="432" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u32</text>
+  </g>
+  <rect x="48" y="306" width="416" height="52" rx="5" fill="#dbe3fb"></rect>
+  <text x="60" y="326" class="note" font-size="12">tail at <tspan class="mono">headOffset + headSize</tspan>, length <tspan class="mono">tailSize</tspan></text>
+  <text x="60" y="346" class="note" font-size="12"><tspan class="mono">fullSize = headSize + tailSize</tspan></text>
 
-  <!-- boot vs query callouts -->
-  <text x="20" y="148" class="lbl" fill="#3b5bdb">boot: fetch once</text>
-  <rect x="20" y="156" width="244" height="3" fill="#3b5bdb"/>
-  <text x="20" y="178" class="note">header + sparse index → ~tens of KB,</text>
-  <text x="20" y="194" class="note">kept in memory for the whole session</text>
+  
+  <line x1="751" y1="142" x2="751" y2="210" stroke="#64748b" stroke-width="1.5" marker-end="url(#arF)"></line>
+  <rect x="496" y="210" width="452" height="152" rx="8" fill="#f1f5f9" stroke="#64748b"></rect>
+  <text x="512" y="236" class="lbl" font-weight="700">postings — per trigram: <tspan class="mono">[ head ][ tail ]</tspan></text>
+  <rect x="512" y="252" width="160" height="46" rx="5" fill="#64748b"></rect>
+  <text x="592" y="274" class="seg" text-anchor="middle" font-size="13">head</text>
+  <text x="592" y="290" class="seg mono" text-anchor="middle" font-size="10">docs [0, headBoundary)</text>
+  <rect x="676" y="252" width="256" height="46" rx="5" fill="#94a3b8"></rect>
+  <text x="804" y="274" class="seg" text-anchor="middle" font-size="13">tail</text>
+  <text x="804" y="290" class="seg mono" text-anchor="middle" font-size="10">docs ≥ headBoundary</text>
+  <text x="512" y="324" class="note" font-size="13"><tspan class="mono" fill="#3b5bdb">headBoundary</tspan> — dynamic, a multiple of 65,536 (default</text>
+  <text x="512" y="344" class="note" font-size="13">65,536). Doc IDs descend by popularity → head = top-K.</text>
 
-  <text x="360" y="148" class="lbl" fill="#64748b">per query: range reads</text>
-  <rect x="360" y="156" width="340" height="3" fill="#64748b"/>
-  <text x="360" y="178" class="note">binary-search sparse → fetch one dict block,</text>
-  <text x="360" y="194" class="note">then the head postings for each trigram</text>
+  
+  <rect x="32" y="384" width="916" height="86" rx="8" fill="#f8fafc" stroke="#cbd5e1"></rect>
+  <text x="48" y="406" class="note" font-weight="700">Reader</text>
+  <text x="120" y="406" class="note">— two range-fetch tiers over one static file.</text>
+  <text x="48" y="426" class="note" font-size="13"><tspan font-weight="700" fill="#3b5bdb">boot</tspan>  header (20 B) + sparse index → kept in memory, ~tens of KB.</text>
+  <text x="48" y="446" class="note" font-size="13"><tspan font-weight="700" fill="#64748b">per query</tspan>  binary-search the sparse index → fetch one dictionary block → the head postings per trigram (AND smallest-first).</text>
+  <text x="48" y="462" class="note" font-size="12" fill="#94a3b8">tails fetched only when a query needs more than the head&#39;s top-K.</text>
 
-  <!-- postings: head/tail split (within the slate "postings" segment) -->
-  <text x="20" y="232" class="lbl">postings: doc IDs in popularity order</text>
-  <rect x="20" y="244" width="680" height="40" rx="5" fill="#f1f5f9" stroke="#cbd5e1"/>
-  <rect x="20" y="244" width="180" height="40" rx="5" fill="#cbd5e1"/>
-  <text x="110" y="269" text-anchor="middle" class="note">head: top 65,536 ranked</text>
-  <text x="450" y="269" text-anchor="middle" class="note">tail: the rest, fetched only when paging deeper</text>
-
-  <text x="20" y="318" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">write  build::write_index(w, gram, stride, entries)      read  Index::open(f).search(q, limit)</tspan></text>
+  <text x="32" y="500" class="sub">Boot is ~tens of KB; each query is a handful of small ranged reads — independent of corpus size.</text>
+  <text x="32" y="528" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">write  build::write_index(w, gram, stride, entries)      read  Index::open(f).search(q, limit)</tspan></text>
 </svg>

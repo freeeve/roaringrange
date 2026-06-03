@@ -1,71 +1,62 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 584" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="RRIL DOI lookup layout">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 452" font-family="-apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRIL DOI lookup file layout and binary search">
   <defs>
-    <style>
-      .title{font-size:20px;font-weight:700;fill:#0f172a}
-      .sub{font-size:13px;fill:#64748b}
-      .seg{font-size:13px;font-weight:700;fill:#fff}
-      .lbl{font-size:12px;fill:#334155}
-      .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-      .note{font-size:12px;fill:#475569}
-    </style>
-    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
-      <path d="M0,0 L8,4 L0,8 z" fill="#475569"/>
+    <marker id="arL" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#475569"></path>
     </marker>
   </defs>
 
-  <text x="32" y="38" class="title">DOI lookup — identifier → doc ID (<tspan class="mono">.rril</tspan>)</text>
-  <text x="32" y="60" class="sub">a bare DOI resolves to its work by binary search over a sorted hash table — ~log2(N) ranged reads, exact match, no scan, no backend</text>
+  <text x="32" y="38" class="title">DOI lookup — an exact identifier straight to a doc ID (<tspan class="mono">.rril</tspan>)</text>
+  <text x="32" y="60" class="sub">paste a DOI or a doi.org URL; a handful of 16-byte ranged reads land on the exact work — no text search</text>
 
-  <!-- colour legend -->
-  <rect x="32" y="508" width="12" height="12" rx="3" fill="#3b5bdb"/>
-  <text x="50" y="518" class="note">loaded at boot</text>
-  <rect x="180" y="508" width="12" height="12" rx="3" fill="#64748b"/>
-  <text x="198" y="518" class="note">range-fetched on demand</text>
+  <rect x="700" y="26" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
+  <text x="718" y="36" class="note">loaded at boot</text>
+  <rect x="828" y="26" width="12" height="12" rx="3" fill="#64748b"></rect>
+  <text x="846" y="36" class="note">range-fetched</text>
 
-  <!-- file row: header + sorted records -->
-  <text x="32" y="98" class="lbl mono" font-weight="700">openalex.rril — fixed-size records, sorted by hash</text>
-  <rect x="32"  y="108" width="120" height="50" rx="6" fill="#3b5bdb"/>
-  <rect x="156" y="108" width="792" height="50" rx="6" fill="#64748b"/>
-  <text x="92"  y="130" class="seg" text-anchor="middle">Header</text>
-  <text x="92"  y="146" class="seg mono" text-anchor="middle" font-size="11">16 B</text>
-  <line x1="255" y1="108" x2="255" y2="158" stroke="#f1f5f9" stroke-width="2"/>
-  <line x1="354" y1="108" x2="354" y2="158" stroke="#f1f5f9" stroke-width="2"/>
-  <line x1="453" y1="108" x2="453" y2="158" stroke="#f1f5f9" stroke-width="2"/>
-  <line x1="552" y1="108" x2="552" y2="158" stroke="#f1f5f9" stroke-width="2"/>
-  <line x1="651" y1="108" x2="651" y2="158" stroke="#f1f5f9" stroke-width="2"/>
-  <line x1="750" y1="108" x2="750" y2="158" stroke="#f1f5f9" stroke-width="2"/>
-  <line x1="849" y1="108" x2="849" y2="158" stroke="#f1f5f9" stroke-width="2"/>
-  <text x="552" y="131" class="seg" text-anchor="middle">N records — ascending hash (binary-searchable)</text>
-  <text x="552" y="148" class="seg mono" text-anchor="middle" font-size="11">[hash u64][verify u32][doc u32]</text>
-  <text x="32" y="178" class="lbl mono">magic "RRIL" · ver · count N</text>
+  <text x="32" y="96" class="lbl mono" font-weight="700">work.rril — identifier index, sorted by hash</text>
+  <rect x="32" y="106" width="150" height="50" rx="6" fill="#3b5bdb"></rect>
+  <text x="107" y="128" class="seg" text-anchor="middle">Header</text>
+  <text x="107" y="144" class="seg mono" text-anchor="middle" font-size="11">16 B</text>
+  <rect x="186" y="106" width="762" height="50" rx="6" fill="#64748b"></rect>
+  <text x="567" y="128" class="seg" text-anchor="middle">Records — fixed 16 B each, sorted by hash64(doi)</text>
+  <text x="567" y="144" class="seg mono" text-anchor="middle" font-size="11">hash64 u64 · verify u32 · docId u32</text>
+  <text x="32" y="176" class="lbl mono">magic &#34;RRIL&#34; · ver · count N</text>
 
-  <!-- one record, zoomed -->
-  <text x="32" y="218" class="lbl mono" font-weight="700">one record — 16 B</text>
-  <rect x="32"  y="228" width="430" height="46" rx="6" fill="#64748b"/>
-  <line x1="247" y1="228" x2="247" y2="274" stroke="#f1f5f9" stroke-width="2"/>
-  <line x1="354" y1="228" x2="354" y2="274" stroke="#f1f5f9" stroke-width="2"/>
-  <text x="139" y="251" class="seg mono" text-anchor="middle" font-size="12">hash u64</text>
-  <text x="139" y="266" class="seg mono" text-anchor="middle" font-size="10">FNV-1a(id)</text>
-  <text x="300" y="254" class="seg mono" text-anchor="middle" font-size="12">verify u32</text>
-  <text x="408" y="254" class="seg mono" text-anchor="middle" font-size="12">doc u32</text>
+  <text x="32" y="214" class="lbl" font-weight="700">binary-search the sorted hashes — halve the window per 16 B probe</text>
+  <text x="948" y="214" class="note mono" text-anchor="end" font-size="11" fill="#94a3b8">≈ ⌈log₂ N⌉ ≈ 26 probes for 47.8M</text>
 
-  <!-- zoom arrow from a record cell to the anatomy -->
-  <line x1="453" y1="158" x2="300" y2="228" stroke="#475569" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+  <g>
+    <rect x="32" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="89" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="146" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="203" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="260" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="317" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="374" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="431" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="488" y="230" width="54" height="34" rx="4" fill="#3b5bdb" stroke="#3b5bdb"></rect>
+    <rect x="545" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="602" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="659" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="716" y="230" width="54" height="34" rx="4" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <rect x="773" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="830" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <rect x="887" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
+    <text x="515" y="251" class="seg mono" text-anchor="middle" font-size="11">probe</text>
+  </g>
 
-  <!-- lookup callout -->
-  <rect x="500" y="206" width="448" height="158" rx="8" fill="#f1f5f9" stroke="#64748b"/>
-  <text x="516" y="228" class="lbl" font-weight="700">lookup("10.14710/jbs.11.8.62-70")</text>
-  <text x="516" y="250" class="note mono">1.  normalize: strip doi.org/, upper, drop non-alnum</text>
-  <text x="516" y="270" class="note mono">2.  hash = FNV-1a(norm); verify = FNV-1a(norm, b2)</text>
-  <text x="516" y="290" class="note mono">3.  binary-search by hash  (~log2 N · 16 B reads)</text>
-  <text x="516" y="310" class="note mono">4.  scan hash run, keep verify matches → doc(s)</text>
-  <text x="516" y="340" class="note">the doc ID → the record store renders the work.</text>
+  <path d="M287,278 l-5,-9 l10,0 z" fill="#3b5bdb"></path>
+  <text x="287" y="294" class="note mono" text-anchor="middle" font-size="11">lo</text>
+  <path d="M515,278 l-5,-9 l10,0 z" fill="#3b5bdb"></path>
+  <text x="515" y="294" class="note mono" text-anchor="middle" font-size="11">mid</text>
+  <path d="M743,278 l-5,-9 l10,0 z" fill="#3b5bdb"></path>
+  <text x="743" y="294" class="note mono" text-anchor="middle" font-size="11">hi</text>
 
-  <!-- bottom note: double-hash verify -->
-  <rect x="32" y="424" width="916" height="68" rx="8" fill="#fffbeb" stroke="#f59e0b"/>
-  <text x="48" y="446" class="note" font-weight="700">Double-hashed, so an exact identifier never resolves to the wrong work.</text>
-  <text x="48" y="464" class="note">The primary hash places and finds the entry; an independent verify hash rejects the rare primary-hash collision — a miss returns nothing rather than a wrong doc.</text>
-  <text x="48" y="482" class="note">Identifiers are normalized identically at build and query time, so casing, punctuation, and URL-prefix differences still match.</text>
-
-  <text x="32" y="552" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">write  build::write_lookup(out, &amp;[(id, doc)])      read  Lookup::open(f).lookup(id)</tspan></text>
+  <rect x="32" y="312" width="916" height="124" rx="8" fill="#f1f5f9" stroke="#64748b"></rect>
+  <text x="48" y="334" class="lbl" font-weight="700">resolve a DOI in four steps — each probe is one 16 B Range read</text>
+  <text x="48" y="356" class="note mono">1.  normalize — strip the <tspan font-weight="700">doi.org / https</tspan> prefix, lower-case  →  hash64(doi)</text>
+  <text x="48" y="374" class="note mono">2.  binary-search the record hashes  →  the candidate record</text>
+  <text x="48" y="392" class="note mono">3.  verify — a second hash rejects collisions  (a miss → no result)</text>
+  <text x="48" y="410" class="note mono">4.  docId  →  the record store renders the exact work</text>
+  <text x="48" y="430" class="note">An exact identifier lands on an exact work — or nothing — without ever touching the text index.</text>
 </svg>

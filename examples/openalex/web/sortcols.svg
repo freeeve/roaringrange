@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 524" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRSC sort columns / secondary index layout and client-side re-rank">
+  <defs>
+    <marker id="arS" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#475569"></path>
+    </marker>
+  </defs>
+
+  <text x="32" y="38" class="title">Sort columns — re-rank by a secondary key (<tspan class="mono">RRSC</tspan>)</text>
+  <text x="32" y="60" class="sub">a dense value-per-doc column; fetch a candidate set&#39;s values over HTTP Range and top-K client-side — sort by date, rating, any metric</text>
+
+  <rect x="700" y="26" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
+  <text x="718" y="36" class="note">loaded at boot</text>
+  <rect x="828" y="26" width="12" height="12" rx="3" fill="#64748b"></rect>
+  <text x="846" y="36" class="note">range-fetched</text>
+
+  
+  <text x="32" y="96" class="lbl mono" font-weight="700">work.rrsc — dense columns, indexed by doc ID</text>
+  <rect x="32" y="106" width="118" height="50" rx="6" fill="#3b5bdb"></rect>
+  <text x="91" y="128" class="seg" text-anchor="middle">Header</text>
+  <text x="91" y="144" class="seg mono" text-anchor="middle" font-size="11">16 B</text>
+  <rect x="154" y="106" width="196" height="50" rx="6" fill="#3b5bdb"></rect>
+  <text x="252" y="128" class="seg" text-anchor="middle">Column table</text>
+  <text x="252" y="144" class="seg mono" text-anchor="middle" font-size="11">24 B / column</text>
+  <rect x="354" y="106" width="120" height="50" rx="6" fill="#3b5bdb"></rect>
+  <text x="414" y="128" class="seg" text-anchor="middle">Names</text>
+  <text x="414" y="144" class="seg mono" text-anchor="middle" font-size="11">string blob</text>
+  <rect x="478" y="106" width="470" height="50" rx="6" fill="#64748b"></rect>
+  <text x="713" y="128" class="seg" text-anchor="middle">Dense data — one column per sort key</text>
+  <text x="713" y="144" class="seg mono" text-anchor="middle" font-size="11">rows × width · doc-ID order</text>
+  <text x="32" y="176" class="lbl mono">magic &#34;RRSC&#34; · ver · colCount · rows N · strBytes</text>
+  <text x="560" y="176" class="lbl mono" fill="#3b5bdb">value(d) = data[ dataOff + d·width ]</text>
+
+  
+  <text x="32" y="210" class="lbl" font-weight="700">Re-rank a materialized candidate set — fetch values, then top-K in the browser</text>
+  <rect x="32" y="222" width="916" height="238" rx="10" fill="#fafbfc" stroke="#e2e8f0"></rect>
+
+  <text x="52" y="250" class="step"><tspan class="tag" fill="#3b5bdb" font-weight="700">①</tspan>  fetch each candidate&#39;s <tspan class="mono">value(d)</tspan></text>
+  <text x="52" y="268" class="note">offsets sorted &amp; coalesced into a few spans → one concurrent wave, mirroring the record store</text>
+
+  
+  <g>
+    <rect x="52" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="88" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="124" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="160" y="282" width="34" height="30" rx="3" fill="#3b5bdb" stroke="#3b5bdb"></rect>
+    <rect x="196" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="232" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="268" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="304" y="282" width="34" height="30" rx="3" fill="#3b5bdb" stroke="#3b5bdb"></rect>
+    <rect x="340" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="376" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="412" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="448" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="484" y="282" width="34" height="30" rx="3" fill="#3b5bdb" stroke="#3b5bdb"></rect>
+    <rect x="520" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="556" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="592" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="628" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="664" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="700" y="282" width="34" height="30" rx="3" fill="#3b5bdb" stroke="#3b5bdb"></rect>
+    <rect x="736" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="772" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="808" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="844" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <rect x="880" y="282" width="34" height="30" rx="3" fill="#f1f5f9" stroke="#e2e8f0"></rect>
+    <text x="177" y="302" class="seg mono" text-anchor="middle" font-size="10">2019</text>
+    <text x="321" y="302" class="seg mono" text-anchor="middle" font-size="10">2021</text>
+    <text x="501" y="302" class="seg mono" text-anchor="middle" font-size="10">2015</text>
+    <text x="717" y="302" class="seg mono" text-anchor="middle" font-size="10">2023</text>
+    <text x="177" y="328" class="note mono" text-anchor="middle" font-size="10">d3</text>
+    <text x="321" y="328" class="note mono" text-anchor="middle" font-size="10">d7</text>
+    <text x="501" y="328" class="note mono" text-anchor="middle" font-size="10">d12</text>
+    <text x="717" y="328" class="note mono" text-anchor="middle" font-size="10">d18</text>
+    <text x="914" y="302" class="note mono" text-anchor="end" font-size="10" fill="#94a3b8">pub_date column</text>
+  </g>
+
+  
+  <text x="52" y="360" class="step"><tspan class="tag" fill="#3b5bdb" font-weight="700">②</tspan>  <tspan class="mono">topk(candidates, k, descending)</tspan> — partial-sort client-side</text>
+  <text x="52" y="384" class="note">candidates · citation rank</text>
+  <g font-family="ui-monospace, Menlo, monospace">
+    <rect x="52" y="392" width="48" height="26" rx="5" fill="#fff" stroke="#cbd5e1"></rect>
+    <text x="76" y="409" class="note mono" text-anchor="middle" font-size="12">d3</text>
+    <rect x="106" y="392" width="48" height="26" rx="5" fill="#fff" stroke="#cbd5e1"></rect>
+    <text x="130" y="409" class="note mono" text-anchor="middle" font-size="12">d7</text>
+    <rect x="160" y="392" width="48" height="26" rx="5" fill="#fff" stroke="#cbd5e1"></rect>
+    <text x="184" y="409" class="note mono" text-anchor="middle" font-size="12">d12</text>
+    <rect x="214" y="392" width="48" height="26" rx="5" fill="#fff" stroke="#cbd5e1"></rect>
+    <text x="238" y="409" class="note mono" text-anchor="middle" font-size="12">d18</text>
+  </g>
+  <line x1="278" y1="405" x2="372" y2="405" stroke="#475569" stroke-width="1.5" marker-end="url(#arS)"></line>
+  <text x="325" y="397" class="note mono" text-anchor="middle" font-size="11">pub_date ↓</text>
+  <text x="392" y="384" class="note" fill="#3b5bdb" font-weight="700">re-ranked · newest first</text>
+  <g>
+    <rect x="392" y="392" width="48" height="26" rx="5" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <text x="416" y="409" class="note mono" text-anchor="middle" font-size="12" fill="#2b44a8">d18</text>
+    <rect x="446" y="392" width="48" height="26" rx="5" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <text x="470" y="409" class="note mono" text-anchor="middle" font-size="12" fill="#2b44a8">d7</text>
+    <rect x="500" y="392" width="48" height="26" rx="5" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <text x="524" y="409" class="note mono" text-anchor="middle" font-size="12" fill="#2b44a8">d3</text>
+    <rect x="554" y="392" width="48" height="26" rx="5" fill="#edf0fd" stroke="#3b5bdb"></rect>
+    <text x="578" y="409" class="note mono" text-anchor="middle" font-size="12" fill="#2b44a8">d12</text>
+  </g>
+  <text x="640" y="409" class="note">ties keep primary rank → &amp;ldquo;newest, then most-cited&amp;rdquo;</text>
+  <text x="52" y="440" class="note">A few KB per page; the multi-GB column data is never read whole — only the candidates&#39; cells.</text>
+
+  
+  <rect x="32" y="472" width="916" height="44" rx="8" fill="#edf0fd" stroke="#c7d2fe"></rect>
+  <text x="48" y="492" class="note"><tspan font-weight="700">Full second index</tspan> — a second <tspan class="mono">.rrs</tspan> reindexed in secondary order + a <tspan class="mono">u32</tspan> permutation column (<tspan class="mono">secondary_docid → primary_docid</tspan>).</text>
+  <text x="48" y="509" class="note">A result page is a contiguous run, so <tspan class="mono">slice_u32(start, len)</tspan> maps it back to primary IDs in one ranged read. Records &amp; facets stay keyed by primary ID.</text>
+</svg>
