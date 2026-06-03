@@ -90,6 +90,23 @@ different vector space. See [`../VECTORS.md`](../VECTORS.md) for the byte layout
 This pure-Rust trainer suits small/medium corpora and tests; at very large scale
 train with FAISS and export the same `RRVI` layout (the reader is identical).
 
+### Scale: train with FAISS, export to RRVI
+
+For large corpora, train `OPQ,IVF,PQ` with FAISS and export the trained parts —
+no retraining in Rust. `python/scripts/faiss_to_rrvi.py` does this end to end
+(install the extra: `pip install 'roaringrange[train]'` for numpy + faiss-cpu):
+
+```python
+from faiss_to_rrvi import export_to_rrvi
+stats = export_to_rrvi(vectors, doc_ids, "vectors.rrvi", nlist=4096, m=32, metric="ip")
+```
+
+Under the hood it calls the low-level `roaringrange.write_rrvi_from_faiss(...)`,
+which takes the FAISS arrays (OPQ rotation, coarse centroids, PQ codebooks,
+per-vector cluster + 8-bit codes) as little-endian byte buffers — so the wheel
+needs no numpy dependency. The export is verified against the Rust reader
+(recall@10 ≈ 0.9995 vs FAISS's own search on the same index).
+
 ## Notes
 
 - **Ranking is baked in.** Doc IDs are assigned in descending `rank`, so the

@@ -27,7 +27,9 @@ use roaringrange_core::build::{
 };
 use roaringrange_core::ngram_keys;
 use roaringrange_core::vector::{METRIC_IP, METRIC_L2};
-use roaringrange_core::{build_ivfpq, IvfpqParams, VectorBuildError};
+use roaringrange_core::{
+    build_ivfpq, build_ivfpq_from_parts, IvfpqParams, IvfpqParts, VectorBuildError,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::Path;
@@ -330,11 +332,7 @@ impl VectorBuilder {
     fn build(&self, out_path: &str) -> PyResult<VectorBuildStats> {
         let idx = build_ivfpq(&self.vectors, &self.params).map_err(build_err)?;
         let path = Path::new(out_path);
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(io_err)?;
-            }
-        }
+        create_parent(path)?;
         idx.write(File::create(path).map_err(io_err)?)
             .map_err(io_err)?;
         Ok(VectorBuildStats {
@@ -362,6 +360,122 @@ fn build_err(e: VectorBuildError) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
+/// Decodes `count` little-endian `f32`s from `b`, erroring if the byte length is
+/// not exactly `count * 4`.
+fn bytes_to_f32(b: &[u8], count: usize, what: &str) -> PyResult<Vec<f32>> {
+    if b.len() != count * 4 {
+        return Err(PyValueError::new_err(format!(
+            "{what}: expected {} bytes ({count} f32), got {}",
+            count * 4,
+            b.len()
+        )));
+    }
+    Ok(b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
+/// Decodes little-endian `u32`s from `b`, erroring if the byte length is not a
+/// multiple of 4.
+fn bytes_to_u32(b: &[u8], what: &str) -> PyResult<Vec<u32>> {
+    if !b.len().is_multiple_of(4) {
+        return Err(PyValueError::new_err(format!(
+            "{what}: byte length {} is not a multiple of 4",
+            b.len()
+        )));
+    }
+    Ok(b.chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
+/// Creates the parent directory of `path` if it has one.
+fn create_parent(path: &Path) -> PyResult<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(io_err)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes an `RRVI` index from already-trained IVFPQ parts (e.g. a FAISS
+/// `OPQ,IVF,PQ` export) to `out_path`, without re-training.
+///
+/// Arrays are passed as little-endian byte buffers (numpy `array.astype('<f4'or
+/// '<u4').tobytes()` / `codes.astype('uint8').tobytes()`) so the extension needs
+/// no numpy dependency:
+/// - `centroids`: `nlist*dim` f32 (coarse centroids, in the OPQ-rotated space)
+/// - `codebooks`: `m*(2^nbits)*(dim/m)` f32 (PQ codebooks)
+/// - `ids`: `n` u32 (doc IDs), `assignments`: `n` u32 (coarse cluster per vector)
+/// - `codes`: `n*m` u8 (PQ codes), `opq` (optional): `dim*dim` f32 (row-major `R`)
+///
+/// `metric` is `"ip"`/`"cosine"` or `"l2"`. Returns [`VectorBuildStats`]; raises
+/// `ValueError` if any array length is inconsistent or an assignment/code is out
+/// of range.
+#[pyfunction]
+#[pyo3(signature = (
+    out_path, dim, nlist, m, centroids, codebooks, ids, assignments, codes,
+    nbits = 8, metric = "ip", opq = None
+))]
+#[allow(clippy::too_many_arguments)]
+fn write_rrvi_from_faiss(
+    out_path: &str,
+    dim: usize,
+    nlist: usize,
+    m: usize,
+    centroids: Vec<u8>,
+    codebooks: Vec<u8>,
+    ids: Vec<u8>,
+    assignments: Vec<u8>,
+    codes: Vec<u8>,
+    nbits: u8,
+    metric: &str,
+    opq: Option<Vec<u8>>,
+) -> PyResult<VectorBuildStats> {
+    if dim == 0 || m == 0 || !dim.is_multiple_of(m) {
+        return Err(PyValueError::new_err(
+            "need dim > 0, m > 0, and m to divide dim",
+        ));
+    }
+    if nbits == 0 || nbits > 8 {
+        return Err(PyValueError::new_err("nbits must be in 1..=8"));
+    }
+    if nlist == 0 {
+        return Err(PyValueError::new_err("nlist must be >= 1"));
+    }
+    let ksub = 1usize << nbits;
+    let dsub = dim / m;
+    let parts = IvfpqParts {
+        dim,
+        nlist,
+        m,
+        nbits,
+        metric: parse_metric(metric)?,
+        centroids: bytes_to_f32(&centroids, nlist * dim, "centroids")?,
+        codebooks: bytes_to_f32(&codebooks, m * ksub * dsub, "codebooks")?,
+        opq: match opq {
+            Some(b) => Some(bytes_to_f32(&b, dim * dim, "opq")?),
+            None => None,
+        },
+        ids: bytes_to_u32(&ids, "ids")?,
+        assignments: bytes_to_u32(&assignments, "assignments")?,
+        codes,
+    };
+    let idx = build_ivfpq_from_parts(parts).map_err(build_err)?;
+    let path = Path::new(out_path);
+    create_parent(path)?;
+    idx.write(File::create(path).map_err(io_err)?)
+        .map_err(io_err)?;
+    Ok(VectorBuildStats {
+        vectors: idx.len() as usize,
+        dim: idx.dim(),
+        nlist: idx.nlist(),
+        m: idx.subquantizers(),
+        nbits: idx.nbits(),
+    })
+}
+
 fn io_err(e: std::io::Error) -> PyErr {
     PyIOError::new_err(e.to_string())
 }
@@ -373,5 +487,6 @@ fn roaringrange(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VectorBuilder>()?;
     m.add_class::<VectorBuildStats>()?;
     m.add_function(wrap_pyfunction!(tokenize, m)?)?;
+    m.add_function(wrap_pyfunction!(write_rrvi_from_faiss, m)?)?;
     Ok(())
 }

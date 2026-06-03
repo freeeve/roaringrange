@@ -98,3 +98,47 @@ def test_vector_builder_l2_metric(tmp_path):
     out = tmp_path / "v.rrvi"
     vb.build(str(out))
     assert out.read_bytes()[6] == 1  # metric byte == L2
+
+
+def _f32(vals):
+    return struct.pack("<%df" % len(vals), *vals)
+
+
+def _u32(vals):
+    return struct.pack("<%dI" % len(vals), *vals)
+
+
+def test_write_rrvi_from_faiss(tmp_path):
+    # Already-"trained" parts (as a FAISS OPQ,IVF,PQ export would supply them),
+    # passed as little-endian byte buffers. dim=4, m=2, nbits=2 (ksub=4), nlist=2.
+    dim, nlist, m, nbits = 4, 2, 2, 2
+    centroids = _f32([0, 0, 0, 0, 2, 2, 2, 2])
+    codebook_2d = [0, 0, 1, 0, 0, 1, 1, 1]
+    codebooks = _f32(codebook_2d + codebook_2d)  # two subspaces
+    ids = _u32([10, 11, 12, 13])
+    assignments = _u32([0, 0, 1, 1])
+    codes = bytes([3, 3, 0, 0, 0, 0, 3, 3])  # n*m = 8
+
+    out = tmp_path / "faiss.rrvi"
+    stats = rr.write_rrvi_from_faiss(
+        str(out), dim, nlist, m, centroids, codebooks, ids, assignments, codes,
+        nbits=nbits, metric="l2",
+    )
+    assert (stats.vectors, stats.dim, stats.nlist, stats.m, stats.nbits) == (4, 4, 2, 2, 2)
+
+    head = out.read_bytes()[:48]
+    assert head[:4] == b"RRVI"
+    assert head[6] == 1  # metric L2
+    h_dim, h_nlist, h_m = struct.unpack_from("<III", head, 8)
+    (h_n,) = struct.unpack_from("<Q", head, 24)
+    assert (h_dim, h_nlist, h_m, head[20], h_n) == (dim, nlist, m, nbits, 4)
+
+
+def test_write_rrvi_from_faiss_validates_lengths(tmp_path):
+    with pytest.raises(ValueError):
+        rr.write_rrvi_from_faiss(
+            str(tmp_path / "bad.rrvi"), 4, 2, 2,
+            _f32([0] * 8), _f32([0] * 16), _u32([0, 1]), _u32([0, 1]),
+            bytes([0, 0, 0]),  # codes length 3, should be n*m = 4
+            nbits=2, metric="l2",
+        )

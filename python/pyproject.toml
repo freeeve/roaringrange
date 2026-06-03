@@ -21,6 +21,11 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
 
+[project.optional-dependencies]
+# For the FAISS -> RRVI export path (python/scripts/faiss_to_rrvi.py). The
+# extension wheel itself has no runtime dependencies.
+train = ["numpy>=1.21", "faiss-cpu>=1.7"]
+
 [project.urls]
 Repository = "https://github.com/freeeve/roaringrange"
 

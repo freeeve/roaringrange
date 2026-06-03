@@ -207,3 +207,34 @@ release (user is creating the project).
 - **Docs:** `python/README.md` (VectorBuilder usage + install), `rust/README.md`
   (`vector` feature), top-level `README.md` (specs row + similarity-search
   section), all updated.
+
+### 2026-06-03 — Step 3 done (FAISS training + RRVI export at scale)
+Production build path: train `OPQ,IVF,PQ` with FAISS, export the trained parts to
+RRVI without retraining in Rust.
+
+- **Rust** (`vector_build.rs`): `IvfpqParts` + `build_ivfpq_from_parts` — assemble
+  an `Ivfpq` from already-trained centroids/codebooks/OPQ + per-vector
+  (id, assignment, code), validating every length/range, then `write`. No k-means.
+- **Python** (`python/src/lib.rs`): `write_rrvi_from_faiss(out, dim, nlist, m,
+  centroids, codebooks, ids, assignments, codes, nbits=8, metric, opq=None)` —
+  takes the FAISS arrays as **little-endian byte buffers** (numpy `.tobytes()`), so
+  the wheel needs **no numpy dep**. Decodes, calls `build_ivfpq_from_parts`, writes.
+- **Script** (`python/scripts/faiss_to_rrvi.py`, `[train]` extra = numpy+faiss-cpu):
+  `export_to_rrvi(vectors, doc_ids, out, nlist, m, metric)` trains
+  `OPQ{m},IVF{nlist},PQ{m}` (8-bit), extracts OPQ rotation (`A`, no bias), coarse
+  centroids (rotated space), PQ codebooks, and per-vector cluster+code from the
+  inverted lists (FAISS row id → doc_id), and calls the binding. `+report_recall`.
+- **CLI** (`rust/examples/rrvi_query.rs`, `required-features=["vector"]`): reads an
+  `.rrvi` + a queries blob, prints top-k doc IDs — the cross-check harness.
+- **VERIFIED end-to-end with real FAISS 1.14 / numpy 2.4**: exported a 12.8K×64
+  index, read it back through the Rust reader, and compared to FAISS's own IVFPQ
+  search on the same index → **recall@10 = 0.9995** (top-10 identical, in order).
+  Confirms the OPQ/centroid/codebook orientation. Rust tests:
+  `from_parts_matches_hand_computed_adc` (exact ADC) + `from_parts_rejects_*`;
+  pytest: `write_rrvi_from_faiss` header + validation (no numpy needed in CI).
+- All gates green: 55 lib + 8 vector tests, 11 pytest, clippy (default + vector,
+  incl. the example), fmt. Constraints: 8-bit PQ codes; OPQ bias must be zero.
+
+Remaining: **4** model2vec build-time embedder (mode 2); **5** wasm bindings for
+the reader + in-browser model2vec; **6** open-model corpus embed + Lambda (mode 1);
+**7** re-rank blob + trigram hybrid.
