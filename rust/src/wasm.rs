@@ -21,6 +21,8 @@ use crate::fetch::{FetchError, RangeFetch};
 use crate::index::{Cursor, Index};
 use crate::lookup::Lookup;
 use crate::records::RecordStore;
+use crate::secondary::{SecondaryCursor, SecondaryIndex};
+use crate::sortcols::SortCols;
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint32Array, Uint8Array};
 use roaring::RoaringBitmap;
 use wasm_bindgen::prelude::*;
@@ -154,11 +156,11 @@ impl RangeFetch for WasmFetch {
 /// Builds the search-filtered facet-count JSON for `cursor`'s head result:
 /// `[{"field":"<name>","cats":[{"name":"<name>","count":<n>},...]},...]`, or
 /// `"[]"` when no facet sidecar is open. Counts are computed in memory.
-fn facet_counts_json(facets: &Option<FacetIndex<WasmFetch>>, cursor: &Cursor<WasmFetch>) -> String {
+fn facet_counts_json(facets: Option<&FacetIndex<WasmFetch>>, head: &RoaringBitmap) -> String {
     let Some(facets) = facets else {
         return "[]".to_string();
     };
-    let counts = facets.counts(cursor.head_bitmap());
+    let counts = facets.counts(head);
     let mut out = String::from("[");
     for (fi, field) in facets.fields.iter().enumerate() {
         if fi > 0 {
@@ -272,7 +274,7 @@ impl RrsIndex {
             .search_cursor(query, max_missing)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let counts_json = facet_counts_json(&self.facets, &inner);
+        let counts_json = facet_counts_json(self.facets.as_ref(), inner.head_bitmap());
         Ok(RrsCursor { inner, counts_json })
     }
 
@@ -309,7 +311,7 @@ impl RrsIndex {
             .search_cursor_filtered(&query, max_missing, filter)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let counts_json = facet_counts_json(&self.facets, &inner);
+        let counts_json = facet_counts_json(self.facets.as_ref(), inner.head_bitmap());
         Ok(RrsCursor { inner, counts_json })
     }
 
@@ -832,4 +834,289 @@ fn parse_filters_json(json: Option<&str>) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// A range-fetchable [`SortCols`] store exposed to JavaScript: dense columns
+/// indexed by doc ID, used to re-rank a materialized candidate set client-side
+/// (sort by rating / date / any secondary metric) and to map a secondary index's
+/// doc IDs back to the primary space. See `SORTCOLS.md`.
+#[wasm_bindgen]
+pub struct RrsSortCols {
+    inner: SortCols<WasmFetch>,
+}
+
+#[wasm_bindgen]
+impl RrsSortCols {
+    /// Boots the store at `url`: reads the header + column meta (a few KB; the dense
+    /// data is range-fetched per query). Returns a `Promise<RrsSortCols>`.
+    pub async fn open(url: String) -> Result<RrsSortCols, JsError> {
+        let inner = SortCols::open(WasmFetch::new(url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrsSortCols { inner })
+    }
+
+    /// Number of rows (doc IDs `0..rows`) every column holds.
+    pub fn rows(&self) -> u32 {
+        self.inner.rows()
+    }
+
+    /// The index of the column named `name`, or `-1` if absent.
+    #[wasm_bindgen(js_name = columnIndex)]
+    pub fn column_index(&self, name: String) -> i32 {
+        self.inner
+            .column_index(&name)
+            .map(|i| i as i32)
+            .unwrap_or(-1)
+    }
+
+    /// A JS array of the columns' `{ name, type }` (`type` is one of
+    /// `"u16"`/`"u32"`/`"i32"`/`"f32"`), in stored order.
+    #[wasm_bindgen(js_name = columnsJson)]
+    pub fn columns_json(&self) -> String {
+        let parts: Vec<String> = self
+            .inner
+            .columns()
+            .iter()
+            .map(|c| {
+                let t = match c.value_type {
+                    crate::sortcols::ValueType::U16 => "u16",
+                    crate::sortcols::ValueType::U32 => "u32",
+                    crate::sortcols::ValueType::I32 => "i32",
+                    crate::sortcols::ValueType::F32 => "f32",
+                };
+                format!(
+                    "{{\"name\":\"{}\",\"type\":\"{}\"}}",
+                    json_escape(&c.name),
+                    t
+                )
+            })
+            .collect();
+        format!("[{}]", parts.join(","))
+    }
+
+    /// Values for `ids` in column `col`, as a `Float64Array` aligned with `ids`
+    /// (every stored type is exactly representable in `f64`). One coalesced wave of
+    /// ranged reads.
+    pub async fn values(&self, col: usize, ids: Vec<u32>) -> Result<Vec<f64>, JsError> {
+        let vals = self
+            .inner
+            .values(col, &ids)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(vals.into_iter().map(|v| v.as_f64()).collect())
+    }
+
+    /// The contiguous run `[start, start+len)` of a `u32` column as a `Uint32Array`
+    /// — the permutation-page fast path. Clamps to the row count.
+    #[wasm_bindgen(js_name = sliceU32)]
+    pub async fn slice_u32(&self, col: usize, start: u32, len: usize) -> Result<Vec<u32>, JsError> {
+        self.inner
+            .slice_u32(col, start, len)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// The top `k` of `candidates` by column `col` as a `Uint32Array`, descending
+    /// when `descending` (else ascending); ties keep ascending doc-ID order.
+    pub async fn topk(
+        &self,
+        col: usize,
+        candidates: Vec<u32>,
+        k: usize,
+        descending: bool,
+    ) -> Result<Vec<u32>, JsError> {
+        self.inner
+            .topk(col, &candidates, k, descending)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
+/// Serializes facet `fields` with their **full-corpus** counts to the
+/// `facetsJson` shape `[{"field":..,"cats":[{"name":..,"count":<u32>},..]},..]`.
+fn fields_json(fields: &[Field]) -> String {
+    let mut out = String::from("[");
+    for (fi, field) in fields.iter().enumerate() {
+        if fi > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"field\":\"");
+        out.push_str(&json_escape(&field.name));
+        out.push_str("\",\"cats\":[");
+        for (ci, cat) in field.categories.iter().enumerate() {
+            if ci > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"name\":\"");
+            out.push_str(&json_escape(&cat.name));
+            out.push_str("\",\"count\":");
+            out.push_str(&cat.count.to_string());
+            out.push('}');
+        }
+        out.push_str("]}");
+    }
+    out.push(']');
+    out
+}
+
+/// Parses `"field\tcategory"` filter entries into `(field, category)` pairs,
+/// skipping malformed entries. Shared by the secondary filtered search.
+fn parse_tab_filters(filters: &[String]) -> Vec<(String, String)> {
+    filters
+        .iter()
+        .filter_map(|entry| {
+            let mut parts = entry.splitn(2, '\t');
+            match (parts.next(), parts.next()) {
+                (Some(field), Some(cat)) => Some((field.to_string(), cat.to_string())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// A secondary full index exposed to JavaScript: a second `RRS` reindexed in an
+/// alternate rank order (e.g. newest-first), the permutation back to primary doc
+/// IDs, and an optional secondary-space facet sidecar for filtered search. Search it
+/// like [`RrsIndex`]; the cursor's pages come back as **primary** doc IDs, so
+/// records are fetched through the existing primary-keyed store unchanged. Facet
+/// counts are identical to the primary order's. See `SORTCOLS.md`.
+#[wasm_bindgen]
+pub struct RrsSecondaryIndex {
+    /// Held in an `Option` so the consuming builder `with_facets` can be driven by
+    /// the `&mut self` `open_facets` (take, attach, replace).
+    inner: Option<SecondaryIndex<WasmFetch>>,
+}
+
+#[wasm_bindgen]
+impl RrsSecondaryIndex {
+    /// Boots the secondary index over the text index at `rrs_url` and the
+    /// permutation store at `perm_url`. Returns a `Promise<RrsSecondaryIndex>`.
+    pub async fn open(rrs_url: String, perm_url: String) -> Result<RrsSecondaryIndex, JsError> {
+        let inner = SecondaryIndex::open(WasmFetch::new(rrs_url), WasmFetch::new(perm_url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrsSecondaryIndex { inner: Some(inner) })
+    }
+
+    /// Opens the secondary-space facet sidecar at `url` and attaches it, enabling
+    /// `facetsJson` and filtered secondary search.
+    #[wasm_bindgen(js_name = openFacets)]
+    pub async fn open_facets(&mut self, url: String) -> Result<(), JsError> {
+        let sec = self
+            .inner
+            .take()
+            .ok_or_else(|| JsError::new("secondary index unavailable"))?;
+        let sec = sec
+            .with_facets(WasmFetch::new(url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.inner = Some(sec);
+        Ok(())
+    }
+
+    /// The facet fields with full-corpus counts as a JSON string (same shape as
+    /// [`RrsIndex::facets_json`]); `"[]"` when no sidecar is open.
+    #[wasm_bindgen(js_name = facetsJson)]
+    pub fn facets_json(&self) -> String {
+        match self.inner.as_ref() {
+            Some(sec) => fields_json(sec.fields()),
+            None => "[]".to_string(),
+        }
+    }
+
+    /// Opens an unfiltered pagination cursor for `query` over the secondary order.
+    /// `max_missing` is the fuzzy tolerance (0 = strict).
+    #[wasm_bindgen(js_name = searchCursor)]
+    pub async fn search_cursor(
+        &self,
+        query: String,
+        max_missing: usize,
+    ) -> Result<RrsSecondaryCursor, JsError> {
+        self.search_cursor_filtered(query, max_missing, Vec::new())
+            .await
+    }
+
+    /// Like [`RrsSecondaryIndex::search_cursor`] but ANDs the selected facets into
+    /// the result. Each `filters` entry is `"field\tcategory"` (tab-separated);
+    /// within a field categories OR, across fields they AND. Applied only when a
+    /// secondary sidecar is open and `filters` is non-empty.
+    #[wasm_bindgen(js_name = searchCursorFiltered)]
+    pub async fn search_cursor_filtered(
+        &self,
+        query: String,
+        max_missing: usize,
+        filters: Vec<String>,
+    ) -> Result<RrsSecondaryCursor, JsError> {
+        let sec = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| JsError::new("secondary index unavailable"))?;
+        let pairs = parse_tab_filters(&filters);
+        let inner = sec
+            .search_cursor_filtered(&query, max_missing, &pairs)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let counts_json = facet_counts_json(sec.facets(), inner.head_bitmap());
+        Ok(RrsSecondaryCursor { inner, counts_json })
+    }
+}
+
+/// A pagination cursor over a secondary-ordered result set whose pages are mapped
+/// back to primary doc IDs. Mirrors [`RrsCursor`]; [`RrsSecondaryCursor::page`]
+/// returns a `Uint32Array` of **primary** doc IDs.
+#[wasm_bindgen]
+pub struct RrsSecondaryCursor {
+    inner: SecondaryCursor<WasmFetch>,
+    /// Search-filtered facet counts for this query (secondary-space head result,
+    /// identical to the primary order's counts), as a JSON string.
+    counts_json: String,
+}
+
+#[wasm_bindgen]
+impl RrsSecondaryCursor {
+    /// The search-filtered facet counts as a JSON string (same shape as
+    /// `facetsJson`, counts restricted to this query's result); `"[]"` when no
+    /// secondary sidecar is open.
+    #[wasm_bindgen(js_name = facetCountsJson)]
+    pub fn facet_counts_json(&self) -> String {
+        self.counts_json.clone()
+    }
+
+    /// The page of primary doc IDs for the secondary-ordered results
+    /// `[offset, offset+limit)`. Head pages cost no posting fetch; crossing into the
+    /// tail fetches it once. Always one small coalesced permutation gather per page.
+    pub async fn page(&mut self, offset: usize, limit: usize) -> Result<Vec<u32>, JsError> {
+        self.inner
+            .page(offset, limit)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Number of secondary results materialized so far (head, plus tail once fetched).
+    pub fn loaded(&self) -> usize {
+        self.inner.loaded()
+    }
+
+    /// Number of head results — available with no tail fetch.
+    #[wasm_bindgen(js_name = headCount)]
+    pub fn head_count(&self) -> usize {
+        self.inner.head_count()
+    }
+
+    /// Whether an unfetched tail could still add results.
+    #[wasm_bindgen(js_name = pendingTail)]
+    pub fn pending_tail(&self) -> bool {
+        self.inner.pending_tail()
+    }
+
+    /// Forces the lazy tail to be fetched; afterwards `loaded`/`page` span the full
+    /// result set.
+    #[wasm_bindgen(js_name = loadTail)]
+    pub async fn load_tail(&mut self) -> Result<(), JsError> {
+        self.inner
+            .load_tail()
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
 }

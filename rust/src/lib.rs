@@ -13,6 +13,8 @@ pub mod index;
 pub mod lookup;
 pub mod ngram;
 pub mod records;
+pub mod secondary;
+pub mod sortcols;
 
 /// Container-level ranged reads into tail postings (search-fetch reduction).
 mod posting;
@@ -28,6 +30,8 @@ pub use index::{Index, IndexError, ResolvedFilter};
 pub use lookup::Lookup;
 pub use ngram::ngram_keys;
 pub use records::RecordStore;
+pub use secondary::{SecondaryCursor, SecondaryIndex};
+pub use sortcols::{ColInfo, SortCols, Value, ValueType};
 
 #[cfg(feature = "wasm")]
 mod wasm;

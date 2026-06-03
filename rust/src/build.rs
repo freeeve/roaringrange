@@ -259,13 +259,18 @@ pub struct RecordWriter<W: Write, X: Write> {
     off: u64,
     /// Number of records written so far.
     written: u32,
-    /// Optional shared zstd dictionary + compression level. When set, the writer
-    /// emits the version-2 framed layout: each record becomes `[tag][payload]`,
-    /// raw (tag 0) when compression does not shrink it, zstd-with-dict (tag 1)
-    /// otherwise. When `None` the writer emits the original untagged version-1
-    /// layout byte-for-byte.
+    /// Optional reusable zstd compressor with the shared dictionary digested once.
+    /// When set, the writer emits the version-2 framed layout: each record becomes
+    /// `[tag][payload]`, raw (tag 0) when compression does not shrink it,
+    /// zstd-with-dict (tag 1) otherwise. When `None` the writer emits the original
+    /// untagged version-1 layout byte-for-byte. The compressor is built once — at
+    /// high levels, preparing the dictionary's match-finder tables dominates a small
+    /// record's cost, so rebuilding it per record makes a full-corpus store
+    /// intractable — and reused for every record. Reuse is byte-identical to a fresh
+    /// per-record compressor: each record is an independent one-shot frame over the
+    /// same digested dictionary.
     #[cfg(feature = "zstd")]
-    zstd: Option<(Vec<u8>, i32)>,
+    zstd: Option<zstd::bulk::Compressor<'static>>,
 }
 
 /// Frame tag for a raw (uncompressed) payload in a version-2 store.
@@ -314,12 +319,14 @@ impl<W: Write, X: Write> RecordWriter<W, X> {
         idx.write_all(&count.to_le_bytes())?; // count
         idx.write_all(&0u32.to_le_bytes())?; // reserved2
         idx.write_all(&0u64.to_le_bytes())?; // off[0] = 0
+                                             // Build the dictionary-backed compressor once; `write` reuses it per record.
+        let compressor = zstd::bulk::Compressor::with_dictionary(level, dict)?;
         Ok(Self {
             bin,
             idx,
             off: 0,
             written: 0,
-            zstd: Some((dict.to_vec(), level)),
+            zstd: Some(compressor),
         })
     }
 
@@ -329,11 +336,14 @@ impl<W: Write, X: Write> RecordWriter<W, X> {
     /// a record never grows. A zero-length record stays zero-length (no tag),
     /// matching the version-1 zero-length convention.
     #[cfg(feature = "zstd")]
-    fn frame_zstd(rec: &[u8], dict: &[u8], level: i32) -> io::Result<Vec<u8>> {
+    fn frame_zstd(
+        compressor: &mut zstd::bulk::Compressor<'static>,
+        rec: &[u8],
+    ) -> io::Result<Vec<u8>> {
         if rec.is_empty() {
             return Ok(Vec::new());
         }
-        let compressed = zstd::bulk::Compressor::with_dictionary(level, dict)?.compress(rec)?;
+        let compressed = compressor.compress(rec)?;
         // Both candidate frames pay the same 1-byte tag, so compare payload sizes.
         if compressed.len() < rec.len() {
             let mut framed = Vec::with_capacity(compressed.len() + 1);
@@ -354,8 +364,8 @@ impl<W: Write, X: Write> RecordWriter<W, X> {
     /// first; a plain writer stores the bytes verbatim.
     pub fn write(&mut self, rec: &[u8]) -> io::Result<()> {
         #[cfg(feature = "zstd")]
-        let framed = match &self.zstd {
-            Some((dict, level)) => Some(Self::frame_zstd(rec, dict, *level)?),
+        let framed = match &mut self.zstd {
+            Some(compressor) => Some(Self::frame_zstd(compressor, rec)?),
             None => None,
         };
         #[cfg(feature = "zstd")]
@@ -446,20 +456,36 @@ pub(crate) const LOOKUP_MAGIC: &[u8; 4] = b"RRIL";
 /// - then `N` × `[hash u64][verify u32][doc u32]`, sorted by `(hash, doc)`.
 ///
 /// See `lookup.rs` for the reader and the hashing/normalization details.
-pub fn write_lookup<W: Write>(mut w: W, entries: &[(String, u32)]) -> io::Result<()> {
+pub fn write_lookup<W: Write>(w: W, entries: &[(String, u32)]) -> io::Result<()> {
+    write_lookup_streaming(w, entries.iter().cloned())
+}
+
+/// Streaming counterpart of [`write_lookup`]: consumes an *iterator* of
+/// `(identifier, doc)` pairs, hashing and **dropping each identifier string as it
+/// is consumed**, so only the fixed-width `(hash, verify, doc)` triples (16 bytes
+/// each) are retained — never the identifier strings. This bounds peak memory to
+/// the triple table when a full-corpus builder streams hundreds of millions of
+/// identifiers in from disk, where holding every `String` would be many times
+/// larger. The output is byte-for-byte identical to [`write_lookup`] over the same
+/// pairs in the same order: identifiers are normalized, double-hashed, empties
+/// dropped, and the records sorted by `(hash, doc)` exactly as there.
+pub fn write_lookup_streaming<W: Write, I: IntoIterator<Item = (String, u32)>>(
+    mut w: W,
+    entries: I,
+) -> io::Result<()> {
     use crate::lookup::{fnv64a_basis, normalize_id, FNV_OFFSET, FNV_VERIFY_BASIS};
 
     let mut recs: Vec<(u64, u32, u32)> = entries
-        .iter()
+        .into_iter()
         .filter_map(|(id, doc)| {
-            let n = normalize_id(id);
+            let n = normalize_id(&id);
             if n.is_empty() {
                 return None;
             }
             Some((
                 fnv64a_basis(&n, FNV_OFFSET),
                 fnv64a_basis(&n, FNV_VERIFY_BASIS) as u32,
-                *doc,
+                doc,
             ))
         })
         .collect();
@@ -480,6 +506,162 @@ pub fn write_lookup<W: Write>(mut w: W, entries: &[(String, u32)]) -> io::Result
     }
     Ok(())
 }
+
+/// `RRSC` sort-column store magic.
+pub(crate) const SORTCOLS_MAGIC: &[u8; 4] = b"RRSC";
+
+/// One sort column's dense values, in doc-ID order. The variant selects the
+/// on-disk value type (`u16`/`u32`/`i32`/`f32`); every column in a store must hold
+/// the same number of values (one per doc). See `SORTCOLS.md`.
+pub enum ColumnValues {
+    /// Unsigned 16-bit values.
+    U16(Vec<u16>),
+    /// Unsigned 32-bit values.
+    U32(Vec<u32>),
+    /// Signed 32-bit values.
+    I32(Vec<i32>),
+    /// IEEE-754 32-bit float values.
+    F32(Vec<f32>),
+}
+
+impl ColumnValues {
+    /// Number of values (== the store's row/doc count).
+    fn len(&self) -> usize {
+        match self {
+            ColumnValues::U16(v) => v.len(),
+            ColumnValues::U32(v) => v.len(),
+            ColumnValues::I32(v) => v.len(),
+            ColumnValues::F32(v) => v.len(),
+        }
+    }
+
+    /// The on-disk value-type code (`1`=u16, `2`=u32, `3`=i32, `4`=f32).
+    fn type_code(&self) -> u8 {
+        match self {
+            ColumnValues::U16(_) => 1,
+            ColumnValues::U32(_) => 2,
+            ColumnValues::I32(_) => 3,
+            ColumnValues::F32(_) => 4,
+        }
+    }
+
+    /// Width in bytes of one stored value.
+    fn width(&self) -> usize {
+        match self {
+            ColumnValues::U16(_) => 2,
+            _ => 4,
+        }
+    }
+
+    /// Writes the dense values to `w` in doc-ID order, little-endian.
+    fn write_to<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        match self {
+            ColumnValues::U16(v) => {
+                for x in v {
+                    w.write_all(&x.to_le_bytes())?;
+                }
+            }
+            ColumnValues::U32(v) => {
+                for x in v {
+                    w.write_all(&x.to_le_bytes())?;
+                }
+            }
+            ColumnValues::I32(v) => {
+                for x in v {
+                    w.write_all(&x.to_le_bytes())?;
+                }
+            }
+            ColumnValues::F32(v) => {
+                for x in v {
+                    w.write_all(&x.to_le_bytes())?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One named sort column: a display name plus its dense values in doc-ID order.
+pub struct SortColumn {
+    /// Column display name.
+    pub name: String,
+    /// Dense values, one per doc, in doc-ID order.
+    pub values: ColumnValues,
+}
+
+/// Writes the `RRSC` sort-column store for `cols` to `w` — the build-side mirror of
+/// [`crate::sortcols::SortCols`]. Columns are laid out contiguously after a name
+/// string blob, each a dense fixed-width array indexed by doc ID. Every column must
+/// hold the same number of values (one per doc); otherwise this errors. See
+/// `SORTCOLS.md`.
+pub fn write_sortcols<W: Write>(mut w: W, cols: Vec<SortColumn>) -> io::Result<()> {
+    let rows = cols.first().map(|c| c.values.len()).unwrap_or(0);
+    if cols.iter().any(|c| c.values.len() != rows) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sortcols columns must all have the same length",
+        ));
+    }
+
+    // String blob of column names, in column order.
+    let mut blob: Vec<u8> = Vec::new();
+    let mut name_spans: Vec<(u32, u16)> = Vec::with_capacity(cols.len());
+    for c in &cols {
+        let off = blob.len() as u32;
+        blob.extend_from_slice(c.name.as_bytes());
+        name_spans.push((off, c.name.len() as u16));
+    }
+
+    let str_blob_off = HEADER_SIZE_SORTCOLS + cols.len() * COL_ENTRY_SORTCOLS;
+    let data_start = (str_blob_off + blob.len()) as u64;
+
+    // Header (16 B).
+    w.write_all(SORTCOLS_MAGIC)?;
+    w.write_all(&1u16.to_le_bytes())?; // version
+    w.write_all(&(cols.len() as u16).to_le_bytes())?;
+    w.write_all(&(rows as u32).to_le_bytes())?;
+    w.write_all(&(blob.len() as u32).to_le_bytes())?;
+
+    // Column table (24 B each) with absolute data offsets, in column order.
+    let mut off = data_start;
+    for (c, (name_off, name_len)) in cols.iter().zip(&name_spans) {
+        w.write_all(&name_off.to_le_bytes())?;
+        w.write_all(&name_len.to_le_bytes())?;
+        w.write_all(&[c.values.type_code()])?;
+        w.write_all(&[0u8])?; // pad
+        w.write_all(&off.to_le_bytes())?;
+        w.write_all(&(rows as u32).to_le_bytes())?;
+        w.write_all(&0u32.to_le_bytes())?; // reserved
+        off += (rows * c.values.width()) as u64;
+    }
+
+    w.write_all(&blob)?;
+
+    // Data: each column's dense values, in column order (matching the offsets).
+    for c in &cols {
+        c.values.write_to(&mut w)?;
+    }
+    Ok(())
+}
+
+/// Writes a one-column `u32` `RRSC` store named `"primary"` mapping a secondary
+/// doc-ID space back to the primary one: `primary_of_secondary[secondary_id]` is the
+/// primary doc ID. This is the permutation a [secondary full index](SORTCOLS.md)
+/// uses to fetch primary-keyed records/facets for its results.
+pub fn write_perm<W: Write>(w: W, primary_of_secondary: Vec<u32>) -> io::Result<()> {
+    write_sortcols(
+        w,
+        vec![SortColumn {
+            name: "primary".to_string(),
+            values: ColumnValues::U32(primary_of_secondary),
+        }],
+    )
+}
+
+/// `RRSC` header size in bytes.
+const HEADER_SIZE_SORTCOLS: usize = 16;
+/// `RRSC` column-table entry size in bytes.
+const COL_ENTRY_SORTCOLS: usize = 24;
 
 /// Chunked build: doc-ID-range partials + merge into one standard RRS.
 ///
@@ -750,6 +932,25 @@ mod tests {
         for (d, rec) in recs.iter().enumerate() {
             assert_eq!(&bin[off(d)..off(d + 1)], rec.as_slice());
         }
+    }
+
+    #[test]
+    fn write_lookup_streaming_matches_slice_writer() {
+        // Mixed casing, URL-prefixed and bare DOIs, an empty identifier (dropped),
+        // and duplicate hashes across docs (exercising the (hash, doc) tiebreak).
+        let entries: Vec<(String, u32)> = vec![
+            ("10.1234/AbCd".to_string(), 7),
+            ("https://doi.org/10.1/x".to_string(), 2),
+            ("".to_string(), 99),
+            ("10.1234/abcd".to_string(), 1),
+            ("10.5/zzz".to_string(), 5),
+        ];
+        let mut want = Vec::new();
+        write_lookup(&mut want, &entries).unwrap();
+        let mut got = Vec::new();
+        // Owned iterator (no backing slice retained) — the streaming path.
+        write_lookup_streaming(&mut got, entries.into_iter()).unwrap();
+        assert_eq!(got, want, "streaming lookup differs from slice writer");
     }
 
     #[test]
