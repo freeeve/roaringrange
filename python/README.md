@@ -1,24 +1,36 @@
 # roaringrange (Python)
 
-Build **static, range-fetchable full-text search datasets** from Python, then
-search millions of records **in the browser with no backend**. These bindings
-wrap the core Rust `build` module, so the files they emit are byte-identical to
-the Go and Rust builders and are read by the same WASM reader.
+Build **static, range-fetchable search datasets** from Python, then search
+millions of records **in the browser with no backend**. These bindings wrap the
+core Rust `build` module, so the files they emit are byte-identical to the Go and
+Rust builders and are read by the same WASM reader. Two index types: a **trigram
+text index** (`Builder`) and a **similarity / vector index** (`VectorBuilder`).
 
 ## What it produces
 
-A `Builder.build(out_dir)` writes the four files the reader serves over HTTP
-Range:
+`Builder.build(out_dir)` writes the four files the text reader serves over HTTP
+Range; `VectorBuilder.build(path)` writes one `.rrvi` similarity index:
 
 | file | format | contents |
 |---|---|---|
 | `index.rrs`  | `RRSI` | trigram text index (popularity-split postings) |
 | `index.rrf`  | `RRSF` | facet sidecar (field → category → doc-ID bitmap, with counts) |
 | `records.idx` / `records.bin` | `RRSR` | per-doc record bytes (your encoding) |
+| `*.rrvi` | `RRVI` | IVFPQ similarity index (range-fetched coarse clusters + PQ codes) |
 
 Upload them to S3/CloudFront and point the [WASM reader](../rust) at the URLs.
 
-## Install (dev)
+## Install
+
+Prebuilt **abi3 wheels** (one wheel for CPython 3.8+) are published to PyPI:
+
+```sh
+pip install roaringrange
+```
+
+CI builds and tests the extension on **CPython 3.12, 3.13, and 3.14**.
+
+### From source (dev)
 
 ```sh
 cd python
@@ -48,6 +60,35 @@ print(stats)                   # BuildStats(docs=..., ngrams=..., fields=...)
 
 `rr.tokenize(text, gram_size=3)` returns the n-gram keys a string maps to — useful
 for understanding why a query does or doesn't match.
+
+## Vector / similarity search
+
+`VectorBuilder` trains an IVFPQ index over your embeddings and writes a single
+`.rrvi` file that the WASM reader range-fetches like the text index. Use the
+**same `doc_id`** as the text index so a vector hit maps to the same record (and
+can hybridize with trigram search). Vectors are L2-normalized for the default
+`"ip"` (cosine) metric.
+
+```python
+import roaringrange as rr
+
+vb = rr.VectorBuilder(dim=256, nlist=4096, m=32, metric="ip")  # m must divide dim
+for doc_id, embedding in enumerate(embeddings):     # embeddings: any float sequences
+    vb.add(doc_id, embedding.tolist())              # numpy row → list of floats
+# or in one call: vb.add_many([(i, e.tolist()) for i, e in enumerate(embeddings)])
+
+stats = vb.build("out/vectors.rrvi")
+print(stats)   # VectorBuildStats(vectors=..., dim=256, nlist=..., m=32, nbits=8)
+```
+
+Parameters: `nlist` coarse clusters (≈ `4·√N`, clamped to the vector count),
+`m` PQ subquantizers (must divide `dim`), `nbits` (1–8) → `2^nbits` codes per
+subspace, `metric` `"ip"`/`"cosine"` or `"l2"`. Training is deterministic
+(`seed`, `kmeans_iters`). One `.rrvi` per embedding model — each model is a
+different vector space. See [`../VECTORS.md`](../VECTORS.md) for the byte layout.
+
+This pure-Rust trainer suits small/medium corpora and tests; at very large scale
+train with FAISS and export the same `RRVI` layout (the reader is identical).
 
 ## Notes
 

@@ -1,0 +1,100 @@
+"""Smoke tests for the roaringrange PyO3 bindings.
+
+Run with `pytest python/tests`. They exercise both builders end-to-end and
+validate the files by their magic / header bytes, so CI can run them against the
+prebuilt abi3 wheel on every supported CPython (3.12–3.14).
+"""
+import math
+import struct
+
+import pytest
+import roaringrange as rr
+
+
+def test_tokenize_returns_keys():
+    # "abc" maps to a single trigram key (see FORMAT.md test vectors); a 2-char
+    # string yields none.
+    assert rr.tokenize("abc") == [6382179]
+    assert rr.tokenize("ab") == []
+
+
+def test_text_builder_writes_dataset(tmp_path):
+    b = rr.Builder(gram_size=3)
+    b.add(rank=10, text="hello world", record=b'{"t":"hello"}', facets={"year": ["2020"]})
+    b.add(rank=5, text="goodbye world", record=b'{"t":"bye"}', facets={"year": ["2021"]})
+    assert len(b) == 2
+
+    stats = b.build(str(tmp_path))
+    assert stats.docs == 2
+    assert stats.fields == 1
+    assert stats.ngrams > 0
+
+    assert (tmp_path / "index.rrs").read_bytes()[:4] == b"RRSI"
+    assert (tmp_path / "index.rrf").read_bytes()[:4] == b"RRSF"
+    assert (tmp_path / "records.idx").read_bytes()[:4] == b"RRSR"
+    assert (tmp_path / "records.bin").exists()
+
+
+def _unit_vectors(n, dim, seed=42):
+    x = seed
+    out = []
+    for i in range(n):
+        v = []
+        for _ in range(dim):
+            x ^= (x >> 12) & 0xFFFFFFFFFFFFFFFF
+            x ^= (x << 25) & 0xFFFFFFFFFFFFFFFF
+            x ^= (x >> 27) & 0xFFFFFFFFFFFFFFFF
+            x &= 0xFFFFFFFFFFFFFFFF
+            v.append(((x * 0x2545F4914F6CDD1D) & 0xFFFFFFFFFFFFFFFF) / 2**64 - 0.5)
+        norm = math.sqrt(sum(c * c for c in v)) or 1.0
+        out.append((i, [c / norm for c in v]))
+    return out
+
+
+def test_vector_builder_writes_rrvi(tmp_path):
+    dim, nlist, m, n = 8, 4, 4, 60
+    vb = rr.VectorBuilder(dim=dim, nlist=nlist, m=m, nbits=8, metric="ip")
+    vb.add_many(_unit_vectors(n, dim))
+    assert len(vb) == n
+
+    out = tmp_path / "vectors.rrvi"
+    stats = vb.build(str(out))
+    assert stats.vectors == n
+    assert (stats.dim, stats.nlist, stats.m, stats.nbits) == (dim, nlist, m, 8)
+
+    head = out.read_bytes()[:48]
+    assert head[:4] == b"RRVI"
+    version, metric, _flags = struct.unpack_from("<HBB", head, 4)
+    h_dim, h_nlist, h_m = struct.unpack_from("<III", head, 8)
+    (h_n,) = struct.unpack_from("<Q", head, 24)
+    assert version == 1
+    assert metric == 0  # inner product
+    assert (h_dim, h_nlist, h_m, head[20], h_n) == (dim, nlist, m, 8, n)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(dim=8, nlist=4, m=3),  # m does not divide dim
+        dict(dim=8, nlist=4, m=4, nbits=9),  # nbits out of range
+        dict(dim=8, nlist=4, m=4, metric="bogus"),  # unknown metric
+        dict(dim=0, nlist=4, m=1),  # dim zero
+    ],
+)
+def test_vector_builder_rejects_bad_params(kwargs):
+    with pytest.raises(ValueError):
+        rr.VectorBuilder(**kwargs)
+
+
+def test_vector_builder_rejects_wrong_length(tmp_path):
+    vb = rr.VectorBuilder(dim=8, nlist=2, m=2)
+    with pytest.raises(ValueError):
+        vb.add(0, [1.0, 2.0])  # length 2 != dim 8
+
+
+def test_vector_builder_l2_metric(tmp_path):
+    vb = rr.VectorBuilder(dim=4, nlist=2, m=2, metric="l2")
+    vb.add_many(_unit_vectors(20, 4))
+    out = tmp_path / "v.rrvi"
+    vb.build(str(out))
+    assert out.read_bytes()[6] == 1  # metric byte == L2

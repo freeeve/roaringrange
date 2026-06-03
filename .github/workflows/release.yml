@@ -1,0 +1,70 @@
+name: Release (PyPI)
+
+# Build the Python extension wheels for every platform and publish them to PyPI
+# on a version tag. The crate builds an abi3 wheel (one per platform, good for
+# CPython 3.8+), so there is no per-Python-version matrix here.
+#
+# Publishing uses PyPI Trusted Publishing (OIDC) — no API token. One-time setup
+# on PyPI: create the `roaringrange` project's trusted publisher pointing at this
+# repo + workflow (`release.yml`) + environment `pypi`. Tag a release to ship:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Note: only wheels are published (no sdist). The Python crate depends on the
+# core Rust crate by a local path (`../rust`), which cannot be packaged into a
+# buildable sdist; publish the core crate to crates.io first if an sdist is
+# wanted later.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: wheels (${{ matrix.platform.runner }} ${{ matrix.platform.target }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { runner: ubuntu-latest, target: aarch64, manylinux: auto }
+          - { runner: macos-13, target: x86_64, manylinux: '' }
+          - { runner: macos-14, target: aarch64, manylinux: '' }
+          - { runner: windows-latest, target: x64, manylinux: '' }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist
+          manylinux: ${{ matrix.platform.manylinux }}
+          sccache: 'true'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
+          path: python/dist/*.whl
+
+  publish:
+    name: Publish to PyPI
+    needs: wheels
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/roaringrange
+    permissions:
+      id-token: write # required for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

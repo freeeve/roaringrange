@@ -18,7 +18,7 @@
 //! stats = b.build("out/")   # writes out/index.rrs, index.rrf, records.idx, records.bin
 //! ```
 
-use pyo3::exceptions::PyIOError;
+use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 use roaring::RoaringBitmap;
 use roaringrange_core::build::{
@@ -26,6 +26,8 @@ use roaringrange_core::build::{
     DEFAULT_HEAD_BOUNDARY,
 };
 use roaringrange_core::ngram_keys;
+use roaringrange_core::vector::{METRIC_IP, METRIC_L2};
+use roaringrange_core::{build_ivfpq, IvfpqParams, VectorBuildError};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::Path;
@@ -211,6 +213,155 @@ fn tokenize(text: &str, gram_size: usize) -> Vec<u64> {
     ngram_keys(text, gram_size)
 }
 
+/// Summary of a completed vector-index build, returned by [`VectorBuilder::build`].
+#[pyclass]
+struct VectorBuildStats {
+    /// Number of vectors indexed.
+    #[pyo3(get)]
+    vectors: usize,
+    /// Vector dimensionality.
+    #[pyo3(get)]
+    dim: usize,
+    /// Coarse (IVF) clusters actually trained (clamped to the vector count).
+    #[pyo3(get)]
+    nlist: usize,
+    /// PQ subquantizers.
+    #[pyo3(get)]
+    m: usize,
+    /// Bits per PQ code.
+    #[pyo3(get)]
+    nbits: u8,
+}
+
+#[pymethods]
+impl VectorBuildStats {
+    fn __repr__(&self) -> String {
+        format!(
+            "VectorBuildStats(vectors={}, dim={}, nlist={}, m={}, nbits={})",
+            self.vectors, self.dim, self.nlist, self.m, self.nbits
+        )
+    }
+}
+
+/// Accumulates `(doc_id, vector)` pairs, then trains and writes an `RRVI`
+/// similarity (vector) index — the range-fetchable sibling of the `RRS` text
+/// index. `doc_id` must equal the text index's doc ID so hits map to the same
+/// records. Wraps the core IVFPQ trainer; see `VECTORS.md` for the byte layout.
+#[pyclass]
+struct VectorBuilder {
+    params: IvfpqParams,
+    vectors: Vec<(u32, Vec<f32>)>,
+}
+
+#[pymethods]
+impl VectorBuilder {
+    /// Creates a vector-index builder. `dim` is the (fixed) vector dimensionality;
+    /// `nlist` the number of coarse clusters (a good default is `≈ 4·√N`, and it is
+    /// clamped to the vector count); `m` the number of PQ subquantizers (must
+    /// divide `dim`). `nbits` (1–8) sets `2^nbits` codes per subspace; `metric` is
+    /// `"ip"`/`"cosine"` (inner product on L2-normalized vectors) or `"l2"`;
+    /// `kmeans_iters` and `seed` make the (deterministic) training reproducible.
+    #[new]
+    #[pyo3(signature = (dim, nlist, m, nbits = 8, metric = "ip", kmeans_iters = 25, seed = None))]
+    fn new(
+        dim: usize,
+        nlist: usize,
+        m: usize,
+        nbits: u8,
+        metric: &str,
+        kmeans_iters: usize,
+        seed: Option<u64>,
+    ) -> PyResult<Self> {
+        if dim == 0 || m == 0 || !dim.is_multiple_of(m) {
+            return Err(PyValueError::new_err(
+                "need dim > 0, m > 0, and m to divide dim",
+            ));
+        }
+        if nbits == 0 || nbits > 8 {
+            return Err(PyValueError::new_err("nbits must be in 1..=8"));
+        }
+        if nlist == 0 {
+            return Err(PyValueError::new_err("nlist must be >= 1"));
+        }
+        let mut params = IvfpqParams::new(dim, nlist, m);
+        params.nbits = nbits;
+        params.metric = parse_metric(metric)?;
+        params.kmeans_iters = kmeans_iters;
+        if let Some(s) = seed {
+            params.seed = s;
+        }
+        Ok(VectorBuilder {
+            params,
+            vectors: Vec::new(),
+        })
+    }
+
+    /// Stages one vector under `doc_id`. `vector` must have length `dim` (any
+    /// sequence of floats — a Python list, tuple, or numpy row via `.tolist()`).
+    fn add(&mut self, doc_id: u32, vector: Vec<f32>) -> PyResult<()> {
+        if vector.len() != self.params.dim {
+            return Err(PyValueError::new_err(format!(
+                "vector has length {}, expected dim {}",
+                vector.len(),
+                self.params.dim
+            )));
+        }
+        self.vectors.push((doc_id, vector));
+        Ok(())
+    }
+
+    /// Stages many `(doc_id, vector)` pairs at once (one call instead of a Python
+    /// loop). Every vector must have length `dim`.
+    fn add_many(&mut self, items: Vec<(u32, Vec<f32>)>) -> PyResult<()> {
+        for (id, v) in items {
+            self.add(id, v)?;
+        }
+        Ok(())
+    }
+
+    /// Number of staged vectors.
+    fn __len__(&self) -> usize {
+        self.vectors.len()
+    }
+
+    /// Trains the IVFPQ index over the staged vectors and writes it to
+    /// `out_path` (an `.rrvi` file; parent directories are created). Returns a
+    /// [`VectorBuildStats`]. Raises `ValueError` for empty input or invalid params.
+    fn build(&self, out_path: &str) -> PyResult<VectorBuildStats> {
+        let idx = build_ivfpq(&self.vectors, &self.params).map_err(build_err)?;
+        let path = Path::new(out_path);
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(io_err)?;
+            }
+        }
+        idx.write(File::create(path).map_err(io_err)?)
+            .map_err(io_err)?;
+        Ok(VectorBuildStats {
+            vectors: idx.len() as usize,
+            dim: idx.dim(),
+            nlist: idx.nlist(),
+            m: idx.subquantizers(),
+            nbits: idx.nbits(),
+        })
+    }
+}
+
+/// Maps a metric name to the core's metric tag.
+fn parse_metric(s: &str) -> PyResult<u8> {
+    match s.to_ascii_lowercase().as_str() {
+        "ip" | "cosine" | "inner_product" | "dot" => Ok(METRIC_IP),
+        "l2" | "euclidean" => Ok(METRIC_L2),
+        other => Err(PyValueError::new_err(format!(
+            "unknown metric {other:?}; use 'ip' (cosine) or 'l2'"
+        ))),
+    }
+}
+
+fn build_err(e: VectorBuildError) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
 fn io_err(e: std::io::Error) -> PyErr {
     PyIOError::new_err(e.to_string())
 }
@@ -219,6 +370,8 @@ fn io_err(e: std::io::Error) -> PyErr {
 fn roaringrange(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Builder>()?;
     m.add_class::<BuildStats>()?;
+    m.add_class::<VectorBuilder>()?;
+    m.add_class::<VectorBuildStats>()?;
     m.add_function(wrap_pyfunction!(tokenize, m)?)?;
     Ok(())
 }

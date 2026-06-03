@@ -45,12 +45,18 @@ jobs:
       - name: Test
         working-directory: rust
         run: cargo test
+      - name: Test (vector feature)
+        working-directory: rust
+        run: cargo test --features vector
       - name: Fmt
         working-directory: rust
         run: cargo fmt --check
       - name: Clippy
         working-directory: rust
         run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy (vector feature)
+        working-directory: rust
+        run: cargo clippy --all-targets --features vector -- -D warnings
       - name: Builder fmt
         working-directory: examples/openalex/builder
         run: cargo fmt --check
@@ -60,3 +66,50 @@ jobs:
       - name: Builder build
         working-directory: examples/openalex/builder
         run: cargo build --release
+
+  # Build the Python extension once. It is an abi3 wheel (one wheel for CPython
+  # 3.8+), so a single build is installed and tested on every supported version
+  # below — this is what proves the abi3 forward-compatibility we ship on.
+  python-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build abi3 wheel
+        working-directory: python
+        run: |
+          pip install maturin
+          maturin build --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel
+          path: python/dist/*.whl
+
+  # Install the prebuilt abi3 wheel and run the test suite on each supported
+  # CPython (3.12–3.14). No Rust build here — it validates that the one wheel
+  # imports and works across versions.
+  python-test:
+    needs: python-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-wheel
+          path: dist
+      - name: Install wheel + test
+        run: |
+          python -m pip install pytest
+          python -m pip install --no-index --find-links dist roaringrange
+          pytest python/tests -q

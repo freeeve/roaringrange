@@ -77,8 +77,9 @@ ordering and facets.
 | path | what |
 |---|---|
 | `go/` | core Go module (`github.com/freeeve/roaringrange`): `Transcode` (FTSR→RRS), `Open`/`Index` reference reader, `WriteFacets`, `NgramKeys` |
-| `FORMAT.md`, `FACETS.md`, `RECORDS.md` | the frozen on-disk specs (`RRSI` index, `RRSF` facet sidecar, `RRSR` record store) |
-| `rust/` | Rust crate `roaringrange`: reader (`Catalog` over `Index`/`FacetIndex`/`RecordStore`) + native `build` writers; both exposed to WASM (`wasm-pack`) |
+| `FORMAT.md`, `FACETS.md`, `RECORDS.md`, `VECTORS.md` | the frozen on-disk specs (`RRSI` index, `RRSF` facet sidecar, `RRSR` record store, `RRVI` vector index) |
+| `rust/` | Rust crate `roaringrange`: reader (`Catalog` over `Index`/`FacetIndex`/`RecordStore`) + native `build` writers; both exposed to WASM (`wasm-pack`). Optional `vector` feature adds the `RRVI` similarity-search reader + IVFPQ trainer |
+| `python/` | PyO3 bindings (`pip install roaringrange`): `Builder` (text index) + `VectorBuilder` (similarity index) over the core build writers |
 | `go/conformance/` | cross-library test: roaringsearch build ⇄ roaringrange(go) read must agree |
 | `examples/openalex/` | the OpenAlex demo: Go loader, parallel Rust `builder/`, `download.sh`, static web UI |
 | `docs/` | architecture diagrams (SVG) |
@@ -196,6 +197,23 @@ Returning *just result IDs* needs the intersection to run server-side (a thin
 Lambda@Edge over in-region postings) — the one lever that beats the result-set
 floor.
 
+## Vector / similarity search (optional)
+
+Beyond trigram text search, the crate has a **range-fetchable similarity index**
+in the same ethos: an `RRVI` (IVFPQ) file whose coarse centroids and PQ codebooks
+boot once, after which each query range-fetches only the `nprobe` nearest
+clusters' codes and scans them with asymmetric distance computation — top-k
+nearest vectors in ~constant bytes, independent of corpus size. `vector_id ==
+doc_id`, so a hit reuses the same record store and can hybridize with the trigram
+result set.
+
+Build it from Rust (`build_ivfpq`, behind the `vector` feature) or Python
+(`VectorBuilder`); the reader [`VectorIndex`](rust/src/vector.rs) is pure Rust and
+wasm-safe. See [`VECTORS.md`](VECTORS.md). The pure-Rust IVFPQ trainer covers
+small/medium corpora and tests (recall@10 ≈ 0.87 vs an exact-cosine baseline);
+training with FAISS and the in-browser query path are in progress
+([`tasks/004_vector_search`](tasks)).
+
 ## Development
 
 Enable the formatting pre-commit hook (runs `gofmt` + `cargo fmt --check` on
@@ -206,7 +224,9 @@ git config core.hooksPath .githooks
 ```
 
 CI runs `go test ./...` in `go/`, the `go/conformance/` module, `go vet` on the
-example, and `cargo test` + `fmt` + `clippy` for the reader.
+example, `cargo test` + `fmt` + `clippy` for the reader (a second pass with
+`--features vector`), and builds + tests the Python extension on CPython
+3.12–3.14.
 
 ## License
 

@@ -19,4 +19,6 @@ crate-type = ["cdylib"]
 # CPython 3.8+ instead of one per minor version.
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
 roaring = "0.11"
-roaringrange_core = { package = "roaringrange", path = "../rust" }
+# `vector` enables the core's IVFPQ trainer/writer (`build_ivfpq`/`Ivfpq`) that
+# the `VectorBuilder` binding wraps. Adds no third-party deps (pure-Rust k-means).
+roaringrange_core = { package = "roaringrange", path = "../rust", features = ["vector"] }

@@ -14,6 +14,9 @@ keywords = ["search", "full-text", "roaring", "static-site", "serverless"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Text Processing :: Indexing",
     "License :: OSI Approved :: MIT License",
 ]
