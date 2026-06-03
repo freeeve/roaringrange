@@ -11,12 +11,15 @@ full-text search on roaring bitmaps. One crate, three roles:
   [`RecordStore`](src/records.rs), and the [`Catalog`](src/catalog.rs) facade that
   bundles all three; each answers a query with a few small ranged reads.
 - **WASM bindings** (the `wasm` feature, [`wasm.rs`](src/wasm.rs)) — `RrsIndex` /
-  `RrsCatalog` / `RrsRecords` for the browser, built with `wasm-pack`.
+  `RrsCatalog` / `RrsRecords` for the browser, built with `wasm-pack`. With the
+  `vector` feature added, also `RrviIndex` (similarity search).
 - **vector search** (the `vector` feature, off by default) — a range-fetchable
   IVFPQ **similarity** index: the pure-Rust reader [`VectorIndex`](src/vector.rs)
-  (boot → `nprobe` nearest clusters → asymmetric-distance scan → top-k, wasm-safe)
-  and a native, dependency-free IVFPQ trainer/writer [`build_ivfpq`](src/vector_build.rs).
-  Adds no third-party dependencies. See [`../VECTORS.md`](../VECTORS.md).
+  (boot → `nprobe` nearest clusters → asymmetric-distance scan → top-k), its
+  browser binding `RrviIndex` (`wasm-pack build --features "wasm vector"`), a
+  native dependency-free IVFPQ trainer [`build_ivfpq`](src/vector_build.rs), and a
+  FAISS-export path [`build_ivfpq_from_parts`](src/vector_build.rs). Adds no
+  third-party dependencies. See [`../VECTORS.md`](../VECTORS.md).
 
 See [`../FORMAT.md`](../FORMAT.md), [`../FACETS.md`](../FACETS.md), and
 [`../RECORDS.md`](../RECORDS.md) for the frozen on-disk specs (and

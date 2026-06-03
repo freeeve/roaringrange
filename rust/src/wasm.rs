@@ -23,6 +23,8 @@ use crate::lookup::Lookup;
 use crate::records::RecordStore;
 use crate::secondary::{SecondaryCursor, SecondaryIndex};
 use crate::sortcols::SortCols;
+#[cfg(feature = "vector")]
+use crate::vector::VectorIndex;
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint32Array, Uint8Array};
 use roaring::RoaringBitmap;
 use wasm_bindgen::prelude::*;
@@ -1118,5 +1120,99 @@ impl RrsSecondaryCursor {
             .load_tail()
             .await
             .map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
+/// A range-fetchable RRVI similarity (vector) index exposed to JavaScript. Built
+/// with `wasm-pack build --target web --features "wasm vector"`.
+#[cfg(feature = "vector")]
+#[wasm_bindgen]
+pub struct RrviIndex {
+    inner: VectorIndex<WasmFetch>,
+}
+
+#[cfg(feature = "vector")]
+#[wasm_bindgen]
+impl RrviIndex {
+    /// Boots the RRVI index at `url`: one boot read of the coarse centroids, PQ
+    /// codebooks, optional OPQ rotation, and cluster directory. Returns a
+    /// `Promise<RrviIndex>`.
+    pub async fn open(url: String) -> Result<RrviIndex, JsError> {
+        let inner = VectorIndex::open(WasmFetch::new(url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrviIndex { inner })
+    }
+
+    /// Searches for the `k` nearest vectors to `query` (a `Float32Array` of length
+    /// `dim`), probing the `nprobe` nearest clusters in one concurrent wave of
+    /// ranged reads. Resolves to an `RrviHits` with aligned `ids`/`scores`,
+    /// best-first. An inner-product index normalizes the query for you; `doc_id`
+    /// matches the text index's doc ID, so hits map straight to the record store.
+    pub async fn search(
+        &self,
+        query: Vec<f32>,
+        k: usize,
+        nprobe: usize,
+    ) -> Result<RrviHits, JsError> {
+        let hits = self
+            .inner
+            .search(&query, k, nprobe)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let mut ids = Vec::with_capacity(hits.len());
+        let mut scores = Vec::with_capacity(hits.len());
+        for h in hits {
+            ids.push(h.doc_id);
+            scores.push(h.score);
+        }
+        Ok(RrviHits { ids, scores })
+    }
+
+    /// Vector dimensionality the index was built with.
+    pub fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+
+    /// Number of coarse (IVF) clusters.
+    pub fn nlist(&self) -> usize {
+        self.inner.nlist()
+    }
+
+    /// Total number of indexed vectors.
+    pub fn len(&self) -> u32 {
+        self.inner.len() as u32
+    }
+
+    /// Whether the index holds no vectors.
+    #[wasm_bindgen(js_name = isEmpty)]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+/// The result of [`RrviIndex::search`]: aligned doc IDs and similarity scores,
+/// best-first. In JavaScript `ids` is a `Uint32Array` and `scores` a
+/// `Float32Array`.
+#[cfg(feature = "vector")]
+#[wasm_bindgen]
+pub struct RrviHits {
+    ids: Vec<u32>,
+    scores: Vec<f32>,
+}
+
+#[cfg(feature = "vector")]
+#[wasm_bindgen]
+impl RrviHits {
+    /// The matching doc IDs (`Uint32Array`), best-first.
+    #[wasm_bindgen(getter)]
+    pub fn ids(&self) -> Vec<u32> {
+        self.ids.clone()
+    }
+
+    /// The similarity scores (`Float32Array`) aligned with `ids`; higher is better.
+    #[wasm_bindgen(getter)]
+    pub fn scores(&self) -> Vec<f32> {
+        self.scores.clone()
     }
 }

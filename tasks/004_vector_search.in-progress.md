@@ -238,3 +238,22 @@ RRVI without retraining in Rust.
 Remaining: **4** model2vec build-time embedder (mode 2); **5** wasm bindings for
 the reader + in-browser model2vec; **6** open-model corpus embed + Lambda (mode 1);
 **7** re-rank blob + trigram hybrid.
+
+### 2026-06-03 — Step 5 (reader half): wasm `RrviIndex` binding
+The browser read path for similarity search.
+
+- **`RrviIndex`** in `wasm.rs` (gated `#[cfg(feature = "vector")]`, so it appears
+  only with `--features "wasm vector"`): `open(url)`, `search(Float32Array query,
+  k, nprobe) -> RrviHits`, plus `dim/nlist/len/isEmpty`. `RrviHits` exposes aligned
+  `ids` (Uint32Array) and `scores` (Float32Array), best-first. Reuses `WasmFetch`,
+  mirroring `RrsIndex`. Build: `wasm-pack build --target web --features "wasm vector"`.
+- Verified: compiles + clippy-clean for `wasm32-unknown-unknown` under both
+  `"wasm vector"` (binding present) and `"wasm"` alone (binding gated out). The
+  binding is thin glue over the natively-tested `VectorIndex` (8 tests + the FAISS
+  cross-check); a full browser test needs wasm-pack + a served file (as with
+  `RrsIndex`, exercised via the live demo) and is deferred.
+
+Step 5 remainder = the in-browser **model2vec** query embedder (the hard part: a
+wasm tokenizer). Demo wiring waits on a query embedder (mode 1 Lambda or mode 2
+model2vec). Remaining steps: **4** model2vec (mode 2), **5b** in-browser model2vec,
+**6** open-model + Lambda (mode 1), **7** re-rank + trigram hybrid.

@@ -208,10 +208,12 @@ doc_id`, so a hit reuses the same record store and can hybridize with the trigra
 result set.
 
 Build it from Rust (`build_ivfpq`, behind the `vector` feature) or Python
-(`VectorBuilder`); the reader [`VectorIndex`](rust/src/vector.rs) is pure Rust and
-wasm-safe. See [`VECTORS.md`](VECTORS.md). The pure-Rust IVFPQ trainer covers
-small/medium corpora and tests (recall@10 ≈ 0.87 vs an exact-cosine baseline);
-training with FAISS and the in-browser query path are in progress
+(`VectorBuilder`), or train at scale with FAISS and export the same layout
+(`build_ivfpq_from_parts` / `roaringrange.write_rrvi_from_faiss`, verified against
+the reader at recall@10 ≈ 0.9995). The reader [`VectorIndex`](rust/src/vector.rs)
+is pure Rust with a browser binding (`RrviIndex`, `wasm-pack build --features
+"wasm vector"`). See [`VECTORS.md`](VECTORS.md). Still in progress: the query
+*embedder* (in-browser model2vec / a Lambda proxy) and a trigram hybrid
 ([`tasks/004_vector_search`](tasks)).
 
 ## Development
