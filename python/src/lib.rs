@@ -23,6 +23,7 @@ use pyo3::prelude::*;
 use roaring::RoaringBitmap;
 use roaringrange_core::build::{
     split_posting, write_facets, write_index, write_records, FacetCategory, FacetField,
+    DEFAULT_HEAD_BOUNDARY,
 };
 use roaringrange_core::ngram_keys;
 use std::collections::{BTreeMap, HashMap};
@@ -67,18 +68,22 @@ impl BuildStats {
 #[pyclass]
 struct Builder {
     gram_size: u16,
+    head_boundary: u32,
     docs: Vec<Doc>,
 }
 
 #[pymethods]
 impl Builder {
     /// Creates a builder. `gram_size` is the trigram window (3 is the usual
-    /// choice; it must match what the reader queries with).
+    /// choice; it must match what the reader queries with). `head_boundary` is the
+    /// doc-ID split between the head posting (the top-ranked docs, fetched first)
+    /// and the tail; it must be a multiple of 65536 and defaults to 65536.
     #[new]
-    #[pyo3(signature = (gram_size = 3))]
-    fn new(gram_size: u16) -> Self {
+    #[pyo3(signature = (gram_size = 3, head_boundary = 65536))]
+    fn new(gram_size: u16, head_boundary: u32) -> Self {
         Builder {
             gram_size: gram_size.max(1),
+            head_boundary: head_boundary.max(DEFAULT_HEAD_BOUNDARY),
             docs: Vec::new(),
         }
     }
@@ -144,7 +149,7 @@ impl Builder {
         let entries: Vec<(u64, Vec<u8>, Vec<u8>)> = index
             .into_iter()
             .map(|(key, bm)| {
-                let (head, tail) = split_posting(&bm);
+                let (head, tail) = split_posting(&bm, self.head_boundary);
                 (key, head, tail)
             })
             .collect();
@@ -153,6 +158,7 @@ impl Builder {
             File::create(dir.join("index.rrs")).map_err(io_err)?,
             self.gram_size,
             0,
+            self.head_boundary,
             entries,
         )
         .map_err(io_err)?;
@@ -166,7 +172,7 @@ impl Builder {
                     .into_iter()
                     .map(|(name, bm)| {
                         let card = bm.len() as u32;
-                        let (head, tail) = split_posting(&bm);
+                        let (head, tail) = split_posting(&bm, self.head_boundary);
                         FacetCategory {
                             name,
                             card,
@@ -178,7 +184,8 @@ impl Builder {
             })
             .collect();
         let nfields = fields.len();
-        write_facets(File::create(dir.join("index.rrf")).map_err(io_err)?, fields).map_err(io_err)?;
+        write_facets(File::create(dir.join("index.rrf")).map_err(io_err)?, fields)
+            .map_err(io_err)?;
 
         // RRSR record store.
         write_records(
