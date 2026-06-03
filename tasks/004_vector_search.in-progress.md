@@ -257,3 +257,23 @@ Step 5 remainder = the in-browser **model2vec** query embedder (the hard part: a
 wasm tokenizer). Demo wiring waits on a query embedder (mode 1 Lambda or mode 2
 model2vec). Remaining steps: **4** model2vec (mode 2), **5b** in-browser model2vec,
 **6** open-model + Lambda (mode 1), **7** re-rank + trigram hybrid.
+
+### 2026-06-03 — Step 4 (build half): model2vec embedder (mode 2)
+Corpus side of mode 2: text → static embeddings → `.rrvi`, no FAISS, no backend.
+
+- **`python/scripts/model2vec_embed.py`** (`[embed]` extra = numpy + model2vec):
+  `embed_texts(texts)` runs `minishlab/potion-retrieval-32M` (512-d, mean-pooled
+  static token vectors — no transformer); `build_rrvi_from_texts(...)` embeds and
+  builds via the in-wheel `VectorBuilder` (no FAISS). `+_demo` writes a query blob
+  for `rrvi_query`.
+- **VERIFIED end-to-end with real model2vec 0.8.2**: embedded 12 sample paper
+  titles (dim 512) → `.rrvi` → query "neural network attention model for
+  translation" via the Rust reader → top-3 = Adam, GANs, Attention/transformer
+  (the deep-learning cluster), cleanly separated from the physics/biology/
+  algorithms titles. Static embeddings cluster by token overlap as expected.
+- pyproject: added the `embed` extra.
+
+**The query side of mode 2 (5b) is the open piece** — running this exact
+model2vec recipe in the browser needs a wasm tokenizer + the token-embedding
+matrix (the spec's "biggest unknown"). Remaining: **5b** in-browser model2vec,
+**6** open-model + Lambda (mode 1), **7** re-rank + trigram hybrid.

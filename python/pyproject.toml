@@ -25,6 +25,8 @@ classifiers = [
 # For the FAISS -> RRVI export path (python/scripts/faiss_to_rrvi.py). The
 # extension wheel itself has no runtime dependencies.
 train = ["numpy>=1.21", "faiss-cpu>=1.7"]
+# For the model2vec build-time embedder (python/scripts/model2vec_embed.py).
+embed = ["numpy>=1.21", "model2vec>=0.3"]
 
 [project.urls]
 Repository = "https://github.com/freeeve/roaringrange"

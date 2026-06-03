@@ -107,6 +107,22 @@ per-vector cluster + 8-bit codes) as little-endian byte buffers — so the wheel
 needs no numpy dependency. The export is verified against the Rust reader
 (recall@10 ≈ 0.9995 vs FAISS's own search on the same index).
 
+### Embedding text (mode 2: model2vec, no backend)
+
+`python/scripts/model2vec_embed.py` embeds text with a model2vec **static** model
+(`minishlab/potion-retrieval-32M`, 512-d, mean-pooled token vectors — no
+transformer, fast on CPU) and builds a `.rrvi`. Install the extra:
+`pip install 'roaringrange[embed]'`.
+
+```python
+from model2vec_embed import build_rrvi_from_texts
+stats, _ = build_rrvi_from_texts(titles, doc_ids, "vectors.rrvi", nlist=256, m=32)
+```
+
+It's "mode 2" because the *same* model2vec recipe can run in the browser at query
+time, so similarity search needs no backend at all. The query embedding **must**
+use the identical model + pooling as the corpus, or the spaces won't match.
+
 ## Notes
 
 - **Ranking is baked in.** Doc IDs are assigned in descending `rank`, so the
