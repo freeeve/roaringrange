@@ -313,3 +313,21 @@ Mode 2 on real data, end to end.
 - Artifacts live in /tmp/oa-out (not committed); upload to S3 alongside the
   `.rrs`/`.rrf`/records like the other demo artifacts. Scaling to the full 484M is
   the multi-day embed the spec flags; 100K validates the pipeline on real data.
+
+### 2026-06-03 — Gemma (mode 1) embedder + embedder bench
+Both modes' embedders now exist in code; ready to pick the keeper per the spec
+("decide on a subset before the full embed").
+
+- **`gemma_embed.py`** (`[gemma]` extra = sentence-transformers≥5): EmbeddingGemma-
+  300M via ST with the **asymmetric** `encode_query`/`encode_document` prompts (the
+  #1 recipe-match risk) and MRL `truncate_dim` (default 512). NOT yet runnable here
+  — the model is HF-license-gated (no token/torch installed); needs license accept
+  + `HF_TOKEN` + `pip install 'roaringrange[gemma]'`.
+- **`bench_embedders.py`**: exact-cosine top-k of curated queries per embedder
+  (model2vec | gemma), keyword + paraphrase queries side by side.
+- **model2vec baseline** (20K subset): strong on keyword queries (CRISPR, GW),
+  but paraphrase queries expose the bag-of-tokens limit — "programming language
+  for statistical data analysis" misses **R**; "deep NN for recognizing objects in
+  images" misses **ResNet/ImageNet**; "Attention Is All You Need" ranks only #5.
+  This is exactly where Gemma (semantic) should win → bench it to choose.
+- Status: model2vec ✅ installed/working; Gemma ❌ (gated, needs token + install).

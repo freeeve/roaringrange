@@ -27,6 +27,9 @@ classifiers = [
 train = ["numpy>=1.21", "faiss-cpu>=1.7"]
 # For the model2vec build-time embedder (python/scripts/model2vec_embed.py).
 embed = ["numpy>=1.21", "model2vec>=0.3"]
+# For the EmbeddingGemma (mode-1) embedder (python/scripts/gemma_embed.py). The
+# model is license-gated: accept the terms on HF and `huggingface-cli login`.
+gemma = ["numpy>=1.21", "sentence-transformers>=5.0"]
 
 [project.urls]
 Repository = "https://github.com/freeeve/roaringrange"
