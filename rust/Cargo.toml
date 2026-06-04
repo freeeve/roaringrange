@@ -40,6 +40,13 @@ unicode-normalization = { version = "0.1", optional = true }
 # pulled in (no `async-await` macros).
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
 
+# FST term dictionary for the `RRTI` term-level index: maps term -> u64 posting
+# metadata, with native prefix streams and (later) a Levenshtein automaton for
+# fuzzy. Pure-Rust and wasm-safe — the same crate Tantivy/Meilisearch use.
+# Optional, behind the `terms` feature; `default-features = false` keeps the
+# optional `levenshtein`/`mmap` extras out until a step needs them.
+fst = { version = "0.4", optional = true, default-features = false }
+
 # All wasm deps stay behind the `wasm` feature; the crate builds and `cargo
 # test`s natively without it.
 wasm-bindgen = { version = "0.2", optional = true }
@@ -120,3 +127,9 @@ zstd = [
 # Pulls `unicode-normalization` for the model2vec BERT normalizer (the only extra
 # dependency in the whole vector feature).
 vector = ["dep:unicode-normalization"]
+
+# Range-fetchable term-level inverted index: the `RRTI` FST-dictionary reader and
+# the native build-side writer. Off by default; enable with `--features terms`.
+# Its only dependency is the pure-Rust `fst` crate. The reader is wasm-safe; the
+# builder is native-only (excluded from wasm32 via a cfg in lib.rs).
+terms = ["dep:fst"]

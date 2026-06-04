@@ -26,6 +26,17 @@ pub mod vector;
 #[cfg(feature = "vector")]
 pub mod model2vec;
 
+/// The `RRTI` range-fetchable term-level inverted index reader: an FST term
+/// dictionary over term-keyed roaring postings, sharing the doc-ID space with the
+/// other formats. Behind the `terms` feature; wasm-safe.
+#[cfg(feature = "terms")]
+pub mod terms;
+
+/// Native build-side writer for the `RRTI` term index (excluded from wasm).
+/// Behind the `terms` feature.
+#[cfg(all(feature = "terms", not(target_arch = "wasm32")))]
+pub mod terms_build;
+
 /// Container-level ranged reads into tail postings (search-fetch reduction).
 mod posting;
 
@@ -57,6 +68,11 @@ pub use vector_build::{
     build_ivfpq, build_ivfpq_from_parts, write_rerank, Ivfpq, IvfpqParams, IvfpqParts,
     VectorBuildError,
 };
+
+#[cfg(feature = "terms")]
+pub use terms::{tokenize, TermIndex};
+#[cfg(all(feature = "terms", not(target_arch = "wasm32")))]
+pub use terms_build::write_term_index;
 
 #[cfg(feature = "wasm")]
 mod wasm;
