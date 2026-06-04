@@ -24,6 +24,7 @@ use fst::automaton::{Automaton, Levenshtein, Str};
 use fst::{IntoStreamer, Map, Streamer};
 use futures::future::join_all;
 use roaring::RoaringBitmap;
+use rust_stemmers::{Algorithm, Stemmer};
 
 /// `RRTI` magic.
 const MAGIC: &[u8; 4] = b"RRTI";
@@ -60,6 +61,108 @@ pub fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 
+/// Header `flags` bit: the index's terms were Snowball-stemmed, so queries must stem
+/// identically (the stemmer language is the header's language byte).
+pub(crate) const FLAG_STEMMED: u16 = 1;
+/// Header `flags` bit: stop words were removed from the index, so queries drop them too.
+pub(crate) const FLAG_STOPWORDS: u16 = 2;
+
+/// A stemmer language, recorded in the header so the reader stems a query exactly as
+/// the builder stemmed the corpus. The on-disk code is stable across versions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    /// English (Snowball "english" / Porter2).
+    English,
+}
+
+impl Language {
+    /// The on-disk language byte for this language.
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Language::English => 1,
+        }
+    }
+
+    /// Maps an on-disk language byte to a [`Language`], or `None` (no/unknown stemmer).
+    fn from_u8(b: u8) -> Option<Language> {
+        match b {
+            1 => Some(Language::English),
+            _ => None,
+        }
+    }
+
+    fn algorithm(self) -> Algorithm {
+        match self {
+            Language::English => Algorithm::English,
+        }
+    }
+}
+
+/// Common English stop words, sorted for binary search. Removed from the index (and
+/// from queries) only when the index was built with stop-word removal.
+const STOP_WORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "had", "has", "have",
+    "he", "in", "is", "it", "its", "of", "on", "or", "that", "the", "this", "to", "was", "were",
+    "which", "will", "with",
+];
+
+/// Whether the lowercased token `t` is a stop word.
+fn is_stop_word(t: &str) -> bool {
+    STOP_WORDS.binary_search(&t).is_ok()
+}
+
+/// The configured token-filter chain applied after the base [`tokenize`]
+/// (SimpleTokenizer + LowerCaser): optional stop-word removal, then optional Snowball
+/// stemming. The builder (from its config) and the reader (from the header flags) build
+/// this identically, guaranteeing a query tokenizes exactly as the corpus did — the one
+/// correctness invariant of a term index.
+pub struct Tokenizer {
+    stemmer: Option<Stemmer>,
+    stopwords: bool,
+}
+
+impl Tokenizer {
+    /// The base SimpleTokenizer + LowerCaser with no stemming or stop-word removal
+    /// (an unstemmed index, or a pre-stemming v1 file whose flags are zero).
+    pub fn plain() -> Self {
+        Tokenizer {
+            stemmer: None,
+            stopwords: false,
+        }
+    }
+
+    /// A tokenizer with the given optional stemmer language and stop-word removal.
+    pub fn new(language: Option<Language>, stopwords: bool) -> Self {
+        Tokenizer {
+            stemmer: language.map(|l| Stemmer::create(l.algorithm())),
+            stopwords,
+        }
+    }
+
+    /// Builds the tokenizer the header describes from its `flags` + `language` byte.
+    fn from_header(flags: u16, language: u8) -> Self {
+        let lang = if flags & FLAG_STEMMED != 0 {
+            Language::from_u8(language)
+        } else {
+            None
+        };
+        Tokenizer::new(lang, flags & FLAG_STOPWORDS != 0)
+    }
+
+    /// Tokenizes `text`: base tokens, then drop stop words (if enabled), then stem
+    /// each surviving token (if a stemmer is configured).
+    pub fn tokenize(&self, text: &str) -> Vec<String> {
+        tokenize(text)
+            .into_iter()
+            .filter(|t| !(self.stopwords && is_stop_word(t)))
+            .map(|t| match &self.stemmer {
+                Some(s) => s.stem(&t).into_owned(),
+                None => t,
+            })
+            .collect()
+    }
+}
+
 /// A term's head posting plus the location of its (lazily fetched) tail.
 struct HeadBlock {
     head: RoaringBitmap,
@@ -78,6 +181,9 @@ pub struct TermIndex<F: RangeFetch> {
     head_boundary: u32,
     /// Number of distinct terms in the dictionary.
     term_count: u32,
+    /// The tokenizer the index was built with (from the header flags); queries are
+    /// tokenized through it so they match the indexed terms.
+    tokenizer: Tokenizer,
 }
 
 impl<F: RangeFetch> TermIndex<F> {
@@ -98,9 +204,13 @@ impl<F: RangeFetch> TermIndex<F> {
         if version != VERSION {
             return Err(IndexError::BadVersion(version));
         }
+        let flags = read_u16(&header, 6);
         let term_count = read_u32(&header, 8);
         let head_boundary = read_u32(&header, 12);
         let fst_len = read_u64(&header, 16);
+        // The language byte lives in the first reserved header byte (offset 24); a
+        // zero-flags / zero-language v1 file (pre-stemming) yields a plain tokenizer.
+        let tokenizer = Tokenizer::from_header(flags, header[24]);
         let fst_bytes = fetch.read(HEADER_SIZE as u64, fst_len as usize).await?;
         let fst =
             Map::new(fst_bytes).map_err(|_| IndexError::Malformed("invalid FST dictionary"))?;
@@ -110,6 +220,7 @@ impl<F: RangeFetch> TermIndex<F> {
             postings_offset: HEADER_SIZE as u64 + fst_len,
             head_boundary,
             term_count,
+            tokenizer,
         })
     }
 
@@ -169,7 +280,7 @@ impl<F: RangeFetch> TermIndex<F> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut terms = tokenize(query);
+        let mut terms = self.tokenizer.tokenize(query);
         terms.sort();
         terms.dedup();
         if terms.is_empty() {
@@ -324,7 +435,7 @@ impl<F: RangeFetch> TermIndex<F> {
 mod tests {
     use super::*;
     use crate::fetch::MemoryFetch;
-    use crate::terms_build::write_term_index;
+    use crate::terms_build::{write_term_index, write_term_index_with, TermIndexConfig};
     use futures::executor::block_on;
 
     /// Builds an in-memory `RRTI` over the docs at the default head boundary.
@@ -518,5 +629,59 @@ mod tests {
             block_on(ti.search_fuzzy("LEARNIMG", 1, 10)).unwrap(),
             vec![0]
         );
+    }
+
+    #[test]
+    fn stemming_makes_inflections_match() {
+        // An English-stemmed index reduces learning/learned/learns to the stem "learn",
+        // so a query for any inflection matches docs indexed with any other. The reader
+        // stems the query identically (from the header flags) — the symmetry invariant.
+        let docs = [
+            (0u32, "deep learning"),
+            (1, "she learned quickly"),
+            (2, "it learns fast"),
+            (3, "ocean depths"),
+        ];
+        let mut buf = Vec::new();
+        write_term_index_with(
+            &mut buf,
+            &docs,
+            &TermIndexConfig {
+                head_boundary: 65_536,
+                language: Some(Language::English),
+                stopwords: false,
+            },
+        )
+        .unwrap();
+        let ti = block_on(TermIndex::open(MemoryFetch::new(buf))).unwrap();
+        // "learning" -> stem "learn" -> docs 0, 1, 2 (learning / learned / learns).
+        assert_eq!(block_on(ti.search("learning", 10)).unwrap(), vec![0, 1, 2]);
+        // a different inflection of the same stem returns the same docs (and lowercases).
+        assert_eq!(block_on(ti.search("LEARNED", 10)).unwrap(), vec![0, 1, 2]);
+        // an unrelated word does not.
+        assert_eq!(block_on(ti.search("ocean", 10)).unwrap(), vec![3]);
+    }
+
+    #[test]
+    fn stopwords_dropped_from_index_and_query() {
+        let docs = [(0u32, "the cat"), (1, "a dog and a cat")];
+        let mut buf = Vec::new();
+        write_term_index_with(
+            &mut buf,
+            &docs,
+            &TermIndexConfig {
+                head_boundary: 65_536,
+                language: None,
+                stopwords: true,
+            },
+        )
+        .unwrap();
+        let ti = block_on(TermIndex::open(MemoryFetch::new(buf))).unwrap();
+        // Stop words ("the", "a", "and") were dropped from the index; "cat" remains in both.
+        assert_eq!(block_on(ti.search("cat", 10)).unwrap(), vec![0, 1]);
+        // A query of only stop words drops to nothing.
+        assert!(block_on(ti.search("the and a", 10)).unwrap().is_empty());
+        // Stop words in a query are dropped too, leaving "cat" -> docs 0, 1.
+        assert_eq!(block_on(ti.search("the cat", 10)).unwrap(), vec![0, 1]);
     }
 }

@@ -52,6 +52,10 @@ futures = { version = "0.3", default-features = false, features = ["std", "execu
 # optional `mmap` extra out, while `levenshtein` is enabled for the fuzzy
 # (edit-distance) query path.
 fst = { version = "0.4", optional = true, default-features = false, features = ["levenshtein"] }
+# Snowball stemmers for the optional `terms` stemming filter — the same pure-Rust
+# crate Tantivy uses. wasm-safe (no C), so the browser reader can stem queries to
+# match a stemmed index (build/query symmetry). Optional, pulled in by `terms`.
+rust-stemmers = { version = "1", optional = true }
 
 # All wasm deps stay behind the `wasm` feature; the crate builds and `cargo
 # test`s natively without it.
@@ -138,7 +142,7 @@ vector = ["dep:unicode-normalization"]
 # the native build-side writer. Off by default; enable with `--features terms`.
 # Its only dependency is the pure-Rust `fst` crate. The reader is wasm-safe; the
 # builder is native-only (excluded from wasm32 via a cfg in lib.rs).
-terms = ["dep:fst"]
+terms = ["dep:fst", "dep:rust-stemmers"]
 
 # Cross-format catalog hotcache: the `RRHC` boot accelerator. One small `.rrhc`
 # inlines every member's small boot region and references the few large ones, so a

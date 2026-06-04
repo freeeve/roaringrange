@@ -81,9 +81,9 @@ pub use vector_build::{
 };
 
 #[cfg(feature = "terms")]
-pub use terms::{tokenize, TermIndex};
+pub use terms::{tokenize, Language, TermIndex, Tokenizer};
 #[cfg(all(feature = "terms", not(target_arch = "wasm32")))]
-pub use terms_build::write_term_index;
+pub use terms_build::{write_term_index, write_term_index_with, TermIndexConfig};
 
 #[cfg(feature = "hotcache")]
 pub use hotcache::{Hotcache, Member, MemberTag};

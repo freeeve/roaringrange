@@ -7,7 +7,7 @@
 //! only the dictionary (an FST keyed by whole term) is new.
 
 use crate::build::split_posting;
-use crate::terms::tokenize;
+use crate::terms::{Language, Tokenizer, FLAG_STEMMED, FLAG_STOPWORDS};
 use fst::MapBuilder;
 use roaring::RoaringBitmap;
 use std::collections::BTreeMap;
@@ -21,22 +21,58 @@ const VERSION: u16 = 1;
 /// hold the block's byte offset within the postings region (see [`crate::terms`]).
 const SIZE_BITS: u32 = 24;
 
-/// Builds an `RRTI` term index over `(doc_id, text)` documents and writes it to
-/// `w`. Doc IDs should be the shared rank-order IDs (so facets/records/vector
-/// compose); `head_boundary` is the doc-ID head/tail split (a multiple of 65536,
-/// e.g. [`crate::build::DEFAULT_HEAD_BOUNDARY`]). The text of each document is
-/// tokenized with [`tokenize`] (the same function the reader's query path uses).
+/// Build-time configuration for an `RRTI` index. The tokenizer settings (`language`
+/// for Snowball stemming, `stopwords`) are recorded in the header so the reader
+/// tokenizes queries identically — the term-index correctness invariant.
+#[derive(Debug, Clone, Copy)]
+pub struct TermIndexConfig {
+    /// Doc-ID head/tail split (a multiple of 65536, e.g. [`crate::build::DEFAULT_HEAD_BOUNDARY`]).
+    pub head_boundary: u32,
+    /// Optional Snowball stemmer language; `None` builds an unstemmed index.
+    pub language: Option<Language>,
+    /// Remove common stop words from the index (and, symmetrically, from queries).
+    pub stopwords: bool,
+}
+
+/// Builds an unstemmed `RRTI` term index over `(doc_id, text)` documents and writes it
+/// to `w`. Doc IDs should be the shared rank-order IDs (so facets/records/vector
+/// compose); `head_boundary` is the doc-ID head/tail split (a multiple of 65536, e.g.
+/// [`crate::build::DEFAULT_HEAD_BOUNDARY`]). For Snowball stemming or stop-word removal,
+/// use [`write_term_index_with`].
 pub fn write_term_index<W: Write>(
-    mut w: W,
+    w: W,
     docs: &[(u32, &str)],
     head_boundary: u32,
 ) -> io::Result<()> {
+    write_term_index_with(
+        w,
+        docs,
+        &TermIndexConfig {
+            head_boundary,
+            language: None,
+            stopwords: false,
+        },
+    )
+}
+
+/// Builds an `RRTI` term index with an explicit [`TermIndexConfig`] and writes it to
+/// `w`. Each document's text is tokenized through the configured [`Tokenizer`]
+/// (SimpleTokenizer + LowerCaser, then optional stop-word removal and Snowball
+/// stemming), and the config is recorded in the header so the reader tokenizes queries
+/// the same way.
+pub fn write_term_index_with<W: Write>(
+    mut w: W,
+    docs: &[(u32, &str)],
+    config: &TermIndexConfig,
+) -> io::Result<()> {
+    let tokenizer = Tokenizer::new(config.language, config.stopwords);
+    let head_boundary = config.head_boundary;
     // 1. term -> doc-id bitmap. A BTreeMap keeps terms in byte-lexicographic order
     // (UTF-8 byte order == codepoint order == `str` ordering), which is exactly the
     // strictly-increasing order the FST builder requires.
     let mut postings: BTreeMap<String, RoaringBitmap> = BTreeMap::new();
     for &(doc, text) in docs {
-        for term in tokenize(text) {
+        for term in tokenizer.tokenize(text) {
             postings.entry(term).or_default().insert(doc);
         }
     }
@@ -77,14 +113,23 @@ pub fn write_term_index<W: Write>(
         .into_inner()
         .map_err(|e| io::Error::other(format!("fst finish: {e}")))?;
 
-    // 4. Header (32 B) + FST dictionary + postings region.
+    // 4. Header (32 B) + FST dictionary + postings region. `flags` records the
+    // tokenizer (stemmed / stop-words); the first reserved byte carries the stemmer
+    // language so the reader rebuilds the identical tokenizer.
+    let flags = (if config.language.is_some() {
+        FLAG_STEMMED
+    } else {
+        0
+    }) | (if config.stopwords { FLAG_STOPWORDS } else { 0 });
+    let mut reserved = [0u8; 8];
+    reserved[0] = config.language.map_or(0, |l| l.to_u8());
     w.write_all(MAGIC)?;
     w.write_all(&VERSION.to_le_bytes())?;
-    w.write_all(&0u16.to_le_bytes())?; // flags (reserved)
+    w.write_all(&flags.to_le_bytes())?;
     w.write_all(&(postings.len() as u32).to_le_bytes())?;
     w.write_all(&head_boundary.to_le_bytes())?;
     w.write_all(&(fst_bytes.len() as u64).to_le_bytes())?;
-    w.write_all(&[0u8; 8])?; // reserved — pads the header to 32 bytes
+    w.write_all(&reserved)?; // first byte = stemmer language; pads the header to 32 B
     w.write_all(&fst_bytes)?;
     w.write_all(&region)?;
     Ok(())

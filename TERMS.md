@@ -24,11 +24,12 @@ All integers little-endian. Postings are standard **portable** RoaringBitmaps
 |---|---|---|---|
 | magic | char[4] | 4 | `"RRTI"` |
 | version | u16 | 2 | `1` |
-| flags | u16 | 2 | reserved (`0`): future stemmed / has-positions / has-inline |
+| flags | u16 | 2 | `bit0` = stemmed, `bit1` = stop-words removed; rest reserved (`0`) |
 | termCount | u32 | 4 | distinct terms in the dictionary |
 | headBoundary | u32 | 4 | doc-ID head/tail split — multiple of 65536, default 65536 |
 | fstLen | u64 | 8 | byte length of the FST dictionary blob |
-| reserved | u8[8] | 8 | zero padding to 32 B |
+| language | u8 | 1 | stemmer language when `bit0` set (`1` = English); `0` otherwise |
+| reserved | u8[7] | 7 | zero padding to 32 B |
 
 **FST dictionary** — `fstLen` bytes at offset `32`. A minimized acyclic finite-state
 transducer ([BurntSushi `fst`](https://docs.rs/fst)) mapping `term (UTF-8) → u64 output`.
@@ -81,8 +82,12 @@ for any ranked query lives in the head.
 - each character is lowercased via `char::to_lowercase`.
 
 The same function tokenizes the indexed text (builder) and the query (reader), so a query
-resolves to the same terms that were indexed. Stop-word and stemming (Snowball, via
-`rust-stemmers`) filters slot in after this base step in a later version (the `flags`
+resolves to the same terms that were indexed. Optional filters then run **after** this
+base step, recorded in the header so the reader applies them identically: **stop-word
+removal** (`flags bit1`) and **Snowball stemming** (`flags bit0`, language in the
+`language` byte — `1` = English, via the pure-Rust `rust-stemmers`, the same crate
+Tantivy uses; wasm-safe, so the browser stems queries too). The earlier note that these
+were future work no longer applies (the `flags`
 field records which were applied). **Test vectors:** `"Machine-Learning, FAST!"` →
 `["machine","learning","fast"]`; `"GPT-4 and BERT"` → `["gpt","4","and","bert"]`.
 
