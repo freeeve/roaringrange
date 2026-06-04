@@ -1,6 +1,65 @@
 /* @ts-self-types="./roaringrange.d.ts" */
 
 /**
+ * The in-browser model2vec query embedder (mode 2) exposed to JavaScript: turns
+ * query text into a `Float32Array` vector with no backend, to feed
+ * [`RrviIndex::search`]. Built with `wasm-pack build --features "wasm vector"`.
+ */
+export class Model2vecEmbedder {
+    static __wrap(ptr) {
+        const obj = Object.create(Model2vecEmbedder.prototype);
+        obj.__wbg_ptr = ptr;
+        Model2vecEmbedderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        Model2vecEmbedderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_model2vecembedder_free(ptr, 0);
+    }
+    /**
+     * Vector dimensionality (must match the `RRVI` index it queries).
+     * @returns {number}
+     */
+    dim() {
+        const ret = wasm.model2vecembedder_dim(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Embeds `text` into a `Float32Array` query vector (BERT tokenize → static
+     * embedding mean-pool → L2-normalize). Pass it to `RrviIndex.search`.
+     * @param {string} text
+     * @returns {Float32Array}
+     */
+    embed(text) {
+        const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.model2vecembedder_embed(this.__wbg_ptr, ptr0, len0);
+        var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v2;
+    }
+    /**
+     * Downloads the `RRM2` artifact at `url` once (a plain GET; ~tens of MB,
+     * browser-cached) and builds the embedder. Returns a `Promise<Model2vecEmbedder>`.
+     * @param {string} url
+     * @returns {Promise<Model2vecEmbedder>}
+     */
+    static open(url) {
+        const ptr0 = passStringToWasm0(url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.model2vecembedder_open(ptr0, len0);
+        return ret;
+    }
+}
+if (Symbol.dispose) Model2vecEmbedder.prototype[Symbol.dispose] = Model2vecEmbedder.prototype.free;
+
+/**
  * A range-fetchable [`Catalog`] exposed to JavaScript: one object bundling the
  * `RRS` index with an optional `RRSF` facet sidecar and `RRSR` record store, so
  * the whole "search → ranked IDs + records + facet counts" flow is one call.
@@ -560,6 +619,471 @@ export class RrsRecords {
 if (Symbol.dispose) RrsRecords.prototype[Symbol.dispose] = RrsRecords.prototype.free;
 
 /**
+ * A pagination cursor over a secondary-ordered result set whose pages are mapped
+ * back to primary doc IDs. Mirrors [`RrsCursor`]; [`RrsSecondaryCursor::page`]
+ * returns a `Uint32Array` of **primary** doc IDs.
+ */
+export class RrsSecondaryCursor {
+    static __wrap(ptr) {
+        const obj = Object.create(RrsSecondaryCursor.prototype);
+        obj.__wbg_ptr = ptr;
+        RrsSecondaryCursorFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RrsSecondaryCursorFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_rrssecondarycursor_free(ptr, 0);
+    }
+    /**
+     * The search-filtered facet counts as a JSON string (same shape as
+     * `facetsJson`, counts restricted to this query's result); `"[]"` when no
+     * secondary sidecar is open.
+     * @returns {string}
+     */
+    facetCountsJson() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.rrssecondarycursor_facetCountsJson(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Number of head results — available with no tail fetch.
+     * @returns {number}
+     */
+    headCount() {
+        const ret = wasm.rrssecondarycursor_headCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Forces the lazy tail to be fetched; afterwards `loaded`/`page` span the full
+     * result set.
+     * @returns {Promise<void>}
+     */
+    loadTail() {
+        const ret = wasm.rrssecondarycursor_loadTail(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Number of secondary results materialized so far (head, plus tail once fetched).
+     * @returns {number}
+     */
+    loaded() {
+        const ret = wasm.rrssecondarycursor_loaded(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * The page of primary doc IDs for the secondary-ordered results
+     * `[offset, offset+limit)`. Head pages cost no posting fetch; crossing into the
+     * tail fetches it once. Always one small coalesced permutation gather per page.
+     * @param {number} offset
+     * @param {number} limit
+     * @returns {Promise<Uint32Array>}
+     */
+    page(offset, limit) {
+        const ret = wasm.rrssecondarycursor_page(this.__wbg_ptr, offset, limit);
+        return ret;
+    }
+    /**
+     * Whether an unfetched tail could still add results.
+     * @returns {boolean}
+     */
+    pendingTail() {
+        const ret = wasm.rrssecondarycursor_pendingTail(this.__wbg_ptr);
+        return ret !== 0;
+    }
+}
+if (Symbol.dispose) RrsSecondaryCursor.prototype[Symbol.dispose] = RrsSecondaryCursor.prototype.free;
+
+/**
+ * A secondary full index exposed to JavaScript: a second `RRS` reindexed in an
+ * alternate rank order (e.g. newest-first), the permutation back to primary doc
+ * IDs, and an optional secondary-space facet sidecar for filtered search. Search it
+ * like [`RrsIndex`]; the cursor's pages come back as **primary** doc IDs, so
+ * records are fetched through the existing primary-keyed store unchanged. Facet
+ * counts are identical to the primary order's. See `SORTCOLS.md`.
+ */
+export class RrsSecondaryIndex {
+    static __wrap(ptr) {
+        const obj = Object.create(RrsSecondaryIndex.prototype);
+        obj.__wbg_ptr = ptr;
+        RrsSecondaryIndexFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RrsSecondaryIndexFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_rrssecondaryindex_free(ptr, 0);
+    }
+    /**
+     * The facet fields with full-corpus counts as a JSON string (same shape as
+     * [`RrsIndex::facets_json`]); `"[]"` when no sidecar is open.
+     * @returns {string}
+     */
+    facetsJson() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.rrssecondaryindex_facetsJson(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Boots the secondary index over the text index at `rrs_url` and the
+     * permutation store at `perm_url`. Returns a `Promise<RrsSecondaryIndex>`.
+     * @param {string} rrs_url
+     * @param {string} perm_url
+     * @returns {Promise<RrsSecondaryIndex>}
+     */
+    static open(rrs_url, perm_url) {
+        const ptr0 = passStringToWasm0(rrs_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(perm_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssecondaryindex_open(ptr0, len0, ptr1, len1);
+        return ret;
+    }
+    /**
+     * Opens the secondary-space facet sidecar at `url` and attaches it, enabling
+     * `facetsJson` and filtered secondary search.
+     * @param {string} url
+     * @returns {Promise<void>}
+     */
+    openFacets(url) {
+        const ptr0 = passStringToWasm0(url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssecondaryindex_openFacets(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Opens an unfiltered pagination cursor for `query` over the secondary order.
+     * `max_missing` is the fuzzy tolerance (0 = strict).
+     * @param {string} query
+     * @param {number} max_missing
+     * @returns {Promise<RrsSecondaryCursor>}
+     */
+    searchCursor(query, max_missing) {
+        const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssecondaryindex_searchCursor(this.__wbg_ptr, ptr0, len0, max_missing);
+        return ret;
+    }
+    /**
+     * Like [`RrsSecondaryIndex::search_cursor`] but ANDs the selected facets into
+     * the result. Each `filters` entry is `"field\tcategory"` (tab-separated);
+     * within a field categories OR, across fields they AND. Applied only when a
+     * secondary sidecar is open and `filters` is non-empty.
+     * @param {string} query
+     * @param {number} max_missing
+     * @param {string[]} filters
+     * @returns {Promise<RrsSecondaryCursor>}
+     */
+    searchCursorFiltered(query, max_missing, filters) {
+        const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayJsValueToWasm0(filters, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssecondaryindex_searchCursorFiltered(this.__wbg_ptr, ptr0, len0, max_missing, ptr1, len1);
+        return ret;
+    }
+}
+if (Symbol.dispose) RrsSecondaryIndex.prototype[Symbol.dispose] = RrsSecondaryIndex.prototype.free;
+
+/**
+ * A range-fetchable [`SortCols`] store exposed to JavaScript: dense columns
+ * indexed by doc ID, used to re-rank a materialized candidate set client-side
+ * (sort by rating / date / any secondary metric) and to map a secondary index's
+ * doc IDs back to the primary space. See `SORTCOLS.md`.
+ */
+export class RrsSortCols {
+    static __wrap(ptr) {
+        const obj = Object.create(RrsSortCols.prototype);
+        obj.__wbg_ptr = ptr;
+        RrsSortColsFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RrsSortColsFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_rrssortcols_free(ptr, 0);
+    }
+    /**
+     * The index of the column named `name`, or `-1` if absent.
+     * @param {string} name
+     * @returns {number}
+     */
+    columnIndex(name) {
+        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssortcols_columnIndex(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * A JS array of the columns' `{ name, type }` (`type` is one of
+     * `"u16"`/`"u32"`/`"i32"`/`"f32"`), in stored order.
+     * @returns {string}
+     */
+    columnsJson() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.rrssortcols_columnsJson(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Boots the store at `url`: reads the header + column meta (a few KB; the dense
+     * data is range-fetched per query). Returns a `Promise<RrsSortCols>`.
+     * @param {string} url
+     * @returns {Promise<RrsSortCols>}
+     */
+    static open(url) {
+        const ptr0 = passStringToWasm0(url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssortcols_open(ptr0, len0);
+        return ret;
+    }
+    /**
+     * Number of rows (doc IDs `0..rows`) every column holds.
+     * @returns {number}
+     */
+    rows() {
+        const ret = wasm.rrssortcols_rows(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * The contiguous run `[start, start+len)` of a `u32` column as a `Uint32Array`
+     * — the permutation-page fast path. Clamps to the row count.
+     * @param {number} col
+     * @param {number} start
+     * @param {number} len
+     * @returns {Promise<Uint32Array>}
+     */
+    sliceU32(col, start, len) {
+        const ret = wasm.rrssortcols_sliceU32(this.__wbg_ptr, col, start, len);
+        return ret;
+    }
+    /**
+     * The top `k` of `candidates` by column `col` as a `Uint32Array`, descending
+     * when `descending` (else ascending); ties keep ascending doc-ID order.
+     * @param {number} col
+     * @param {Uint32Array} candidates
+     * @param {number} k
+     * @param {boolean} descending
+     * @returns {Promise<Uint32Array>}
+     */
+    topk(col, candidates, k, descending) {
+        const ptr0 = passArray32ToWasm0(candidates, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssortcols_topk(this.__wbg_ptr, col, ptr0, len0, k, descending);
+        return ret;
+    }
+    /**
+     * Values for `ids` in column `col`, as a `Float64Array` aligned with `ids`
+     * (every stored type is exactly representable in `f64`). One coalesced wave of
+     * ranged reads.
+     * @param {number} col
+     * @param {Uint32Array} ids
+     * @returns {Promise<Float64Array>}
+     */
+    values(col, ids) {
+        const ptr0 = passArray32ToWasm0(ids, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssortcols_values(this.__wbg_ptr, col, ptr0, len0);
+        return ret;
+    }
+}
+if (Symbol.dispose) RrsSortCols.prototype[Symbol.dispose] = RrsSortCols.prototype.free;
+
+/**
+ * The result of [`RrviIndex::search`]: aligned doc IDs and similarity scores,
+ * best-first. In JavaScript `ids` is a `Uint32Array` and `scores` a
+ * `Float32Array`.
+ */
+export class RrviHits {
+    static __wrap(ptr) {
+        const obj = Object.create(RrviHits.prototype);
+        obj.__wbg_ptr = ptr;
+        RrviHitsFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RrviHitsFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_rrvihits_free(ptr, 0);
+    }
+    /**
+     * The matching doc IDs (`Uint32Array`), best-first.
+     * @returns {Uint32Array}
+     */
+    get ids() {
+        const ret = wasm.rrvihits_ids(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * The similarity scores (`Float32Array`) aligned with `ids`; higher is better.
+     * @returns {Float32Array}
+     */
+    get scores() {
+        const ret = wasm.rrvihits_scores(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+}
+if (Symbol.dispose) RrviHits.prototype[Symbol.dispose] = RrviHits.prototype.free;
+
+/**
+ * A range-fetchable RRVI similarity (vector) index exposed to JavaScript. Built
+ * with `wasm-pack build --target web --features "wasm vector"`.
+ */
+export class RrviIndex {
+    static __wrap(ptr) {
+        const obj = Object.create(RrviIndex.prototype);
+        obj.__wbg_ptr = ptr;
+        RrviIndexFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RrviIndexFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_rrviindex_free(ptr, 0);
+    }
+    /**
+     * Vector dimensionality the index was built with.
+     * @returns {number}
+     */
+    dim() {
+        const ret = wasm.rrviindex_dim(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Whether the index holds no vectors.
+     * @returns {boolean}
+     */
+    isEmpty() {
+        const ret = wasm.rrviindex_isEmpty(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Total number of indexed vectors.
+     * @returns {number}
+     */
+    len() {
+        const ret = wasm.rrviindex_len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Number of coarse (IVF) clusters.
+     * @returns {number}
+     */
+    nlist() {
+        const ret = wasm.rrviindex_nlist(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Boots the RRVI index at `url`: one boot read of the coarse centroids, PQ
+     * codebooks, optional OPQ rotation, and cluster directory. Returns a
+     * `Promise<RrviIndex>`.
+     * @param {string} url
+     * @returns {Promise<RrviIndex>}
+     */
+    static open(url) {
+        const ptr0 = passStringToWasm0(url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrviindex_open(ptr0, len0);
+        return ret;
+    }
+    /**
+     * Opens the optional `RRVR` re-rank sidecar at `url` and attaches it, enabling
+     * [`RrviIndex::search_rerank`].
+     * @param {string} url
+     * @returns {Promise<void>}
+     */
+    openRerank(url) {
+        const ptr0 = passStringToWasm0(url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrviindex_openRerank(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Searches for the `k` nearest vectors to `query` (a `Float32Array` of length
+     * `dim`), probing the `nprobe` nearest clusters in one concurrent wave of
+     * ranged reads. Resolves to an `RrviHits` with aligned `ids`/`scores`,
+     * best-first. An inner-product index normalizes the query for you; `doc_id`
+     * matches the text index's doc ID, so hits map straight to the record store.
+     * @param {Float32Array} query
+     * @param {number} k
+     * @param {number} nprobe
+     * @returns {Promise<RrviHits>}
+     */
+    search(query, k, nprobe) {
+        const ptr0 = passArrayF32ToWasm0(query, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrviindex_search(this.__wbg_ptr, ptr0, len0, k, nprobe);
+        return ret;
+    }
+    /**
+     * Like [`RrviIndex::search`] but re-ranks the ADC top-`r` candidates against
+     * the higher-precision re-rank sidecar (open it first with `openRerank`),
+     * returning the exact top-`k`. Rejects if no sidecar is open.
+     * @param {Float32Array} query
+     * @param {number} k
+     * @param {number} nprobe
+     * @param {number} r
+     * @returns {Promise<RrviHits>}
+     */
+    searchRerank(query, k, nprobe, r) {
+        const ptr0 = passArrayF32ToWasm0(query, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrviindex_searchRerank(this.__wbg_ptr, ptr0, len0, k, nprobe, r);
+        return ret;
+    }
+}
+if (Symbol.dispose) RrviIndex.prototype[Symbol.dispose] = RrviIndex.prototype.free;
+
+/**
  * A standalone portable RoaringBitmap exposed to JavaScript for client-side set
  * operations over external `.bm` bitmaps — e.g. the per-library bitmaps a static
  * catalog ships for library diff / intersection / collection paging. The bytes
@@ -660,6 +1184,26 @@ export class WasmBitmap {
     }
 }
 if (Symbol.dispose) WasmBitmap.prototype[Symbol.dispose] = WasmBitmap.prototype.free;
+
+/**
+ * Reciprocal-rank fusion of a vector (`RRVI`) and a trigram (`RRS`) result list
+ * into one ranking of doc IDs, best-first — the no-score-normalization hybrid.
+ * `kParam` is conventionally ~60. Returns a `Uint32Array`.
+ * @param {Uint32Array} vector_ids
+ * @param {Uint32Array} trigram_ids
+ * @param {number} k_param
+ * @returns {Uint32Array}
+ */
+export function reciprocalRankFusion(vector_ids, trigram_ids, k_param) {
+    const ptr0 = passArray32ToWasm0(vector_ids, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray32ToWasm0(trigram_ids, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.reciprocalRankFusion(ptr0, len0, ptr1, len1, k_param);
+    var v3 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v3;
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -751,6 +1295,10 @@ function __wbg_get_imports() {
             const ret = arg0.length;
             return ret;
         },
+        __wbg_model2vecembedder_new: function(arg0) {
+            const ret = Model2vecEmbedder.__wrap(arg0);
+            return ret;
+        },
         __wbg_new_578aeef4b6b94378: function(arg0) {
             const ret = new Uint8Array(arg0);
             return ret;
@@ -778,7 +1326,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return wasm_bindgen__convert__closures_____invoke__h54ade6753008af0f(a, state0.b, arg0, arg1);
+                        return wasm_bindgen__convert__closures_____invoke__h134a34389e58ea02(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -839,6 +1387,26 @@ function __wbg_get_imports() {
             const ret = RrsRecords.__wrap(arg0);
             return ret;
         },
+        __wbg_rrssecondarycursor_new: function(arg0) {
+            const ret = RrsSecondaryCursor.__wrap(arg0);
+            return ret;
+        },
+        __wbg_rrssecondaryindex_new: function(arg0) {
+            const ret = RrsSecondaryIndex.__wrap(arg0);
+            return ret;
+        },
+        __wbg_rrssortcols_new: function(arg0) {
+            const ret = RrsSortCols.__wrap(arg0);
+            return ret;
+        },
+        __wbg_rrvihits_new: function(arg0) {
+            const ret = RrviHits.__wrap(arg0);
+            return ret;
+        },
+        __wbg_rrviindex_new: function(arg0) {
+            const ret = RrviIndex.__wrap(arg0);
+            return ret;
+        },
         __wbg_set_25ef40a9aeff260d: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
             arg0.set(getStringFromWasm0(arg1, arg2), getStringFromWasm0(arg3, arg4));
         }, arguments); },
@@ -891,8 +1459,8 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 408, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h68218ae5a35c5694);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 491, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h604311912c671172);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0) {
@@ -906,6 +1474,13 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
+            var v0 = getArrayF64FromWasm0(arg0, arg1).slice();
+            wasm.__wbindgen_free(arg0, arg1 * 8, 8);
+            // Cast intrinsic for `Vector(F64) -> Externref`.
+            const ret = v0;
+            return ret;
+        },
+        __wbindgen_cast_0000000000000005: function(arg0, arg1) {
             var v0 = getArrayU32FromWasm0(arg0, arg1).slice();
             wasm.__wbindgen_free(arg0, arg1 * 4, 4);
             // Cast intrinsic for `Vector(U32) -> Externref`.
@@ -928,19 +1503,22 @@ function __wbg_get_imports() {
     };
 }
 
-function wasm_bindgen__convert__closures_____invoke__h68218ae5a35c5694(arg0, arg1, arg2) {
-    const ret = wasm.wasm_bindgen__convert__closures_____invoke__h68218ae5a35c5694(arg0, arg1, arg2);
+function wasm_bindgen__convert__closures_____invoke__h604311912c671172(arg0, arg1, arg2) {
+    const ret = wasm.wasm_bindgen__convert__closures_____invoke__h604311912c671172(arg0, arg1, arg2);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
 }
 
-function wasm_bindgen__convert__closures_____invoke__h54ade6753008af0f(arg0, arg1, arg2, arg3) {
-    wasm.wasm_bindgen__convert__closures_____invoke__h54ade6753008af0f(arg0, arg1, arg2, arg3);
+function wasm_bindgen__convert__closures_____invoke__h134a34389e58ea02(arg0, arg1, arg2, arg3) {
+    wasm.wasm_bindgen__convert__closures_____invoke__h134a34389e58ea02(arg0, arg1, arg2, arg3);
 }
 
 
 const __wbindgen_enum_RequestMode = ["same-origin", "no-cors", "cors", "navigate"];
+const Model2vecEmbedderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_model2vecembedder_free(ptr, 1));
 const RrsCatalogFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rrscatalog_free(ptr, 1));
@@ -956,6 +1534,21 @@ const RrsLookupFinalization = (typeof FinalizationRegistry === 'undefined')
 const RrsRecordsFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rrsrecords_free(ptr, 1));
+const RrsSecondaryCursorFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_rrssecondarycursor_free(ptr, 1));
+const RrsSecondaryIndexFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_rrssecondaryindex_free(ptr, 1));
+const RrsSortColsFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_rrssortcols_free(ptr, 1));
+const RrviHitsFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_rrvihits_free(ptr, 1));
+const RrviIndexFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_rrviindex_free(ptr, 1));
 const WasmBitmapFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmbitmap_free(ptr, 1));
@@ -976,6 +1569,16 @@ const CLOSURE_DTORS = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(state => wasm.__wbindgen_destroy_closure(state.a, state.b));
 
+function getArrayF32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
+function getArrayF64FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
+}
+
 function getArrayU32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
@@ -992,6 +1595,22 @@ function getDataViewMemory0() {
         cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
     }
     return cachedDataViewMemory0;
+}
+
+let cachedFloat32ArrayMemory0 = null;
+function getFloat32ArrayMemory0() {
+    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
+        cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
+    }
+    return cachedFloat32ArrayMemory0;
+}
+
+let cachedFloat64ArrayMemory0 = null;
+function getFloat64ArrayMemory0() {
+    if (cachedFloat64ArrayMemory0 === null || cachedFloat64ArrayMemory0.byteLength === 0) {
+        cachedFloat64ArrayMemory0 = new Float64Array(wasm.memory.buffer);
+    }
+    return cachedFloat64ArrayMemory0;
 }
 
 function getStringFromWasm0(ptr, len) {
@@ -1065,6 +1684,13 @@ function passArray32ToWasm0(arg, malloc) {
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }
@@ -1157,6 +1783,8 @@ function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
     cachedDataViewMemory0 = null;
+    cachedFloat32ArrayMemory0 = null;
+    cachedFloat64ArrayMemory0 = null;
     cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();

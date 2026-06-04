@@ -610,7 +610,7 @@
             <span class="mark" aria-hidden="true">OA</span>
             <span class="wordmark">
               <h1 class="w1">OpenAlex search</h1>
-              <span class="w2">47.8M scholarly works · static, no backend</span>
+              <span class="w2">484M scholarly works · static, no backend</span>
             </span>
           </div>
           <nav class="bar-links">
@@ -636,13 +636,22 @@
               id="q"
               type="search"
               value="machine learning"
-              placeholder="Search 47.8M scholarly works…"
+              placeholder="Search 484M scholarly works…"
               autocomplete="off"
               aria-label="Search query"
             />
           </div>
 
-          <div class="fuzz" role="radiogroup" aria-label="Match mode">
+          <div class="fuzz" id="searchmode" role="radiogroup" aria-label="Search mode">
+            <input type="radio" name="mode" id="mode-trigram" value="trigram" checked />
+            <label for="mode-trigram">Trigram</label>
+            <input type="radio" name="mode" id="mode-semantic" value="semantic" />
+            <label for="mode-semantic">Semantic</label>
+            <input type="radio" name="mode" id="mode-hybrid" value="hybrid" />
+            <label for="mode-hybrid">Hybrid</label>
+          </div>
+
+          <div class="fuzz" id="fuzzmode" role="radiogroup" aria-label="Match mode">
             <input type="radio" name="fuzz" id="fuzz-0" value="0" checked />
             <label for="fuzz-0">Exact</label>
             <input type="radio" name="fuzz" id="fuzz-1" value="1" />
@@ -724,7 +733,7 @@
     </main>
 
     <script type="module">
-      import init, { RrsIndex, RrsRecords, RrsLookup } from "./roaringrange.js";
+      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder } from "./roaringrange.js";
 
       /* -------- byte/request accounting via fetch interception (from webtest) -------- */
       const realFetch = self.fetch.bind(self);
@@ -747,18 +756,25 @@
       // under poc/ (compressed records + DOI lookup) for testing; default is the
       // live 47M index. Each entry is an index basename, a record-store basename,
       // and whether records are zstd-compressed (needing the trained dictionary).
+      // `rrvi`/`rrm2` enable semantic + hybrid search: a range-fetched IVFPQ vector
+      // index (top-cited subset) and the model2vec token-embedding matrix the
+      // browser embeds the query with (no backend). doc IDs are shared with the
+      // text index + record store, so results render through the same path.
       const DATASETS = {
+        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-head.rrvi", rrm2: "potion.rrm2" },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
       };
       const dsParam = new URLSearchParams(location.search).get("ds");
-      const DS = DATASETS[dsParam] ? dsParam : "47m";
+      const DS = DATASETS[dsParam] ? dsParam : "full";
       const RRS_URL = new URL(`${DATASETS[DS].idx}.rrs`, location.href).href;
       const RRF_URL = new URL(`${DATASETS[DS].idx}.rrf`, location.href).href;
       const IDX_URL = new URL(`${DATASETS[DS].rec}.idx`, location.href).href;
       const BIN_URL = new URL(`${DATASETS[DS].rec}.bin`, location.href).href;
       const LOOKUP_URL = new URL(`${DATASETS[DS].idx}.rril`, location.href).href;
       const DICT_URL = new URL(`${DATASETS[DS].idx}.dict`, location.href).href;
+      const RRVI_URL = DATASETS[DS].rrvi ? new URL(DATASETS[DS].rrvi, location.href).href : null;
+      const RRM2_URL = DATASETS[DS].rrm2 ? new URL(DATASETS[DS].rrm2, location.href).href : null;
       const PAGE = 25;
       // Optional server-side search: the regional Lambda runs the same intersection
       // over in-region S3 reads and returns only this page's IDs + the exact total,
@@ -766,6 +782,13 @@
       const LAMBDA_URL = "https://6ebz0mnwd0.execute-api.us-east-1.amazonaws.com/";
       let serverMode = false;
       let serverTotal = 0;   // exact total from the Lambda (set on page 0), cached across pages
+      // --- search mode: trigram (text) | semantic (vector) | hybrid (both, fused) ---
+      let searchMode = "trigram";
+      let rrvi = null;               // RrviIndex — the IVFPQ vector reader (semantic)
+      let embedder = null;          // Model2vecEmbedder — embeds the query in-browser
+      let vectorReady = false;      // rrvi + embedder both opened OK
+      let trigramAvailable = true;  // the text .rrs opened (false while the full index is still uploading)
+      const SEM_NPROBE = 32, SEM_K = 60, RRF_K = 60;  // vector probes, candidate depth, RRF constant
 
       const $ = (id) => document.getElementById(id);
       const dec = new TextDecoder();
@@ -1440,9 +1463,39 @@
         setPerf({ results: { ms: recMs, reqs: recReqs, bytes: recBytes }, summary: `${summary} · ${recMs.toFixed(0)} ms` });
       }
 
+      /* Lazily open the vector index + the model2vec embedder (the embedder pulls the
+         ~33 MB token-embedding matrix once, browser-cached) on first semantic/hybrid use. */
+      async function ensureVector() {
+        if (vectorReady) return true;
+        if (!RRVI_URL || !RRM2_URL) return false;
+        try {
+          els.mSummary.textContent = "loading vector index + embedder…";
+          if (!rrvi) rrvi = await RrviIndex.open(RRVI_URL);
+          if (!embedder) embedder = await Model2vecEmbedder.open(RRM2_URL);
+          vectorReady = embedder.dim() === rrvi.dim();
+          return vectorReady;
+        } catch (e) { els.mSummary.textContent = `vector load failed: ${e}`; return false; }
+      }
+
+      /* Semantic search: embed the query in-browser, range-fetch the nprobe nearest
+         IVFPQ clusters, ADC-rank → ranked doc IDs (shared id space with the records). */
+      async function semanticIds(q, k) {
+        const vec = embedder.embed(q);
+        const hits = await rrvi.search(vec, k, SEM_NPROBE);
+        return Array.from(hits.ids);
+      }
+
+      /* Reciprocal-rank fusion of two ranked lists (k≈60): each adds 1/(k+rank), so a
+         doc near the top of either ranks high without needing comparable scores. */
+      function rrfFuse(a, b) {
+        const s = new Map();
+        for (const list of [a, b]) list.forEach((id, i) => s.set(id, (s.get(id) || 0) + 1 / (RRF_K + i + 1)));
+        return [...s.entries()].sort((x, y) => y[1] - x[1] || x[0] - y[0]).map(([id]) => id);
+      }
+
       /* -------- run a query (resetPaging=true on new query / fuzz change) -------- */
       async function runSearch(resetPaging = true) {
-        if (!idx) return;
+        searchMode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
         clearTimeout(autoPullTimer);
         const q = els.q.value.trim();
         if (!q) {
@@ -1473,6 +1526,43 @@
           // no exact match — fall through to a normal search for the typed string
         } else {
           setPerf({ doilookup: null });
+        }
+        // Semantic / hybrid: embed the query in-browser (model2vec) and search the
+        // vector index; render through the same showDocs() doc-ID path.
+        if (searchMode === "semantic" || searchMode === "hybrid") {
+          const ok = await ensureVector();
+          if (mySeq !== searchSeq) return;
+          if (searchMode === "semantic") {
+            if (!ok) { els.mSummary.textContent = "semantic search unavailable for this dataset"; return; }
+            const t0 = performance.now();
+            let ids;
+            try { ids = await semanticIds(q, SEM_K); }
+            catch (e) { els.mSummary.textContent = `semantic error: ${e}`; return; }
+            if (mySeq !== searchSeq) return;
+            cur = null; applyFacetCounts(null);
+            await showDocs(ids.slice(0, PAGE), mySeq,
+              `semantic · ${ids.length} match${ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`);
+            return;
+          }
+          // hybrid: fuse the trigram and semantic result lists by reciprocal rank
+          const t0 = performance.now();
+          let sem = [], tri = [];
+          if (ok) { try { sem = await semanticIds(q, SEM_K); } catch (_) {} }
+          if (idx) { try { tri = Array.from(await idx.search(q, SEM_K)); } catch (_) {} }
+          if (mySeq !== searchSeq) return;
+          const fused = rrfFuse(tri, sem);
+          cur = null; applyFacetCounts(null);
+          await showDocs(fused.slice(0, PAGE), mySeq,
+            `hybrid (RRF) · ${fused.length} result${fused.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`);
+          return;
+        }
+        // Trigram mode needs the text index (may still be uploading for the full set).
+        if (!idx) {
+          els.results.innerHTML = `<div class="empty">The full text index is still uploading — <b>Semantic</b> search works now.</div>`;
+          els.resultcount.textContent = ""; els.pager.hidden = true;
+          setPerf({ search: null, results: null });
+          els.mSummary.textContent = "text index uploading";
+          return;
         }
         if (serverMode) {
           // The Lambda runs the intersection; no client cursor, tail, or facet counts.
@@ -1521,13 +1611,17 @@
           mr = reqs; mb = bytes; mt = performance.now();
           return d;
         };
+        // The text index is optional at boot: a dataset whose `.rrs` is still
+        // uploading (the full index) boots with trigram disabled but semantic live.
         try { idx = await RrsIndex.open(RRS_URL); }
-        catch (e) { els.mSummary.textContent = `failed to open index: ${e}`; return; }
-        const index = seg();
+        catch (_) { idx = null; trigramAvailable = false; mr = reqs; mb = bytes; mt = performance.now(); }
+        const index = trigramAvailable ? seg() : null;
 
         let facets = null;
-        try { await idx.openFacets(RRF_URL); facets = seg(); }
-        catch (_) { mr = reqs; mb = bytes; mt = performance.now(); /* facet sidecar optional */ }
+        if (idx) {
+          try { await idx.openFacets(RRF_URL); facets = seg(); }
+          catch (_) { mr = reqs; mb = bytes; mt = performance.now(); /* facet sidecar optional */ }
+        }
 
         // Open the record store; a compressed dataset (zstd records) ships a trained
         // dictionary that must be attached to inflate records. A raw dataset opens
@@ -1551,6 +1645,15 @@
         setPerf({ index, facets, recstore, lookup: lookupSeg, summary: "ready" });
         loadDatasetStats();   // fire-and-forget; fills the header line, off the search path
         renderFacets();
+
+        // If the text index isn't up yet (the full set is still uploading) but the
+        // vector index is, default the UI to semantic so the demo works on load.
+        if (!trigramAvailable && RRVI_URL) {
+          searchMode = "semantic";
+          const r = $("mode-semantic"); if (r) r.checked = true;
+          $("fuzzmode").style.display = "none";
+          const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = "none";
+        }
 
         const restored = applyUrlState();
         if (restored) {
@@ -1581,6 +1684,16 @@
       els.q.addEventListener("input", scheduleSearch);
       document.querySelectorAll('input[name="fuzz"]').forEach((r) =>
         r.addEventListener("change", () => runSearch(true)));
+      // Search-mode toggle: trigram | semantic | hybrid. Fuzzy + server-side only
+      // apply to the trigram path, so hide them outside trigram mode.
+      document.querySelectorAll('input[name="mode"]').forEach((r) =>
+        r.addEventListener("change", () => {
+          const mode = document.querySelector('input[name="mode"]:checked').value;
+          const triOnly = mode === "trigram";
+          $("fuzzmode").style.display = triOnly ? "" : "none";
+          const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = triOnly ? "" : "none";
+          runSearch(true);
+        }));
       els.resultcount.addEventListener("click", (e) => {
         if (e.target.closest("#loadall")) loadAll();
       });
