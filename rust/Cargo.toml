@@ -134,3 +134,10 @@ vector = ["dep:unicode-normalization"]
 # Its only dependency is the pure-Rust `fst` crate. The reader is wasm-safe; the
 # builder is native-only (excluded from wasm32 via a cfg in lib.rs).
 terms = ["dep:fst"]
+
+# Cross-format catalog hotcache: the `RRHC` boot accelerator. One small `.rrhc`
+# inlines every member's small boot region and references the few large ones, so a
+# composition boots in 1–2 round trips instead of N cold opens. Pure Rust — adds NO
+# dependencies. The reader is wasm-safe; the builder is native-only (excluded from
+# wasm32 via a cfg in lib.rs). Off by default; enable with `--features hotcache`.
+hotcache = []

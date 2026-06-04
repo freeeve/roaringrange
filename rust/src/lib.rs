@@ -37,6 +37,17 @@ pub mod terms;
 #[cfg(all(feature = "terms", not(target_arch = "wasm32")))]
 pub mod terms_build;
 
+/// The `RRHC` catalog-hotcache reader: a cross-format boot accelerator that front-loads
+/// every member's boot region into one small artifact, booting a composition in 1–2 round
+/// trips instead of N cold opens. Behind the `hotcache` feature; wasm-safe.
+#[cfg(feature = "hotcache")]
+pub mod hotcache;
+
+/// Native build-side writer for the `RRHC` catalog hotcache (excluded from wasm).
+/// Behind the `hotcache` feature.
+#[cfg(all(feature = "hotcache", not(target_arch = "wasm32")))]
+pub mod hotcache_build;
+
 /// Container-level ranged reads into tail postings (search-fetch reduction).
 mod posting;
 
@@ -73,6 +84,11 @@ pub use vector_build::{
 pub use terms::{tokenize, TermIndex};
 #[cfg(all(feature = "terms", not(target_arch = "wasm32")))]
 pub use terms_build::write_term_index;
+
+#[cfg(feature = "hotcache")]
+pub use hotcache::{Hotcache, Member, MemberTag};
+#[cfg(all(feature = "hotcache", not(target_arch = "wasm32")))]
+pub use hotcache_build::{write_hotcache, MemberSpec};
 
 #[cfg(feature = "wasm")]
 mod wasm;
