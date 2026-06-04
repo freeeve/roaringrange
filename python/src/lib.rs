@@ -27,6 +27,7 @@ use roaringrange_core::build::{
 };
 use roaringrange_core::ngram_keys;
 use roaringrange_core::vector::{METRIC_IP, METRIC_L2};
+use roaringrange_core::write_term_index as core_write_term_index;
 use roaringrange_core::{
     build_ivfpq, build_ivfpq_from_parts, IvfpqParams, IvfpqParts, VectorBuildError,
 };
@@ -476,6 +477,32 @@ fn write_rrvi_from_faiss(
     })
 }
 
+/// Builds an `RRTI` term-level inverted index over `(doc_id, text)` documents and
+/// writes it to `path` (parent directories are created). Unlike the trigram `RRS`
+/// index, this keys postings by whole terms (an FST dictionary); doc IDs should be
+/// the shared rank-order IDs so facets/records/vector compose. `head_boundary` is
+/// the doc-ID head/tail split (a multiple of 65536); it defaults to the core
+/// default (65536). Raises `IOError` on write failure or a posting that overflows
+/// the format's size/offset limits.
+#[pyfunction]
+#[pyo3(signature = (path, docs, head_boundary = None))]
+fn write_term_index(
+    path: &str,
+    docs: Vec<(u32, String)>,
+    head_boundary: Option<u32>,
+) -> PyResult<()> {
+    let borrowed: Vec<(u32, &str)> = docs.iter().map(|(id, text)| (*id, text.as_str())).collect();
+    let p = Path::new(path);
+    create_parent(p)?;
+    core_write_term_index(
+        File::create(p).map_err(io_err)?,
+        &borrowed,
+        head_boundary.unwrap_or(DEFAULT_HEAD_BOUNDARY),
+    )
+    .map_err(io_err)?;
+    Ok(())
+}
+
 fn io_err(e: std::io::Error) -> PyErr {
     PyIOError::new_err(e.to_string())
 }
@@ -488,5 +515,6 @@ fn roaringrange(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VectorBuildStats>()?;
     m.add_function(wrap_pyfunction!(tokenize, m)?)?;
     m.add_function(wrap_pyfunction!(write_rrvi_from_faiss, m)?)?;
+    m.add_function(wrap_pyfunction!(write_term_index, m)?)?;
     Ok(())
 }

@@ -35,6 +35,28 @@ def test_text_builder_writes_dataset(tmp_path):
     assert (tmp_path / "records.bin").exists()
 
 
+def test_write_term_index_writes_rrti(tmp_path):
+    out = tmp_path / "terms.rrti"
+    rr.write_term_index(
+        str(out),
+        [(0, "hello world"), (1, "goodbye world")],
+    )
+    head = out.read_bytes()[:16]
+    assert head[:4] == b"RRTI"
+    version, _flags, nterms = struct.unpack_from("<HHI", head, 4)
+    (head_boundary,) = struct.unpack_from("<I", head, 12)
+    assert version == 1
+    assert nterms == 3  # hello, world, goodbye
+    assert head_boundary == 65536
+
+
+def test_write_term_index_custom_head_boundary(tmp_path):
+    out = tmp_path / "terms2.rrti"
+    rr.write_term_index(str(out), [(0, "alpha beta")], head_boundary=131072)
+    (head_boundary,) = struct.unpack_from("<I", out.read_bytes(), 12)
+    assert head_boundary == 131072
+
+
 def _unit_vectors(n, dim, seed=42):
     x = seed
     out = []
