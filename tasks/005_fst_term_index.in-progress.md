@@ -257,8 +257,19 @@ one:
   bug we hit. Lives behind a non-default **`terms`** Cargo feature (exactly like `vector`) —
   reader stays wasm-safe, builder native-only. Chosen over hand-rolling an FST + automaton
   from scratch to de-risk steps 1–3; revisit vendoring/minimizing once the format is proven.
-- **Stemming.** `rust-stemmers` (Snowball/Porter, pure-Rust) behind the `terms` feature,
-  off by default — or defer stemming to step 5 and ship v1 unstemmed. (Still open.)
+- **Tokenizer — DECIDED (2026-06-04): mirror Tantivy's design, don't depend on it.**
+  The term index is independent of the trigram index, so it needs only build/query
+  *symmetry* (which we control), freeing us to follow the proven reference. We mirror
+  Tantivy's composable chain — **`SimpleTokenizer`** (split on `!char::is_alphanumeric()`)
+  → **`LowerCaser`** (`char::to_lowercase`) now, with **`StopWordFilter`** + **`Stemmer`**
+  slotting in later (step 5). We do NOT depend on the `tantivy` crate (a full search
+  engine — huge dep tree, against the minimal-dep ethos); we re-implement the small
+  tokenizer behaviour and validate parity against Tantivy. (Supersedes the earlier "reuse
+  `ngram.rs` L*/Nd rule" idea — Tantivy's `is_alphanumeric` split is the standard
+  Lucene/Tantivy semantic; the trigram tokenizer stays separate.)
+- **Stemming.** `rust-stemmers` (Snowball) behind the `terms` feature, off by default —
+  the **same crate Tantivy uses** for its `Stemmer` filter, so it drops straight into the
+  mirrored chain. Defer to step 5; v1 ships unstemmed. (Still open: default on/off + langs.)
 
 ---
 
@@ -330,3 +341,34 @@ substrate on unchanged, and the real wins are **residency + materialization** (i
 rare postings, bake hot phrases, load enough that the common case never hits S3) — the
 same "spend on the tail, give away the head" principle the whole library already runs on.
 It lives **next to** the trigram index, which keeps owning substring/fuzzy/no-space.
+
+---
+
+## Progress
+
+### 2026-06-04 — Steps 1–2 DONE: RRTI format + reader + builder (behind `terms`)
+Pure-Rust, behind a non-default **`terms`** Cargo feature (only dep: `fst`).
+
+- **`TERMS.md`** — frozen RRTI v1 layout: 32 B header + FST dictionary blob +
+  postings region. The postings region is the `RRS` `[head][tail]` roaring split
+  verbatim; only the dictionary (FST) + key (term) are new. FST output packs
+  `(head_off << 24) | head_size`; each block is `[tail_size u32][head][tail]` so the
+  head fetch also yields the tail's length. **One-level FST, no inline, no positions**
+  (v1 defaults from §12).
+- **`rust/src/terms.rs`** (reader, wasm-safe): `TermIndex<F: RangeFetch>` — `open`
+  (boot = header + whole FST blob, resident), `search(query, limit)` (locate every
+  term via the FST at 0 fetches → one head wave → AND smallest-first → lazy tail only
+  if the rank head underflows `limit`). Plus `tokenize()` = **Tantivy `SimpleTokenizer`
+  + `LowerCaser`** (mirrored, not depended), shared by reader + builder.
+- **`rust/src/terms_build.rs`** (builder, native): `write_term_index(w, &[(doc_id,
+  text)], head_boundary)` — tokenize → term→roaring (BTreeMap = FST sort order) →
+  `split_posting` head/tail → pack → `fst::MapBuilder` → emit RRTI.
+- **Tests** (4): tokenizer parity, whole-word AND + rank order + missing-term/empty,
+  head/tail split with lazy-tail + cross-head/tail AND, empty corpus + bad magic.
+- Gates green: **59 tests** (`--features terms`) / 55 default; clippy clean (default +
+  terms); fmt clean. Default + `vector` builds unaffected (`fst` is optional).
+
+**Remaining:** step 3 prefix (autocomplete) + fuzzy (Levenshtein automaton, add the
+`fst` `levenshtein` feature); step 4 inline rare postings + residency; step 5 stemming
+(`rust-stemmers`) + stopwords; step 6 hot-phrase materialization; step 7 wasm binding +
+demo + CI/pre-push `terms` gate + Python builder binding; step 8 positions.
