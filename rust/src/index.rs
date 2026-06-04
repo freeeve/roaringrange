@@ -537,7 +537,7 @@ impl<F: RangeFetch> ResolvedFilter<F> {
     }
 
     /// Whether the filter imposes no constraint.
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
     }
 
@@ -549,6 +549,16 @@ impl<F: RangeFetch> ResolvedFilter<F> {
     /// The combined tail-side filter bitmap.
     async fn tail_bitmap(&self) -> Result<RoaringBitmap, IndexError> {
         self.combine(|c| (c.tail_off, c.tail_size as usize)).await
+    }
+
+    /// The full filter bitmap over both head and tail postings — the complete set
+    /// of doc IDs satisfying the selected facets. Used to filter an arbitrary
+    /// (e.g. vector-search) doc-ID list, which can touch the tail; the trigram
+    /// cursor applies head and tail separately as it paginates.
+    pub async fn full_bitmap(&self) -> Result<RoaringBitmap, IndexError> {
+        let mut b = self.head_bitmap().await?;
+        b |= self.tail_bitmap().await?;
+        Ok(b)
     }
 
     /// Fetches every selected category posting in one concurrent wave, ORs the

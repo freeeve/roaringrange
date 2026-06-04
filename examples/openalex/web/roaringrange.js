@@ -1,6 +1,57 @@
 /* @ts-self-types="./roaringrange.d.ts" */
 
 /**
+ * Result of [`RrsIndex::filter_ids`]: the surviving doc IDs (input ranking
+ * order preserved) and search-filtered facet counts over them.
+ */
+export class FilteredIds {
+    static __wrap(ptr) {
+        const obj = Object.create(FilteredIds.prototype);
+        obj.__wbg_ptr = ptr;
+        FilteredIdsFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        FilteredIdsFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_filteredids_free(ptr, 0);
+    }
+    /**
+     * Search-filtered facet counts over the survivors, as a JSON string (same
+     * shape as `facetsJson`). `"[]"` when no facet sidecar is open.
+     * @returns {string}
+     */
+    countsJson() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.filteredids_countsJson(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * The surviving doc IDs as a `Uint32Array`, in the input ranking order.
+     * @returns {Uint32Array}
+     */
+    get ids() {
+        const ret = wasm.filteredids_ids(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+}
+if (Symbol.dispose) FilteredIds.prototype[Symbol.dispose] = FilteredIds.prototype.free;
+
+/**
  * The in-browser model2vec query embedder (mode 2) exposed to JavaScript: turns
  * query text into a `Float32Array` vector with no backend, to feed
  * [`RrviIndex::search`]. Built with `wasm-pack build --features "wasm vector"`.
@@ -58,6 +109,76 @@ export class Model2vecEmbedder {
     }
 }
 if (Symbol.dispose) Model2vecEmbedder.prototype[Symbol.dispose] = Model2vecEmbedder.prototype.free;
+
+/**
+ * A standalone facet sidecar (`RRSF`) exposed to JavaScript, opened on its own
+ * without the text index. Lets the vector/semantic path filter results and show
+ * facet counts even when the (much larger) `.rrs` text index isn't present —
+ * they share the doc-ID space, so the `.rrf` applies directly.
+ */
+export class RrfFacets {
+    static __wrap(ptr) {
+        const obj = Object.create(RrfFacets.prototype);
+        obj.__wbg_ptr = ptr;
+        RrfFacetsFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RrfFacetsFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_rrffacets_free(ptr, 0);
+    }
+    /**
+     * Facet fields and categories with full-corpus counts, as a JSON string
+     * (same shape as `RrsIndex.facetsJson`).
+     * @returns {string}
+     */
+    facetsJson() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.rrffacets_facetsJson(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Filters a ranked doc-ID list by the selected facets (same contract as
+     * `RrsIndex.filterIds`). Resolves to a `FilteredIds`.
+     * @param {Uint32Array} ids
+     * @param {string[]} filters
+     * @returns {Promise<FilteredIds>}
+     */
+    filterIds(ids, filters) {
+        const ptr0 = passArray32ToWasm0(ids, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayJsValueToWasm0(filters, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.rrffacets_filterIds(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        return ret;
+    }
+    /**
+     * Boots the facet sidecar at `url` (header + category metadata; postings are
+     * range-fetched on demand). Resolves to an `RrfFacets`.
+     * @param {string} url
+     * @returns {Promise<RrfFacets>}
+     */
+    static open(url) {
+        const ptr0 = passStringToWasm0(url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrffacets_open(ptr0, len0);
+        return ret;
+    }
+}
+if (Symbol.dispose) RrfFacets.prototype[Symbol.dispose] = RrfFacets.prototype.free;
 
 /**
  * A range-fetchable [`Catalog`] exposed to JavaScript: one object bundling the
@@ -358,6 +479,27 @@ export class RrsIndex {
         } finally {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
+    }
+    /**
+     * Filters a ranked doc-ID list (e.g. semantic/vector hits) by the selected
+     * facets, preserving the input order, and returns the survivors plus
+     * search-filtered facet counts over them. Because `vector_id == doc_id`, the
+     * vector path reuses the same `RRSF` sidecar the trigram path uses — no
+     * remapping. Each `filters` entry is `"field\tcategory"` (within a field
+     * categories OR, across fields they AND). With no sidecar open or no
+     * filters, the IDs pass through unchanged (counts still computed when a
+     * sidecar is open). Resolves to a `FilteredIds`.
+     * @param {Uint32Array} ids
+     * @param {string[]} filters
+     * @returns {Promise<FilteredIds>}
+     */
+    filterIds(ids, filters) {
+        const ptr0 = passArray32ToWasm0(ids, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayJsValueToWasm0(filters, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.rrsindex_filterIds(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        return ret;
     }
     /**
      * Number of n-grams in the index dictionary.
@@ -1241,6 +1383,10 @@ function __wbg_get_imports() {
             const ret = arg0.call(arg1, arg2);
             return ret;
         }, arguments); },
+        __wbg_filteredids_new: function(arg0) {
+            const ret = FilteredIds.__wrap(arg0);
+            return ret;
+        },
         __wbg_get_2b48c7d0d006a781: function(arg0, arg1) {
             const ret = arg0[arg1 >>> 0];
             return ret;
@@ -1367,6 +1513,10 @@ function __wbg_get_imports() {
             const ret = Promise.resolve(arg0);
             return ret;
         },
+        __wbg_rrffacets_new: function(arg0) {
+            const ret = RrfFacets.__wrap(arg0);
+            return ret;
+        },
         __wbg_rrscatalog_new: function(arg0) {
             const ret = RrsCatalog.__wrap(arg0);
             return ret;
@@ -1459,7 +1609,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 491, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 504, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h604311912c671172);
             return ret;
         },
@@ -1516,9 +1666,15 @@ function wasm_bindgen__convert__closures_____invoke__h134a34389e58ea02(arg0, arg
 
 
 const __wbindgen_enum_RequestMode = ["same-origin", "no-cors", "cors", "navigate"];
+const FilteredIdsFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_filteredids_free(ptr, 1));
 const Model2vecEmbedderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_model2vecembedder_free(ptr, 1));
+const RrfFacetsFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_rrffacets_free(ptr, 1));
 const RrsCatalogFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rrscatalog_free(ptr, 1));
