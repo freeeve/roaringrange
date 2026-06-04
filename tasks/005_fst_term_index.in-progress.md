@@ -381,3 +381,16 @@ demo + CI/pre-push `terms` gate + Python builder binding; step 8 positions.
   helper (heads in one wave, lazy tails only if the heads underflow `limit`). Fuzzy uses
   `fst::automaton::Levenshtein`; an over-large automaton → `IndexError::BadQuery`.
 - Enabled the `fst` `levenshtein` feature on the `terms` dep. 63 tests / clippy / fmt green.
+
+### 2026-06-04 — Step 7 (make RRTI live): bindings + artifact + CI done; demo deferred
+- **7a wasm**: `RrtIndex` binding in `wasm.rs` (open/search/searchPrefix/searchFuzzy/
+  complete/len/isEmpty), mirrors `RrviIndex`; `wasm-pack build --features "wasm terms"` ok.
+- **7b Python**: `roaringrange.write_term_index(path, docs, head_boundary=None)` (mirrors
+  the vector builder); `terms` enabled on the core dep; pytest green.
+- **7c real `.rrt`**: `python/scripts/build_term_index.py` + the `rrt_query` example built a
+  **1M-doc `.rrt` (138 MB)** over the record store and verified search/complete/fuzzy
+  (search "machine learning" → Scikit-learn/XGBoost/…; complete "neural" → FST prefix;
+  fuzzy "learnimg" → learning). Artifact at /tmp/oa-out/openalex-1m.rrt (not uploaded yet).
+- **7e CI**: added `terms`+`hotcache` test+clippy gates to ci.yml (mirrors the pre-push hook).
+- **7d demo DEFERRED**: wiring a term-search mode + rebuilding wasm (wasm+zstd+vector+terms)
+  + deploy — paired with the 484M vector upload so it's one wasm rebuild + one deploy.

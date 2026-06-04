@@ -25,6 +25,11 @@ required-features = ["zstd"]
 name = "m2v_embed"
 required-features = ["vector"]
 
+# Query a built `.rrt` term index (search/prefix/fuzzy/complete); needs `terms`.
+[[example]]
+name = "rrt_query"
+required-features = ["terms"]
+
 [dependencies]
 roaring = "0.11"
 # Unicode general-category lookup so the tokenizer filters exactly on letters
