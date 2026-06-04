@@ -688,6 +688,15 @@
           <span class="srvnote">runs the intersection in a Lambda and returns only result IDs — KB instead of MB for huge result sets (facets off)</span>
         </div>
 
+        <div class="srvtoggle" id="lambdasem-wrap" hidden>
+          <label class="switch">
+            <input type="checkbox" id="lambdasem" />
+            <span class="track"></span>
+            <span>Lambda embeddings</span>
+          </label>
+          <span class="srvnote">embeds the query with EmbeddingGemma-300M in a Lambda (mode 1), then range-searches a Gemma-embedded vector index — vs the in-browser model2vec embedder</span>
+        </div>
+
         <button class="perftoggle" id="perftoggle" type="button" aria-expanded="false" aria-controls="perfbar">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span class="perftoggle-label">Show performance &amp; request details</span>
@@ -766,7 +775,7 @@
       // browser embeds the query with (no backend). doc IDs are shared with the
       // text index + record store, so results render through the same path.
       const DATASETS = {
-        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-1m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-1m-stem.rrt" },
+        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-1m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-1m-stem.rrt", rrviGemma: null },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
       };
@@ -781,11 +790,17 @@
       const RRVI_URL = DATASETS[DS].rrvi ? new URL(DATASETS[DS].rrvi, location.href).href : null;
       const RRM2_URL = DATASETS[DS].rrm2 ? new URL(DATASETS[DS].rrm2, location.href).href : null;
       const RRT_URL = DATASETS[DS].rrt ? new URL(DATASETS[DS].rrt, location.href).href : null;
+      const RRVI_GEMMA_URL = DATASETS[DS].rrviGemma ? new URL(DATASETS[DS].rrviGemma, location.href).href : null;
       const PAGE = 25;
       // Optional server-side search: the regional Lambda runs the same intersection
       // over in-region S3 reads and returns only this page's IDs + the exact total,
       // so the multi-MB postings never egress to the browser. Opt-in via the toggle.
       const LAMBDA_URL = "https://6ebz0mnwd0.execute-api.us-east-1.amazonaws.com/";
+      // Mode-1 query embedder (examples/embed-lambda): turns query text into an
+      // EmbeddingGemma-300M vector matching a Gemma-embedded RRVI. null until the
+      // function is deployed — set it to the Function URL (and a dataset's `rrviGemma`)
+      // to reveal the "Lambda embeddings" toggle.
+      const EMBED_LAMBDA_URL = null;
       let serverMode = false;
       let serverTotal = 0;   // exact total from the Lambda (set on page 0), cached across pages
       // --- search mode: trigram (text) | semantic (vector) | hybrid (both, fused) ---
@@ -793,6 +808,9 @@
       let rrvi = null;               // RrviIndex — the IVFPQ vector reader (semantic)
       let embedder = null;          // Model2vecEmbedder — embeds the query in-browser
       let vectorReady = false;      // rrvi + embedder both opened OK
+      let lambdaSemantic = false;   // embed via the EmbeddingGemma Lambda (mode 1) instead of in-browser model2vec
+      let rrviGemma = null;         // RrviIndex over Gemma-embedded vectors (mode 1's search target)
+      let gemmaReady = false;       // rrviGemma opened + embed endpoint configured
       let rterm = null;             // RrtIndex — the FST term-index reader (whole-word/stemmed)
       let trigramAvailable = true;  // the text .rrs opened (false while the full index is still uploading)
       let facetSrc = null;          // facet source: the text index, or a standalone .rrf when the .rrs isn't up yet
@@ -827,6 +845,7 @@
         dsVectors: $("ds-vectors"), dsVectorsPill: $("ds-vectors-pill"),
         dsModel: $("ds-model"), dsModelPill: $("ds-model-pill"),
         servermode: $("servermode"),
+        lambdasem: $("lambdasem"), lambdasemWrap: $("lambdasem-wrap"),
       };
 
       /* Fill the header dataset line: one HEAD per static file → Content-Length.
@@ -974,9 +993,9 @@
           { g: "startup", name: "Open facets", desc: "facet sidecar", get: () => perfModel.facets },
           { g: "startup", name: "Open records", desc: "record store header", get: () => perfModel.recstore },
           { g: "startup", name: "Open lookup", desc: "DOI lookup index", get: () => perfModel.lookup },
-          { g: "startup", name: "Open vectors", desc: "IVFPQ boot: centroids + codebooks", get: () => perfModel.vecindex },
+          { g: "startup", name: "Open vectors", desc: lambdaSemantic ? "Gemma IVFPQ boot: centroids + codebooks" : "IVFPQ boot: centroids + codebooks", get: () => perfModel.vecindex },
           { g: "startup", name: "Open embedder", desc: "model2vec matrix (full GET)", get: () => perfModel.embedder },
-          { g: "popular", name: "Embed query", desc: "model2vec · local compute, no fetch", get: () => perfModel.embed },
+          { g: "popular", name: "Embed query", desc: lambdaSemantic ? "EmbeddingGemma · Lambda round-trip" : "model2vec · local compute, no fetch", get: () => perfModel.embed },
           { g: "popular", name: "Vector fetch", desc: `${SEM_NPROBE} clusters · PQ ADC`, get: () => perfModel.vsearch },
           {
             g: "popular",
@@ -1526,15 +1545,60 @@
         } catch (e) { els.mSummary.textContent = `term index load failed: ${e}`; return false; }
       }
 
-      /* Semantic search: embed the query in-browser, range-fetch the nprobe nearest
-         IVFPQ clusters, ADC-rank → ranked doc IDs (shared id space with the records). */
+      /* Lazily open the Gemma vector index (mode 1). The query is embedded by the
+         embed-lambda (EmbeddingGemma), not in-browser, so there is no local matrix to
+         load — only the IVFPQ boot is range-fetched here. Returns false (gracefully)
+         unless both the embed endpoint and a Gemma index are configured. */
+      async function ensureGemmaVector() {
+        if (gemmaReady) return true;
+        if (!EMBED_LAMBDA_URL || !RRVI_GEMMA_URL) return false;
+        try {
+          els.mSummary.textContent = "loading Gemma vector index…";
+          if (!rrviGemma) {
+            const r0 = reqs, b0 = bytes, t0 = performance.now();
+            rrviGemma = await RrviIndex.open(RRVI_GEMMA_URL);
+            setPerf({ vecindex: { ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 } });
+          }
+          gemmaReady = true;
+          return true;
+        } catch (e) { els.mSummary.textContent = `Gemma vector load failed: ${e}`; return false; }
+      }
+
+      /* Mode-1 query embed: POST the text to the embed-lambda and receive an
+         EmbeddingGemma vector (same space as the Gemma RRVI). A real network round trip
+         — counted as one request for the perf bar, outside the S3 range meters. */
+      async function lambdaEmbed(q) {
+        const res = await realFetch(EMBED_LAMBDA_URL, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ q }),
+        });
+        if (!res.ok) throw new Error(`embed lambda ${res.status}`);
+        const body = await res.json();
+        const vec = Float32Array.from(body.vector);
+        const bytes = +res.headers.get("content-length") || vec.length * 7;
+        return { vec, reqs: 1, bytes };
+      }
+
+      /* Semantic search → ranked doc IDs (shared id space with the records). Two embed
+         sources: in-browser model2vec over the model2vec RRVI (default), or the
+         EmbeddingGemma Lambda over the Gemma RRVI (mode 1, when `lambdaSemantic`). Both
+         then range-fetch the nprobe nearest IVFPQ clusters and ADC-rank client-side. */
       async function semanticIds(q, k) {
+        const useLambda = lambdaSemantic && gemmaReady;
         const e0 = performance.now();
-        const vec = embedder.embed(q);
+        let vec, embedReqs = 0, embedBytes = 0;
+        if (useLambda) {
+          const r = await lambdaEmbed(q);
+          vec = r.vec; embedReqs = r.reqs; embedBytes = r.bytes;
+        } else {
+          vec = embedder.embed(q);
+        }
         const embedMs = performance.now() - e0;
+        const index = useLambda ? rrviGemma : rrvi;
         const r0 = reqs, b0 = bytes, s0 = performance.now();
-        const hits = await rrvi.search(vec, k, SEM_NPROBE);
-        return { ids: Array.from(hits.ids), embedMs, searchMs: performance.now() - s0, reqs: reqs - r0, bytes: bytes - b0 };
+        const hits = await index.search(vec, k, SEM_NPROBE);
+        return { ids: Array.from(hits.ids), embedMs, embedReqs, embedBytes, searchMs: performance.now() - s0, reqs: reqs - r0, bytes: bytes - b0 };
       }
 
       /* Reciprocal-rank fusion of two ranked lists (k≈60): each adds 1/(k+rank), so a
@@ -1627,7 +1691,7 @@
         // Semantic / hybrid: embed the query in-browser (model2vec) and search the
         // vector index; render through the same showDocs() doc-ID path.
         if (searchMode === "semantic" || searchMode === "hybrid") {
-          const ok = await ensureVector();
+          const ok = lambdaSemantic ? await ensureGemmaVector() : await ensureVector();
           if (mySeq !== searchSeq) return;
           // Active facets filter the ranked vector results (vector_id == doc_id, so
           // the trigram .rrf applies unchanged). Over-fetch when filtering so a
@@ -1647,7 +1711,7 @@
             // Per-search vector phases: in-browser embed (compute only), the
             // range-fetched IVFPQ probe, and the facet-posting fetch when filtering.
             setPerf({
-              embed: { ms: sr.embedMs, reqs: 0, bytes: 0 },
+              embed: { ms: sr.embedMs, reqs: sr.embedReqs, bytes: sr.embedBytes },
               vsearch: { ms: sr.searchMs, reqs: sr.reqs, bytes: sr.bytes },
               facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
               search: null, tail: null, tailresults: null,
@@ -1674,7 +1738,7 @@
           // Both arms shown side by side: embed + vector fetch (semantic) and the
           // trigram intersection (the existing "ID fetch" row); facets filter the fusion.
           setPerf({
-            embed: sem ? { ms: sem.embedMs, reqs: 0, bytes: 0 } : null,
+            embed: sem ? { ms: sem.embedMs, reqs: sem.embedReqs, bytes: sem.embedBytes } : null,
             vsearch: sem ? { ms: sem.searchMs, reqs: sem.reqs, bytes: sem.bytes } : null,
             search: idx ? { ms: triMs, reqs: triReqs, bytes: triBytes } : null,
             facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
@@ -1858,6 +1922,14 @@
       els.servermode.addEventListener("change", () => {
         serverMode = els.servermode.checked;
         runSearch(true);   // filters + facet counts now work in server mode (via the Lambda)
+      });
+      // Mode-1 opt-in: embed queries with the EmbeddingGemma Lambda against the Gemma
+      // vector index, instead of the in-browser model2vec embedder. Only revealed when
+      // both an embed endpoint and a Gemma index are configured for this dataset.
+      if (EMBED_LAMBDA_URL && RRVI_GEMMA_URL) els.lambdasemWrap.hidden = false;
+      els.lambdasem.addEventListener("change", () => {
+        lambdaSemantic = els.lambdasem.checked;
+        if (searchMode === "semantic" || searchMode === "hybrid") runSearch(true);
       });
       els.clearfilters.addEventListener("click", () => {
         activeFilters.clear();
