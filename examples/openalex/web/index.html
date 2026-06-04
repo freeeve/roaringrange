@@ -7,22 +7,27 @@
     <!-- system font stack; no external font CDN (avoids the SRI advisory) -->
     <style>
       :root {
-        --bg: #f7f8fa;
+        --bg: #f4f5f7;
         --panel: #ffffff;
-        --ink: #1a1d24;
-        --ink-soft: #5b6472;
-        --ink-faint: #8b94a3;
-        --line: #e4e7ec;
-        --line-soft: #eef0f3;
+        --panel-2: #fafbfc;
+        --ink: #14171d;
+        --ink-soft: #4c5563;
+        --ink-faint: #8a92a1;
+        --line: #e3e6ec;
+        --line-soft: #eef0f4;
         --accent: #3b5bdb;
         --accent-soft: #edf0fd;
         --accent-ink: #2b44a8;
-        --badge-bg: #fff4e6;
-        --badge-ink: #b35309;
+        --badge-bg: #fef6e7;
+        --badge-ink: #b45309;
+        --ok-bg: #e7f6ee;
+        --ok-ink: #0a7a4b;
+        --ok-line: #bfe6d1;
         --focus: #3b5bdb;
-        --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+        --serif: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Cambria, Georgia, serif;
+        --mono: ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", Consolas, monospace;
         --radius: 12px;
-        --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+        --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 6px 20px -14px rgba(16, 24, 40, 0.2);
       }
 
       * { box-sizing: border-box; }
@@ -50,7 +55,7 @@
       header.site {
         background: var(--panel);
         border-bottom: 1px solid var(--line);
-        padding: 22px 0 18px;
+        padding: 20px 0 24px;
       }
       .wrap { max-width: 1160px; margin: 0 auto; padding: 0 24px; }
       .topbar {
@@ -60,6 +65,7 @@
         gap: 16px;
         flex-wrap: wrap;
       }
+      .bar-links { display: flex; align-items: center; gap: 8px; }
       .howlink {
         display: inline-flex;
         align-items: center;
@@ -69,102 +75,115 @@
         color: var(--ink);
         background: var(--panel);
         border: 1px solid var(--line);
-        border-radius: var(--radius);
-        padding: 9px 14px;
-        box-shadow: var(--shadow);
+        border-radius: 9px;
+        padding: 8px 13px;
         white-space: nowrap;
       }
-      .howlink:hover { border-color: #cfd6e4; color: var(--accent-ink); text-decoration: none; }
-      .brand { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-      .brand h1 {
-        font-size: 22px;
-        font-weight: 700;
-        letter-spacing: -0.01em;
-        margin: 0;
-      }
+      .howlink:hover { border-color: #c9d1e0; color: var(--accent-ink); text-decoration: none; }
+      .howlink svg { width: 15px; height: 15px; flex: none; }
+      .brand { display: flex; align-items: center; gap: 13px; min-width: 0; }
       .brand .mark {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 30px; height: 30px;
-        border-radius: 8px;
-        background: var(--accent);
+        width: 34px; height: 34px;
+        border-radius: 9px;
+        background: var(--ink);
         color: #fff;
-        font-weight: 700;
-        font-size: 15px;
+        font-family: var(--mono);
+        font-weight: 600;
+        font-size: 14px;
+        letter-spacing: 0.02em;
         flex: none;
       }
-      .tagline {
-        margin: 6px 0 0;
-        color: var(--ink-soft);
-        font-size: 13.5px;
+      .wordmark { display: flex; flex-direction: column; line-height: 1.14; min-width: 0; }
+      .wordmark .w1 {
+        font-family: var(--serif);
+        font-size: 21px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        color: var(--ink);
+        margin: 0;
       }
-      .tagline code {
+      .wordmark .w2 {
         font-family: var(--mono);
-        font-size: 12px;
-        color: var(--accent-ink);
-        background: var(--accent-soft);
-        padding: 1px 6px;
-        border-radius: 5px;
+        font-size: 11.5px;
+        color: var(--ink-faint);
+        letter-spacing: 0.01em;
+        margin-top: 3px;
       }
-      .subtag {
-        margin: 3px 0 0;
-        color: var(--ink-soft);
+
+      /* stat pills + credit */
+      .metarow {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        flex-wrap: wrap;
+        margin-top: 18px;
+      }
+      .stats { display: flex; gap: 8px; flex-wrap: wrap; }
+      .stat {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 5px;
         font-size: 12.5px;
-        opacity: 0.85;
+        color: var(--ink-soft);
+        background: var(--panel-2);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 5px 11px;
       }
-      .subtag a {
-        color: inherit;
-        text-decoration: underline;
-        text-decoration-color: var(--line);
-        text-underline-offset: 2px;
-      }
-      .subtag a:hover { text-decoration-color: currentColor; }
-      #datastat b { color: var(--accent-ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+      .stat b { font-family: var(--mono); font-weight: 600; color: var(--accent-ink); font-variant-numeric: tabular-nums; }
+      .stat.ghost { color: var(--ink-faint); background: transparent; border-style: dashed; }
+      .credit { margin: 0; font-size: 12.5px; color: var(--ink-faint); }
+      .credit a { color: inherit; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; }
+      .credit a:hover { text-decoration-color: currentColor; }
 
       /* ---- search bar ---- */
       .searchrow {
-        margin-top: 18px;
+        margin-top: 22px;
         display: flex;
-        gap: 12px;
+        gap: 10px;
         align-items: center;
         flex-wrap: wrap;
       }
       .searchbox {
         position: relative;
-        flex: 1 1 380px;
+        flex: 1 1 420px;
         min-width: 240px;
       }
       .searchbox svg {
         position: absolute;
-        left: 14px; top: 50%;
+        left: 16px; top: 50%;
         transform: translateY(-50%);
-        width: 18px; height: 18px;
+        width: 19px; height: 19px;
         color: var(--ink-faint);
         pointer-events: none;
       }
       #q {
         width: 100%;
-        font-size: 16px;
+        font-size: 17px;
         font-family: inherit;
         color: var(--ink);
-        padding: 12px 16px 12px 42px;
+        padding: 14px 18px 14px 46px;
         border: 1px solid var(--line);
         border-radius: var(--radius);
         background: var(--panel);
         box-shadow: var(--shadow);
         transition: border-color 0.12s, box-shadow 0.12s;
       }
+      #q::placeholder { color: var(--ink-faint); }
       #q:focus {
         border-color: var(--accent);
-        box-shadow: 0 0 0 3px var(--accent-soft);
+        box-shadow: 0 0 0 4px var(--accent-soft);
         outline: none;
       }
       .btn {
         font-family: inherit;
-        font-size: 14px;
+        font-size: 15px;
         font-weight: 600;
-        padding: 12px 20px;
+        padding: 14px 24px;
         border-radius: var(--radius);
         border: 1px solid transparent;
         background: var(--accent);
@@ -190,7 +209,7 @@
         font-size: 13px;
         font-weight: 500;
         color: var(--ink-soft);
-        padding: 11px 16px;
+        padding: 13px 16px;
         cursor: pointer;
         user-select: none;
         white-space: nowrap;
@@ -380,10 +399,10 @@
         overflow: hidden;
       }
       .fgroup > h3 {
-        font-size: 12px;
+        font-size: 11.5px;
         font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
+        letter-spacing: 0.07em;
         color: var(--ink-soft);
         margin: 0;
         padding: 13px 14px 9px;
@@ -453,25 +472,25 @@
         margin-bottom: 14px;
         flex-wrap: wrap;
       }
-      .results-head .count { font-size: 14px; color: var(--ink-soft); }
-      .results-head .count b { color: var(--ink); font-weight: 600; }
+      .results-head .count { font-size: 14px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+      .results-head .count b { color: var(--ink); font-weight: 650; }
 
       .card {
         background: var(--panel);
         border: 1px solid var(--line);
-        border-radius: var(--radius);
-        padding: 16px 18px;
+        border-radius: 14px;
+        padding: 18px 20px;
         margin-bottom: 12px;
         box-shadow: var(--shadow);
-        transition: border-color 0.12s, box-shadow 0.12s;
+        transition: border-color 0.12s, box-shadow 0.12s, transform 0.04s;
       }
-      .card:hover { border-color: #cfd6e4; }
+      .card:hover { border-color: #cfd6e4; box-shadow: 0 1px 2px rgba(16,24,40,.05), 0 12px 28px -18px rgba(16,24,40,.28); }
       .card .title {
-        font-size: 16px;
-        font-weight: 600;
-        line-height: 1.35;
-        letter-spacing: -0.005em;
-        margin: 0 0 6px;
+        font-size: 17px;
+        font-weight: 650;
+        line-height: 1.34;
+        letter-spacing: -0.01em;
+        margin: 0 0 7px;
       }
       .card .title a { color: var(--ink); }
       .card .title a:hover { color: var(--accent); }
@@ -498,8 +517,8 @@
         color: var(--badge-ink);
         background: var(--badge-bg);
         border-radius: 20px;
-        padding: 2px 10px;
-        margin-top: 9px;
+        padding: 3px 11px;
+        margin-top: 11px;
       }
       .card .abstract {
         font-size: 13px;
@@ -589,31 +608,24 @@
         <div class="topbar">
           <div class="brand">
             <span class="mark" aria-hidden="true">OA</span>
-            <h1>OpenAlex — static in-browser search</h1>
+            <span class="wordmark">
+              <h1 class="w1">OpenAlex search</h1>
+              <span class="w2">47.8M scholarly works · static, no backend</span>
+            </span>
           </div>
-          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <nav class="bar-links">
             <a class="howlink" href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener">
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.8 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.5-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.8 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.5-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
               GitHub
             </a>
             <a class="howlink" href="how-it-works.html">
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5v.2" stroke-linecap="round" /><circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none" />
               </svg>
               How it works
             </a>
-          </div>
+          </nav>
         </div>
-        <p class="tagline">
-          no backend · range-fetched from S3 · powered by <code>roaringrange</code>
-        </p>
-        <p class="subtag">
-          A demo of the <a href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener">roaringrange</a>
-          search library · data from <a href="https://openalex.org" target="_blank" rel="noopener">OpenAlex</a> (CC0)
-        </p>
-        <p class="subtag" id="datastat">
-          searching <b id="ds-works">…</b> works · <b id="ds-index">…</b> index · <b id="ds-records">…</b> records, all static on S3
-        </p>
 
         <div class="searchrow">
           <div class="searchbox">
@@ -624,7 +636,7 @@
               id="q"
               type="search"
               value="machine learning"
-              placeholder="Search scholarly works…"
+              placeholder="Search 47.8M scholarly works…"
               autocomplete="off"
               aria-label="Search query"
             />
@@ -638,6 +650,19 @@
           </div>
 
           <button class="btn" id="go" type="button">Search</button>
+        </div>
+
+        <div class="metarow">
+          <div class="stats">
+            <span class="stat"><b id="ds-works">…</b> works</span>
+            <span class="stat"><b id="ds-index">…</b> index</span>
+            <span class="stat"><b id="ds-records">…</b> records</span>
+            <span class="stat ghost">all static on S3 · range-fetched</span>
+          </div>
+          <p class="credit">
+            <a href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener">roaringrange</a>
+            · data from <a href="https://openalex.org" target="_blank" rel="noopener">OpenAlex</a> (CC0)
+          </p>
         </div>
 
         <div class="srvtoggle">
