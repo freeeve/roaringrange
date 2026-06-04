@@ -374,3 +374,26 @@ the $0 no-backend mode-2 fallback. Examples (model2vec → Gemma):
 (Gemma's absolute cosines are lower — score distribution, not quality.) Per the
 spec this is the "decide before the full embed" gate → commit to Gemma; don't
 re-embed twice. The corpus build uses `embed_documents`; the Lambda `embed_query`.
+
+### 2026-06-04 — Step 5b done: in-browser model2vec embedder (mode 2)
+The spec's "biggest unknown" (a wasm tokenizer) — solved.
+
+- **`rust/src/model2vec.rs`** (`vector` feature, wasm-safe): ports BERT WordPiece
+  (BertNormalizer incl. NFD accent-strip + CJK, BertPreTokenizer, greedy WordPiece)
+  + static-embedding mean-pool + L2-normalize. Reads an `RRM2` artifact (vocab +
+  int8-per-row embedding matrix + normalizer flags).
+- **`python/scripts/model2vec_export.py`** writes the `RRM2` (potion-retrieval-32M:
+  63091×512 → int8 per-row, **0.99995** vs fp32, 33 MB).
+- **Validated vs Python model2vec at cosine 0.9999** on English/Latin/punct/accent/
+  digit text (the int8 floor — tokenizer is exact). Mixed-CJK ~0.95 (a CJK nuance;
+  irrelevant for the English demo). Harness: `rust/examples/m2v_embed.rs`. Unit
+  tests use a hand-built tiny RRM2 (no 33 MB artifact in CI).
+- **wasm**: `Model2vecEmbedder.open(url)` / `.embed(text)` → Float32Array (+ a
+  full-GET helper). Only extra dep in the vector feature: `unicode-normalization`.
+- Gates green: 57 lib + 11 vector tests, clippy (default + vector + wasm32), fmt.
+
+**Mode 2 is now end-to-end no-backend**: `Model2vecEmbedder.embed(query)` →
+`RrviIndex.search(...)`, and the 100K `openalex-head.rrvi` (already model2vec) is
+compatible. Remaining for the live demo: wasm-pack build `--features "wasm vector"`,
+upload `openalex-head.rrvi` (6.9 MB) + `potion.rrm2` (33 MB) to S3, and wire the
+UI (semantic-search path + the keyword/semantic + backend toggle).
