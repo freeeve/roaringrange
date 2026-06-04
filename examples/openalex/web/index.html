@@ -650,6 +650,8 @@
           <div class="fuzz" id="searchmode" role="radiogroup" aria-label="Search mode">
             <input type="radio" name="mode" id="mode-trigram" value="trigram" checked />
             <label for="mode-trigram">Trigram</label>
+            <input type="radio" name="mode" id="mode-term" value="term" />
+            <label for="mode-term">Term</label>
             <input type="radio" name="mode" id="mode-semantic" value="semantic" />
             <label for="mode-semantic">Semantic</label>
             <input type="radio" name="mode" id="mode-hybrid" value="hybrid" />
@@ -736,7 +738,7 @@
     </main>
 
     <script type="module">
-      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets } from "./roaringrange.js";
+      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex } from "./roaringrange.js";
 
       /* -------- byte/request accounting via fetch interception (from webtest) -------- */
       const realFetch = self.fetch.bind(self);
@@ -764,7 +766,7 @@
       // browser embeds the query with (no backend). doc IDs are shared with the
       // text index + record store, so results render through the same path.
       const DATASETS = {
-        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-1m.rrvi", rrm2: "potion.rrm2" },
+        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-1m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-1m-stem.rrt" },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
       };
@@ -778,6 +780,7 @@
       const DICT_URL = new URL(`${DATASETS[DS].idx}.dict`, location.href).href;
       const RRVI_URL = DATASETS[DS].rrvi ? new URL(DATASETS[DS].rrvi, location.href).href : null;
       const RRM2_URL = DATASETS[DS].rrm2 ? new URL(DATASETS[DS].rrm2, location.href).href : null;
+      const RRT_URL = DATASETS[DS].rrt ? new URL(DATASETS[DS].rrt, location.href).href : null;
       const PAGE = 25;
       // Optional server-side search: the regional Lambda runs the same intersection
       // over in-region S3 reads and returns only this page's IDs + the exact total,
@@ -790,6 +793,7 @@
       let rrvi = null;               // RrviIndex — the IVFPQ vector reader (semantic)
       let embedder = null;          // Model2vecEmbedder — embeds the query in-browser
       let vectorReady = false;      // rrvi + embedder both opened OK
+      let rterm = null;             // RrtIndex — the FST term-index reader (whole-word/stemmed)
       let trigramAvailable = true;  // the text .rrs opened (false while the full index is still uploading)
       let facetSrc = null;          // facet source: the text index, or a standalone .rrf when the .rrs isn't up yet
       const SEM_NPROBE = 32, SEM_K = 60, RRF_K = 60;  // vector probes, candidate depth, RRF constant
@@ -977,7 +981,7 @@
           {
             g: "popular",
             name: serverMode ? "ID fetch (lambda)" : "ID fetch",
-            desc: serverMode ? "IDs + facets returned" : "intersect trigrams",
+            desc: serverMode ? "IDs + facets returned" : (searchMode === "term" ? "FST term postings" : "intersect trigrams"),
             get: () => perfModel.search,
           },
           { g: "popular", name: "DOI lookup", desc: "resolve identifier", get: () => perfModel.doilookup },
@@ -1510,6 +1514,18 @@
         } catch (e) { els.mSummary.textContent = `vector load failed: ${e}`; return false; }
       }
 
+      /* Lazily open the FST term index (boot range-fetches the resident term
+         dictionary once, browser-cached) on first term-mode use. */
+      async function ensureTermIndex() {
+        if (rterm) return true;
+        if (!RRT_URL) return false;
+        try {
+          els.mSummary.textContent = "loading term index…";
+          rterm = await RrtIndex.open(RRT_URL);
+          return true;
+        } catch (e) { els.mSummary.textContent = `term index load failed: ${e}`; return false; }
+      }
+
       /* Semantic search: embed the query in-browser, range-fetch the nprobe nearest
          IVFPQ clusters, ADC-rank → ranked doc IDs (shared id space with the records). */
       async function semanticIds(q, k) {
@@ -1581,6 +1597,32 @@
           // no exact match — fall through to a normal search for the typed string
         } else {
           setPerf({ doilookup: null });
+        }
+        // Term mode: whole-word (stemmed) search via the FST term index — the dictionary
+        // is resident, so a query range-fetches only the matched terms' postings. Renders
+        // through the same showDocs() doc-ID path; facets filter it like the others.
+        if (searchMode === "term") {
+          const ok = await ensureTermIndex();
+          if (mySeq !== searchSeq) return;
+          if (!ok) { els.mSummary.textContent = "term search unavailable for this dataset"; return; }
+          const filters = Array.from(activeFilters);
+          const t0 = performance.now(), r0 = reqs, b0 = bytes;
+          let ids;
+          try { ids = Array.from(await rterm.search(q, filters.length ? SEM_K_FILTER : SEM_K)); }
+          catch (e) { els.mSummary.textContent = `term error: ${e}`; return; }
+          if (mySeq !== searchSeq) return;
+          const searchMs = performance.now() - t0, searchReqs = reqs - r0, searchBytes = bytes - b0;
+          const ff = await facetFilter(ids, filters);
+          if (mySeq !== searchSeq) return;
+          cur = null;
+          setPerf({
+            search: { ms: searchMs, reqs: searchReqs, bytes: searchBytes },
+            facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
+            embed: null, vsearch: null, tail: null, tailresults: null,
+          });
+          await showDocs(ff.ids.slice(0, PAGE), mySeq,
+            `term${filters.length ? " + facets" : ""} · ${ff.ids.length} match${ff.ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`, true);
+          return;
         }
         // Semantic / hybrid: embed the query in-browser (model2vec) and search the
         // vector index; render through the same showDocs() doc-ID path.

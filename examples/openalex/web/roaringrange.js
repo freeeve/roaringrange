@@ -1067,6 +1067,120 @@ export class RrsSortCols {
 if (Symbol.dispose) RrsSortCols.prototype[Symbol.dispose] = RrsSortCols.prototype.free;
 
 /**
+ * A range-fetchable `RRTI` term-level inverted index exposed to JavaScript. Boot
+ * holds the FST term dictionary in memory; each query range-fetches only the
+ * matched terms' postings. Built with
+ * `wasm-pack build --target web --features "wasm terms"`.
+ */
+export class RrtIndex {
+    static __wrap(ptr) {
+        const obj = Object.create(RrtIndex.prototype);
+        obj.__wbg_ptr = ptr;
+        RrtIndexFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RrtIndexFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_rrtindex_free(ptr, 0);
+    }
+    /**
+     * Autocompletes `prefix`: returns up to `max_terms` dictionary terms that
+     * start with it, in lexicographic order, as a JS `string[]`. Walks the
+     * resident FST only — no fetches.
+     * @param {string} prefix
+     * @param {number} max_terms
+     * @returns {string[]}
+     */
+    complete(prefix, max_terms) {
+        const ptr0 = passStringToWasm0(prefix, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrtindex_complete(this.__wbg_ptr, ptr0, len0, max_terms);
+        var v2 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v2;
+    }
+    /**
+     * Whether the dictionary holds no terms.
+     * @returns {boolean}
+     */
+    isEmpty() {
+        const ret = wasm.rrtindex_isEmpty(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Number of distinct terms in the dictionary.
+     * @returns {number}
+     */
+    len() {
+        const ret = wasm.rrtindex_len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Boots the index at `url`: one boot read of the FST term dictionary, held
+     * resident so a term resolves to its posting location with no further reads.
+     * Returns a `Promise<RrtIndex>`.
+     * @param {string} url
+     * @returns {Promise<RrtIndex>}
+     */
+    static open(url) {
+        const ptr0 = passStringToWasm0(url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrtindex_open(ptr0, len0);
+        return ret;
+    }
+    /**
+     * Returns up to `limit` doc IDs matching every query term (whole-word AND),
+     * most popular first (ascending doc ID == descending rank). Resolves to a
+     * `Uint32Array`. A query term absent from the dictionary yields no results.
+     * @param {string} query
+     * @param {number} limit
+     * @returns {Promise<Uint32Array>}
+     */
+    search(query, limit) {
+        const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrtindex_search(this.__wbg_ptr, ptr0, len0, limit);
+        return ret;
+    }
+    /**
+     * Returns up to `limit` doc IDs matching any term within Levenshtein edit
+     * distance `max_edits` of `term` (the union of every fuzzy-matching term's
+     * posting), most popular first. Resolves to a `Uint32Array`.
+     * @param {string} term
+     * @param {number} max_edits
+     * @param {number} limit
+     * @returns {Promise<Uint32Array>}
+     */
+    searchFuzzy(term, max_edits, limit) {
+        const ptr0 = passStringToWasm0(term, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrtindex_searchFuzzy(this.__wbg_ptr, ptr0, len0, max_edits, limit);
+        return ret;
+    }
+    /**
+     * Returns up to `limit` doc IDs matching any term that starts with `prefix`
+     * (the union of every prefix-matching term's posting), most popular first.
+     * Resolves to a `Uint32Array`.
+     * @param {string} prefix
+     * @param {number} limit
+     * @returns {Promise<Uint32Array>}
+     */
+    searchPrefix(prefix, limit) {
+        const ptr0 = passStringToWasm0(prefix, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrtindex_searchPrefix(this.__wbg_ptr, ptr0, len0, limit);
+        return ret;
+    }
+}
+if (Symbol.dispose) RrtIndex.prototype[Symbol.dispose] = RrtIndex.prototype.free;
+
+/**
  * The result of [`RrviIndex::search`]: aligned doc IDs and similarity scores,
  * best-first. In JavaScript `ids` is a `Uint32Array` and `scores` a
  * `Float32Array`.
@@ -1549,6 +1663,10 @@ function __wbg_get_imports() {
             const ret = RrsSortCols.__wrap(arg0);
             return ret;
         },
+        __wbg_rrtindex_new: function(arg0) {
+            const ret = RrtIndex.__wrap(arg0);
+            return ret;
+        },
         __wbg_rrvihits_new: function(arg0) {
             const ret = RrviHits.__wrap(arg0);
             return ret;
@@ -1609,7 +1727,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 504, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 454, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h604311912c671172);
             return ret;
         },
@@ -1699,6 +1817,9 @@ const RrsSecondaryIndexFinalization = (typeof FinalizationRegistry === 'undefine
 const RrsSortColsFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rrssortcols_free(ptr, 1));
+const RrtIndexFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_rrtindex_free(ptr, 1));
 const RrviHitsFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rrvihits_free(ptr, 1));
@@ -1733,6 +1854,17 @@ function getArrayF32FromWasm0(ptr, len) {
 function getArrayF64FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
+}
+
+function getArrayJsValueFromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    const mem = getDataViewMemory0();
+    const result = [];
+    for (let i = ptr; i < ptr + 4 * len; i += 4) {
+        result.push(wasm.__wbindgen_externrefs.get(mem.getUint32(i, true)));
+    }
+    wasm.__externref_drop_slice(ptr, len);
+    return result;
 }
 
 function getArrayU32FromWasm0(ptr, len) {
