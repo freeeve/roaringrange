@@ -397,3 +397,29 @@ The spec's "biggest unknown" (a wasm tokenizer) — solved.
 compatible. Remaining for the live demo: wasm-pack build `--features "wasm vector"`,
 upload `openalex-head.rrvi` (6.9 MB) + `potion.rrm2` (33 MB) to S3, and wire the
 UI (semantic-search path + the keyword/semantic + backend toggle).
+
+### 2026-06-04 — Full-corpus semantic index: streaming builder + 1M interim live
+User chose **Full 484M** scale for the model2vec semantic index. Built a
+**streaming builder** that never materializes the ~990 GB of f32 vectors.
+
+- **`python/scripts/build_full_rrvi.py`** `<N> <out.rrvi> [nlist] [m]`: pipes the
+  record store through `dump_records` → model2vec (`potion-retrieval-32M`, 200K
+  batches) → FAISS `OPQ{m},IVF{nlist},PQ{m}` (METRIC_L2 on normalized vecs).
+  Buffers a 2M training sample, trains, then `add_with_ids` all docs (explicit
+  doc_id, so any unparseable record is skipped without shifting ids). Extracts
+  OPQ + centroids + PQ codebooks + per-vec (id, cluster, code), frees the FAISS
+  index, writes `.rrvi` via `write_rrvi_from_faiss` (metric="ip").
+- **Validated on 1M** (nlist=1024): 3m10s (embed 25K docs/s, train 141s, add 5s,
+  write 4s → 38 MB). "CRISPR genome editing" → 3 exact CRISPR/Cas9 genome-editing
+  papers (W2579163968, W2470801200, W2337751047). Pipeline confirmed correct.
+- **1M is LIVE as the interim demo index**: uploaded `s3://openalex-eve/
+  openalex-1m.rrvi`; `index.html` `full.rrvi` repointed `openalex-head.rrvi` →
+  `openalex-1m.rrvi` (10× the old 100K head); deployed + CF-invalidated. Demo
+  semantic/hybrid now covers the top 1M works.
+- **Full 484M build RUNNING** (bg): `build_full_rrvi.py 490000000
+  /tmp/oa-out/openalex-484m.rrvi 16384 32` → ~33 MB boot, ~17 MB/query at
+  nprobe 16 (the trade the user accepted). ~7–8h (embed-bound ~5.4h + train +
+  add + 17 GB write). 128 GB RAM / 677 GB disk headroom OK (peak ~55 GB).
+  **On completion**: upload as `openalex-484m.rrvi`, repoint demo `full.rrvi`,
+  deploy + invalidate. (Records-full text index/.rrs upload still in flight →
+  trigram+hybrid await it; semantic works standalone now.)
