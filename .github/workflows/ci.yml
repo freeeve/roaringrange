@@ -48,6 +48,12 @@ jobs:
       - name: Test (vector feature)
         working-directory: rust
         run: cargo test --features vector
+      - name: Test (terms feature)
+        working-directory: rust
+        run: cargo test --features terms
+      - name: Test (hotcache feature)
+        working-directory: rust
+        run: cargo test --features hotcache
       - name: Fmt
         working-directory: rust
         run: cargo fmt --check
@@ -57,6 +63,12 @@ jobs:
       - name: Clippy (vector feature)
         working-directory: rust
         run: cargo clippy --all-targets --features vector -- -D warnings
+      - name: Clippy (terms feature)
+        working-directory: rust
+        run: cargo clippy --all-targets --features terms -- -D warnings
+      - name: Clippy (hotcache feature)
+        working-directory: rust
+        run: cargo clippy --all-targets --features hotcache -- -D warnings
       - name: Builder fmt
         working-directory: examples/openalex/builder
         run: cargo fmt --check
