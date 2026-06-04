@@ -1,16 +1,19 @@
-"""Export a sentence-transformers embedder (default EmbeddingGemma-300M) to the
-artifacts the embed Lambda serves: a single ONNX graph (transformer + pooling +
-any dense + normalize baked in), the tokenizer, and a `recipe.json` carrying the
-query/document prompt strings + output dim. Then VALIDATE that the Lambda's
-onnxruntime recipe reproduces `SentenceTransformer.encode_query` to cosine
-> 0.999 — the #1 correctness check (corpus and query must share the exact recipe).
+"""Export the artifacts the embed Lambda serves (default EmbeddingGemma-300M),
+then VALIDATE the Lambda recipe against sentence-transformers.
 
-Run locally (needs torch + sentence-transformers + the model; license-gated):
-    pip install 'roaringrange[gemma]' optimum onnxruntime
+Raw `torch.onnx.export` trips on Gemma3's attention and optimum's
+sentence-transformers export clashes with current ST, so we split it: optimum
+exports just the **transformer** to ONNX (well supported), and we extract the
+model's post-steps from the ST model — masked mean-pool (config), the **dense**
+layers (`dense.npz` + their activations), and the query/document **prompts** — into
+`recipe.json`. The handler replays exactly those steps. Validation imports the real
+`handler` and asserts cos(handler.embed_query, encode_query) > 0.999.
+
+Run locally (needs torch + sentence-transformers + optimum-onnx + onnxruntime + the
+gated model):
+    pip install 'roaringrange[gemma]' optimum optimum-onnx onnxruntime
+    # accept terms at hf.co/google/embeddinggemma-300m, then `huggingface-cli login`
     python export_model.py --model google/embeddinggemma-300m --out model --dim 512
-
-The Dockerfile copies the resulting `model/` into the image; the runtime needs
-only onnxruntime + tokenizers (no torch).
 """
 from __future__ import annotations
 
@@ -20,106 +23,90 @@ import os
 
 import numpy as np
 
+QUERIES = [
+    "self-supervised representation learning",
+    "CRISPR genome editing",
+    "programming language for statistical data analysis",
+]
+
 
 def export(model_name: str, out_dir: str, dim: int):
-    import torch
+    from optimum.exporters.onnx import main_export
     from sentence_transformers import SentenceTransformer
 
-    st = SentenceTransformer(model_name)
-    st.eval()
     os.makedirs(out_dir, exist_ok=True)
 
-    # Wrap the full ST pipeline so the ONNX graph maps tokenized input directly to
-    # the final (pooled, dense-projected, normalized) sentence embedding — the
-    # handler then only tokenizes and (MRL-) truncates, replicating no recipe math.
-    class FullPipeline(torch.nn.Module):
-        def __init__(self, model):
-            super().__init__()
-            self.model = model
-
-        def forward(self, input_ids, attention_mask):
-            out = self.model({"input_ids": input_ids, "attention_mask": attention_mask})
-            return out["sentence_embedding"]
-
-    wrap = FullPipeline(st)
-    enc = st.tokenizer(
-        ["the quick brown fox"], padding=True, truncation=True, return_tensors="pt"
-    )
-    onnx_path = os.path.join(out_dir, "model.onnx")
-    torch.onnx.export(
-        wrap,
-        (enc["input_ids"], enc["attention_mask"]),
-        onnx_path,
-        input_names=["input_ids", "attention_mask"],
-        output_names=["embedding"],
-        dynamic_axes={
-            "input_ids": {0: "batch", 1: "seq"},
-            "attention_mask": {0: "batch", 1: "seq"},
-            "embedding": {0: "batch"},
-        },
-        opset_version=17,
+    # 1) transformer -> ONNX (outputs last_hidden_state). library_name="transformers"
+    #    avoids optimum's sentence-transformers path (incompatible with ST 5.x).
+    main_export(
+        model_name,
+        output=out_dir,
+        task="feature-extraction",
+        library_name="transformers",
+        opset=17,
     )
 
-    # tokenizer.json (+ tokenizer config) for the runtime `tokenizers` loader.
-    st.tokenizer.save_pretrained(out_dir)
+    # 2) extract the post-transformer recipe straight from the ST model.
+    st = SentenceTransformer(model_name, device="cpu")
+    pool = st[1].get_config_dict()
+    if not (pool.get("pooling_mode_mean_tokens") or pool.get("pooling_mode") == "mean"):
+        raise SystemExit(f"expected mean pooling, got {pool}")
 
-    # Prompt strings (prepended to the text). EmbeddingGemma is asymmetric.
+    dense_acts = []
+    npz = {}
+    di = 0
+    for mod in st:
+        if type(mod).__name__ == "Dense":
+            w = mod.linear.weight.detach().cpu().numpy().astype("float32")
+            bias = mod.linear.bias
+            b = (
+                bias.detach().cpu().numpy().astype("float32")
+                if bias is not None
+                else np.zeros(w.shape[0], dtype="float32")
+            )
+            npz[f"W{di}"] = w
+            npz[f"b{di}"] = b
+            dense_acts.append(type(mod.activation_function).__name__)
+            di += 1
+    np.savez(os.path.join(out_dir, "dense.npz"), **npz)
+
     prompts = dict(getattr(st, "prompts", {}) or {})
-    query_prompt = prompts.get("query", prompts.get("Retrieval-query", ""))
-    document_prompt = prompts.get("document", prompts.get("Retrieval-document", ""))
     recipe = {
         "model": model_name,
         "dim": dim,
-        "query_prompt": query_prompt,
-        "document_prompt": document_prompt,
+        "pooling": "mean",
+        "n_dense": di,
+        "dense_acts": dense_acts,
+        "query_prompt": prompts.get("query", prompts.get("Retrieval-query", "")),
+        "document_prompt": prompts.get("document", prompts.get("Retrieval-document", "")),
         "all_prompts": prompts,
     }
     with open(os.path.join(out_dir, "recipe.json"), "w") as f:
         json.dump(recipe, f, indent=2)
-    print(f"exported -> {out_dir} (query_prompt={query_prompt!r})")
+    print(f"exported -> {out_dir}: {di} dense layer(s) {dense_acts}, "
+          f"query_prompt={recipe['query_prompt']!r}")
     return st
 
 
 def validate(st, out_dir: str, dim: int):
-    """Replicates the Lambda recipe with onnxruntime + tokenizers and asserts it
-    matches sentence-transformers' encode_query."""
-    import onnxruntime as ort
-    from tokenizers import Tokenizer
+    # Import the REAL handler against the just-written artifacts (no recipe drift).
+    os.environ["EMBED_MODEL_DIR"] = os.path.abspath(out_dir)
+    import importlib
 
-    recipe = json.load(open(os.path.join(out_dir, "recipe.json")))
-    tok = Tokenizer.from_file(os.path.join(out_dir, "tokenizer.json"))
-    sess = ort.InferenceSession(
-        os.path.join(out_dir, "model.onnx"), providers=["CPUExecutionProvider"]
-    )
-    in_names = {i.name for i in sess.get_inputs()}
+    import handler
 
-    def lambda_recipe(text):
-        enc = tok.encode(recipe["query_prompt"] + text)
-        feed = {}
-        if "input_ids" in in_names:
-            feed["input_ids"] = np.array([enc.ids], dtype=np.int64)
-        if "attention_mask" in in_names:
-            feed["attention_mask"] = np.array([enc.attention_mask], dtype=np.int64)
-        out = sess.run(None, feed)[0][0]
-        v = out[:dim].astype(np.float32)
-        n = np.linalg.norm(v)
-        return v / n if n else v
+    importlib.reload(handler)
 
-    queries = [
-        "self-supervised representation learning",
-        "CRISPR genome editing",
-        "programming language for statistical data analysis",
-    ]
-    ref = st.encode_query(queries, truncate_dim=dim, normalize_embeddings=True)
+    ref = st.encode_query(QUERIES, truncate_dim=dim, normalize_embeddings=True)
     worst = 1.0
-    for q, r in zip(queries, ref):
-        mine = lambda_recipe(q)
+    for q, r in zip(QUERIES, ref):
+        mine = handler.embed_query(q)
         cos = float(np.dot(mine, r) / (np.linalg.norm(mine) * np.linalg.norm(r)))
         worst = min(worst, cos)
         print(f"  cos={cos:.5f}  {q!r}")
     if worst < 0.999:
         raise SystemExit(f"recipe MISMATCH (worst cos {worst:.5f}) — Lambda would query a different space")
-    print(f"OK: Lambda onnx recipe matches encode_query (worst cos {worst:.5f})")
+    print(f"OK: Lambda recipe matches encode_query (worst cos {worst:.5f})")
 
 
 def main():

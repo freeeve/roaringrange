@@ -347,6 +347,30 @@ Gemma query vector; the browser then runs `RrviIndex.search(vector)` itself.
   (`model/` weights never committed), `README.md` (export → ECR → Lambda
   Function URL + CORS → wire to the reader). Bedrock ruled out (closed embedders
   → different space + paid corpus pass).
-- **Pending**: run `export_model.py` to produce/validate the ONNX (needs the
-  cached model + torch; deferred while the bench runs), then the user deploys
-  (AWS infra). int8-quantize the ONNX for the full-corpus image is a follow-up.
+- **DONE + VALIDATED (2026-06-03)**: the export path works. Raw `torch.onnx.export`
+  can't trace Gemma3 (dynamo + legacy both fail) and optimum's sentence-transformers
+  export clashes with ST 5.5.1 — so `export_model.py` exports just the **transformer**
+  via optimum (`library_name="transformers"`, opset 17) and extracts the post-steps
+  from the ST model: masked mean-pool, the **2 Dense layers** (both Identity →
+  `dense.npz`), and the query prompt → `recipe.json`. `handler.py` replays them in
+  numpy. Validation imports the real handler and gets **cosine 1.00000** vs
+  `encode_query` on 3 queries (incl. the paraphrase one) — recipe match proven.
+  Smoke-tested `lambda_handler` (GET/POST/empty → 200, unit-norm 512-d vector, CORS).
+  Artifacts in `model/` (git-ignored): `model.onnx` 1.1 GB fp32, `dense.npz` 18 MB,
+  `tokenizer.json` 32 MB, `recipe.json`. **Pending**: user deploys (ECR + Function
+  URL); int8-quantize the ONNX for a smaller image is a follow-up.
+
+### 2026-06-03 — KEEPER DECIDED: Gemma for mode 1 (bench verdict)
+Ran `bench_embedders.py` on the top-20K OpenAlex subset, model2vec vs
+EmbeddingGemma-300M (real HF model, sentence-transformers 5.5.1). Verdict:
+**Gemma wins decisively on semantic/paraphrase queries**, both comparable on
+keyword queries — so mode 1 = **EmbeddingGemma-300M** (dim 512), model2vec stays
+the $0 no-backend mode-2 fallback. Examples (model2vec → Gemma):
+- "programming language for statistical data analysis": missed R → **#1 Stan, #4 R**.
+- "deep NN for recognizing objects in images": no ResNet → **#2/#4 ResNet**.
+- "transformer attention NMT": *Attention Is All You Need* #5 → **#2**, all top-5 on-topic.
+- "measure protein concentration": Bradford #4, no Lowry → **Bradford #2, Lowry #3**.
+- CRISPR / gravitational waves (keyword): tie.
+(Gemma's absolute cosines are lower — score distribution, not quality.) Per the
+spec this is the "decide before the full embed" gate → commit to Gemma; don't
+re-embed twice. The corpus build uses `embed_documents`; the Lambda `embed_query`.

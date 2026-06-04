@@ -18,24 +18,30 @@ in our own pay-per-invoke function. Bedrock only offers *closed* embedders
 (Titan/Cohere) → different space + paid corpus pass. See `VECTORS.md` / task 004.
 
 ## Runtime: onnxruntime, no torch
-`export_model.py` bakes the whole sentence-transformers pipeline (transformer +
-pooling + dense + normalize) into one ONNX graph at build time; the image carries
-only `onnxruntime` + `tokenizers` + `numpy` (small, fast cold start). The handler
-just applies the query prompt, tokenizes, runs the graph, MRL-truncates, and
-L2-normalizes.
+`export_model.py` exports the **transformer** to ONNX with optimum (raw
+`torch.onnx.export` trips on Gemma3 attention; optimum's sentence-transformers
+export clashes with current ST — so we export the transformer and replay the rest)
+and extracts the model's post-steps — masked mean-pool, the dense layers
+(`dense.npz` + activations), the query prompt — into `recipe.json`. The image
+carries only `onnxruntime` + `tokenizers` + `numpy` (no torch). `handler.py`
+replays exactly: query-prompt → tokenize → transformer ONNX → masked mean-pool →
+dense → normalize → MRL-truncate. Validation confirms this reproduces
+`encode_query` at **cosine 1.0** (EmbeddingGemma's 2 dense layers are Identity).
 
 ## Build
 
 1. **Export the model** (needs torch + the gated model — one-time, local):
    ```sh
-   pip install 'roaringrange[gemma]' optimum onnxruntime
+   pip install 'roaringrange[gemma]' optimum optimum-onnx onnxruntime
    # accept terms at hf.co/google/embeddinggemma-300m, then `huggingface-cli login`
    python export_model.py --model google/embeddinggemma-300m --out model --dim 512
    ```
-   This writes `model/{model.onnx,tokenizer.json,recipe.json}` and **validates**
-   that the Lambda's onnxruntime recipe reproduces `encode_query` (cosine > 0.999).
-   The query prompt is captured from the model into `recipe.json` — never
-   hard-coded. (`model/` is git-ignored; weights are never committed.)
+   This writes `model/{model.onnx,dense.npz,tokenizer.json,recipe.json}` and
+   **validates** that the Lambda recipe reproduces `encode_query` (asserts cosine
+   > 0.999; got 1.0). The query prompt + dense activations are captured from the
+   model into `recipe.json`/`dense.npz` — never hard-coded. (`model/` is
+   git-ignored; weights are never committed. `model.onnx` is ~1.1 GB fp32 —
+   int8-quantize it with optimum for a smaller image; re-run the validation.)
 
 2. **Build + push the image:**
    ```sh
