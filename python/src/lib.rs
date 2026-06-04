@@ -28,6 +28,7 @@ use roaringrange_core::build::{
 use roaringrange_core::ngram_keys;
 use roaringrange_core::vector::{METRIC_IP, METRIC_L2};
 use roaringrange_core::write_term_index as core_write_term_index;
+use roaringrange_core::{Language, TermIndexBuilder, TermIndexConfig};
 use roaringrange_core::{
     build_ivfpq, build_ivfpq_from_parts, IvfpqParams, IvfpqParts, VectorBuildError,
 };
@@ -503,6 +504,74 @@ fn write_term_index(
     Ok(())
 }
 
+/// A streaming `RRTI` term-index builder for corpora too large to hold in memory.
+/// Construct with a head boundary and optional Snowball stemming / stop-word removal,
+/// feed `(doc_id, text)` documents in chunks with `add_batch` (each is tokenized and the
+/// text discarded — only the postings grow), then `finish(path)` writes the `.rrt`. Doc
+/// IDs should be the shared rank-order IDs so the index composes with the others.
+#[pyclass]
+struct TermBuilder {
+    inner: Option<TermIndexBuilder>,
+}
+
+#[pymethods]
+impl TermBuilder {
+    #[new]
+    #[pyo3(signature = (head_boundary = None, language = None, stopwords = false))]
+    fn new(
+        head_boundary: Option<u32>,
+        language: Option<String>,
+        stopwords: bool,
+    ) -> PyResult<Self> {
+        let language = match language.as_deref() {
+            None => None,
+            Some("english") | Some("en") => Some(Language::English),
+            Some(other) => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown stemmer language {other:?} (supported: \"english\")"
+                )))
+            }
+        };
+        let config = TermIndexConfig {
+            head_boundary: head_boundary.unwrap_or(DEFAULT_HEAD_BOUNDARY),
+            language,
+            stopwords,
+        };
+        Ok(TermBuilder {
+            inner: Some(TermIndexBuilder::new(&config)),
+        })
+    }
+
+    /// Adds a batch of `(doc_id, text)` documents; the text is tokenized and discarded.
+    fn add_batch(&mut self, docs: Vec<(u32, String)>) -> PyResult<()> {
+        let b = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TermBuilder already finished"))?;
+        for (doc, text) in &docs {
+            b.add(*doc, text);
+        }
+        Ok(())
+    }
+
+    /// Distinct terms accumulated so far.
+    fn term_count(&self) -> usize {
+        self.inner.as_ref().map_or(0, TermIndexBuilder::len)
+    }
+
+    /// Writes the accumulated index to `path`, consuming the builder.
+    fn finish(&mut self, path: &str) -> PyResult<()> {
+        let b = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("TermBuilder already finished"))?;
+        let p = Path::new(path);
+        create_parent(p)?;
+        b.finish(File::create(p).map_err(io_err)?).map_err(io_err)?;
+        Ok(())
+    }
+}
+
 fn io_err(e: std::io::Error) -> PyErr {
     PyIOError::new_err(e.to_string())
 }
@@ -516,5 +585,6 @@ fn roaringrange(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tokenize, m)?)?;
     m.add_function(wrap_pyfunction!(write_rrvi_from_faiss, m)?)?;
     m.add_function(wrap_pyfunction!(write_term_index, m)?)?;
+    m.add_class::<TermBuilder>()?;
     Ok(())
 }

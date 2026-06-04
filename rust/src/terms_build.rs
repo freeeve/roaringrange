@@ -55,82 +55,121 @@ pub fn write_term_index<W: Write>(
     )
 }
 
-/// Builds an `RRTI` term index with an explicit [`TermIndexConfig`] and writes it to
-/// `w`. Each document's text is tokenized through the configured [`Tokenizer`]
-/// (SimpleTokenizer + LowerCaser, then optional stop-word removal and Snowball
-/// stemming), and the config is recorded in the header so the reader tokenizes queries
-/// the same way.
+/// Builds an `RRTI` term index with an explicit [`TermIndexConfig`] over an in-memory
+/// `docs` slice and writes it to `w`. Convenience over [`TermIndexBuilder`]; for a
+/// large corpus, stream documents into a [`TermIndexBuilder`] instead so the text is
+/// never all held at once.
 pub fn write_term_index_with<W: Write>(
-    mut w: W,
+    w: W,
     docs: &[(u32, &str)],
     config: &TermIndexConfig,
 ) -> io::Result<()> {
-    let tokenizer = Tokenizer::new(config.language, config.stopwords);
-    let head_boundary = config.head_boundary;
-    // 1. term -> doc-id bitmap. A BTreeMap keeps terms in byte-lexicographic order
-    // (UTF-8 byte order == codepoint order == `str` ordering), which is exactly the
-    // strictly-increasing order the FST builder requires.
-    let mut postings: BTreeMap<String, RoaringBitmap> = BTreeMap::new();
+    let mut builder = TermIndexBuilder::new(config);
     for &(doc, text) in docs {
-        for term in tokenizer.tokenize(text) {
-            postings.entry(term).or_default().insert(doc);
+        builder.add(doc, text);
+    }
+    builder.finish(w)
+}
+
+/// A streaming `RRTI` builder. Feed documents incrementally with [`add`](Self::add)
+/// (or [`add_text`](Self::add) repeatedly): each is tokenized through the configured
+/// [`Tokenizer`] and its text discarded, so only the `term -> doc-id bitmap` postings
+/// grow — never all the corpus text at once. [`finish`](Self::finish) writes the index.
+/// The tokenizer config (head boundary + stemming/stop words) is fixed at construction
+/// and recorded in the header for build/query symmetry.
+pub struct TermIndexBuilder {
+    postings: BTreeMap<String, RoaringBitmap>,
+    tokenizer: Tokenizer,
+    head_boundary: u32,
+    language: Option<Language>,
+    stopwords: bool,
+}
+
+impl TermIndexBuilder {
+    /// Creates an empty builder with the given config.
+    pub fn new(config: &TermIndexConfig) -> Self {
+        TermIndexBuilder {
+            postings: BTreeMap::new(),
+            tokenizer: Tokenizer::new(config.language, config.stopwords),
+            head_boundary: config.head_boundary,
+            language: config.language,
+            stopwords: config.stopwords,
         }
     }
 
-    // 2. Lay out the postings region and record each term's packed FST output.
-    // Each block is `[tail_size: u32 LE][head bytes][tail bytes]`; the FST output
-    // packs `(head_off << 24) | head_size`.
-    let mut region: Vec<u8> = Vec::new();
-    let mut outputs: Vec<u64> = Vec::with_capacity(postings.len());
-    for (term, bm) in &postings {
-        let (head, tail) = split_posting(bm, head_boundary);
-        let head_off = region.len() as u64;
-        let head_size = head.len();
-        if head_size >= (1usize << SIZE_BITS) {
-            return Err(io::Error::other(format!(
-                "term {term:?}: head posting {head_size} B exceeds the 24-bit size limit"
-            )));
+    /// Tokenizes `text` and records `doc` under each resulting term. The text is not
+    /// retained — only the postings grow. `doc` should be the shared rank-order ID.
+    pub fn add(&mut self, doc: u32, text: &str) {
+        for term in self.tokenizer.tokenize(text) {
+            self.postings.entry(term).or_default().insert(doc);
         }
-        if head_off >= (1u64 << (64 - SIZE_BITS)) {
-            return Err(io::Error::other(
-                "postings region exceeds the 40-bit offset limit",
-            ));
-        }
-        region.extend_from_slice(&(tail.len() as u32).to_le_bytes());
-        region.extend_from_slice(&head);
-        region.extend_from_slice(&tail);
-        outputs.push((head_off << SIZE_BITS) | head_size as u64);
     }
 
-    // 3. Build the FST term dictionary: term -> packed output, in sorted order.
-    let mut builder = MapBuilder::memory();
-    for (term, out) in postings.keys().zip(&outputs) {
-        builder
-            .insert(term.as_bytes(), *out)
-            .map_err(|e| io::Error::other(format!("fst insert: {e}")))?;
+    /// Number of distinct terms accumulated so far.
+    pub fn len(&self) -> usize {
+        self.postings.len()
     }
-    let fst_bytes = builder
-        .into_inner()
-        .map_err(|e| io::Error::other(format!("fst finish: {e}")))?;
 
-    // 4. Header (32 B) + FST dictionary + postings region. `flags` records the
-    // tokenizer (stemmed / stop-words); the first reserved byte carries the stemmer
-    // language so the reader rebuilds the identical tokenizer.
-    let flags = (if config.language.is_some() {
-        FLAG_STEMMED
-    } else {
-        0
-    }) | (if config.stopwords { FLAG_STOPWORDS } else { 0 });
-    let mut reserved = [0u8; 8];
-    reserved[0] = config.language.map_or(0, |l| l.to_u8());
-    w.write_all(MAGIC)?;
-    w.write_all(&VERSION.to_le_bytes())?;
-    w.write_all(&flags.to_le_bytes())?;
-    w.write_all(&(postings.len() as u32).to_le_bytes())?;
-    w.write_all(&head_boundary.to_le_bytes())?;
-    w.write_all(&(fst_bytes.len() as u64).to_le_bytes())?;
-    w.write_all(&reserved)?; // first byte = stemmer language; pads the header to 32 B
-    w.write_all(&fst_bytes)?;
-    w.write_all(&region)?;
-    Ok(())
+    /// Whether no terms have been added.
+    pub fn is_empty(&self) -> bool {
+        self.postings.is_empty()
+    }
+
+    /// Writes the accumulated `RRTI` index to `w`, consuming the builder. Terms are
+    /// drained in byte-lexicographic order (a `BTreeMap`, exactly the FST builder's
+    /// required order), and each posting bitmap is freed right after it is serialized,
+    /// so the peak memory is the postings region rather than double it.
+    pub fn finish<W: Write>(self, mut w: W) -> io::Result<()> {
+        let term_count = self.postings.len() as u32;
+        let head_boundary = self.head_boundary;
+
+        // Lay out the postings region and build the FST in one sorted, draining pass.
+        // Each block is `[tail_size: u32 LE][head bytes][tail bytes]`; the FST output
+        // packs `(head_off << 24) | head_size`.
+        let mut region: Vec<u8> = Vec::new();
+        let mut fst = MapBuilder::memory();
+        for (term, bm) in self.postings {
+            let (head, tail) = split_posting(&bm, head_boundary);
+            let head_off = region.len() as u64;
+            let head_size = head.len();
+            if head_size >= (1usize << SIZE_BITS) {
+                return Err(io::Error::other(format!(
+                    "term {term:?}: head posting {head_size} B exceeds the 24-bit size limit"
+                )));
+            }
+            if head_off >= (1u64 << (64 - SIZE_BITS)) {
+                return Err(io::Error::other(
+                    "postings region exceeds the 40-bit offset limit",
+                ));
+            }
+            region.extend_from_slice(&(tail.len() as u32).to_le_bytes());
+            region.extend_from_slice(&head);
+            region.extend_from_slice(&tail);
+            fst.insert(term.as_bytes(), (head_off << SIZE_BITS) | head_size as u64)
+                .map_err(|e| io::Error::other(format!("fst insert: {e}")))?;
+        }
+        let fst_bytes = fst
+            .into_inner()
+            .map_err(|e| io::Error::other(format!("fst finish: {e}")))?;
+
+        // Header (32 B): `flags` records the tokenizer (stemmed / stop-words); the first
+        // reserved byte carries the stemmer language so the reader rebuilds it.
+        let flags = (if self.language.is_some() {
+            FLAG_STEMMED
+        } else {
+            0
+        }) | (if self.stopwords { FLAG_STOPWORDS } else { 0 });
+        let mut reserved = [0u8; 8];
+        reserved[0] = self.language.map_or(0, |l| l.to_u8());
+        w.write_all(MAGIC)?;
+        w.write_all(&VERSION.to_le_bytes())?;
+        w.write_all(&flags.to_le_bytes())?;
+        w.write_all(&term_count.to_le_bytes())?;
+        w.write_all(&head_boundary.to_le_bytes())?;
+        w.write_all(&(fst_bytes.len() as u64).to_le_bytes())?;
+        w.write_all(&reserved)?; // first byte = stemmer language; pads the header to 32 B
+        w.write_all(&fst_bytes)?;
+        w.write_all(&region)?;
+        Ok(())
+    }
 }
