@@ -331,3 +331,22 @@ Both modes' embedders now exist in code; ready to pick the keeper per the spec
   images" misses **ResNet/ImageNet**; "Attention Is All You Need" ranks only #5.
   This is exactly where Gemma (semantic) should win → bench it to choose.
 - Status: model2vec ✅ installed/working; Gemma ❌ (gated, needs token + install).
+
+### 2026-06-03 — Step 6 scaffold: mode-1 query-embedding Lambda
+`examples/embed-lambda/` — a container-image Lambda that turns query text into a
+Gemma query vector; the browser then runs `RrviIndex.search(vector)` itself.
+
+- **Torch-free runtime per the spec**: `export_model.py` bakes the full
+  sentence-transformers pipeline (transformer+pooling+dense+normalize) into one
+  ONNX graph at build time; `handler.py` serves it with only onnxruntime +
+  tokenizers + numpy (query prompt → tokenize → onnx → MRL-truncate → L2).
+- **Recipe match guarded**: export captures the query prompt from the model into
+  `recipe.json` (never hard-coded) and validates the Lambda recipe vs
+  `encode_query` (asserts cosine > 0.999) — the #1 correctness risk.
+- `Dockerfile` (AWS lambda python base), `requirements.txt`, `.gitignore`
+  (`model/` weights never committed), `README.md` (export → ECR → Lambda
+  Function URL + CORS → wire to the reader). Bedrock ruled out (closed embedders
+  → different space + paid corpus pass).
+- **Pending**: run `export_model.py` to produce/validate the ONNX (needs the
+  cached model + torch; deferred while the bench runs), then the user deploys
+  (AWS infra). int8-quantize the ONNX for the full-corpus image is a follow-up.

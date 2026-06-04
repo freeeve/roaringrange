@@ -1,0 +1,4 @@
+# Exported model artifacts — never commit weights (Gemma is license-gated).
+model/
+*.onnx
+__pycache__/
