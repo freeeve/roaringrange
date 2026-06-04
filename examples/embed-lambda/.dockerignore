@@ -1,0 +1,7 @@
+# Keep the fp32 model out of the image — the handler uses model.int8.onnx.
+model/model.onnx
+# Build-time-only / not needed at runtime.
+export_model.py
+README.md
+__pycache__/
+*.pyc

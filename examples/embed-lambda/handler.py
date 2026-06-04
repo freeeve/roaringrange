@@ -37,8 +37,12 @@ def _load():
     if _sess is None:
         _recipe = json.load(open(os.path.join(_DIR, "recipe.json")))
         _tok = Tokenizer.from_file(os.path.join(_DIR, "tokenizer.json"))
+        # Prefer the int8-quantized model (4x smaller, faster) when present.
+        onnx = "model.int8.onnx"
+        if not os.path.exists(os.path.join(_DIR, onnx)):
+            onnx = "model.onnx"
         _sess = ort.InferenceSession(
-            os.path.join(_DIR, "model.onnx"), providers=["CPUExecutionProvider"]
+            os.path.join(_DIR, onnx), providers=["CPUExecutionProvider"]
         )
         _in_names = {i.name for i in _sess.get_inputs()}
         outs = [o.name for o in _sess.get_outputs()]
