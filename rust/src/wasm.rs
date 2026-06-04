@@ -60,6 +60,40 @@ impl WasmFetch {
             .dyn_into::<js_sys::Promise>()
             .map_err(|_| FetchError::Transport("fetch did not return a promise".into()))
     }
+
+    /// Downloads the entire object at `url` (a plain GET, no `Range`) — used for
+    /// the one-time model2vec `RRM2` artifact, which must be held whole in memory.
+    #[cfg(feature = "vector")]
+    async fn get_all(url: &str) -> Result<Vec<u8>, FetchError> {
+        let opts = RequestInit::new();
+        opts.set_method("GET");
+        opts.set_mode(RequestMode::Cors);
+        let request = Request::new_with_str_and_init(url, &opts)
+            .map_err(|e| FetchError::Transport(js_err(&e)))?;
+        let promise = WasmFetch::global_fetch(&request)?;
+        let resp_value = JsFuture::from(promise)
+            .await
+            .map_err(|e| FetchError::Transport(js_err(&e)))?;
+        let response: Response = resp_value
+            .dyn_into()
+            .map_err(|_| FetchError::Transport("fetch returned a non-Response".into()))?;
+        if !response.ok() {
+            return Err(FetchError::Transport(format!(
+                "HTTP {} for {url}",
+                response.status()
+            )));
+        }
+        let buf_promise = response
+            .array_buffer()
+            .map_err(|e| FetchError::Transport(js_err(&e)))?;
+        let buf_value = JsFuture::from(buf_promise)
+            .await
+            .map_err(|e| FetchError::Transport(js_err(&e)))?;
+        let array_buffer: ArrayBuffer = buf_value
+            .dyn_into()
+            .map_err(|_| FetchError::Transport("array_buffer was not an ArrayBuffer".into()))?;
+        Ok(Uint8Array::new(&array_buffer).to_vec())
+    }
 }
 
 /// Formats a `JsValue` error into a human-readable string.
@@ -1276,4 +1310,39 @@ pub fn reciprocal_rank_fusion_js(
         .into_iter()
         .map(|(id, _)| id)
         .collect()
+}
+
+/// The in-browser model2vec query embedder (mode 2) exposed to JavaScript: turns
+/// query text into a `Float32Array` vector with no backend, to feed
+/// [`RrviIndex::search`]. Built with `wasm-pack build --features "wasm vector"`.
+#[cfg(feature = "vector")]
+#[wasm_bindgen]
+pub struct Model2vecEmbedder {
+    inner: crate::model2vec::Model2vec,
+}
+
+#[cfg(feature = "vector")]
+#[wasm_bindgen]
+impl Model2vecEmbedder {
+    /// Downloads the `RRM2` artifact at `url` once (a plain GET; ~tens of MB,
+    /// browser-cached) and builds the embedder. Returns a `Promise<Model2vecEmbedder>`.
+    pub async fn open(url: String) -> Result<Model2vecEmbedder, JsError> {
+        let bytes = WasmFetch::get_all(&url)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let inner = crate::model2vec::Model2vec::from_bytes(&bytes)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(Model2vecEmbedder { inner })
+    }
+
+    /// Vector dimensionality (must match the `RRVI` index it queries).
+    pub fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+
+    /// Embeds `text` into a `Float32Array` query vector (BERT tokenize → static
+    /// embedding mean-pool → L2-normalize). Pass it to `RrviIndex.search`.
+    pub fn embed(&self, text: &str) -> Vec<f32> {
+        self.inner.embed(text)
+    }
 }

@@ -21,6 +21,11 @@ pub mod sortcols;
 #[cfg(feature = "vector")]
 pub mod vector;
 
+/// In-browser model2vec query embedder (mode 2): BERT tokenize → static-embedding
+/// mean-pool, no backend. Behind the `vector` feature; wasm-safe.
+#[cfg(feature = "vector")]
+pub mod model2vec;
+
 /// Container-level ranged reads into tail postings (search-fetch reduction).
 mod posting;
 
@@ -43,6 +48,8 @@ pub use records::RecordStore;
 pub use secondary::{SecondaryCursor, SecondaryIndex};
 pub use sortcols::{ColInfo, SortCols, Value, ValueType};
 
+#[cfg(feature = "vector")]
+pub use model2vec::Model2vec;
 #[cfg(feature = "vector")]
 pub use vector::{reciprocal_rank_fusion, RerankStore, VectorHit, VectorIndex};
 #[cfg(all(feature = "vector", not(target_arch = "wasm32")))]
