@@ -295,3 +295,21 @@ Quality layer on the reserved-header space.
   nprobe, and an exact RRF ordering case ([1,2,3]+[3,2,4] → [3,2,1,4]).
 - Gates: 55 lib + 11 vector tests, clippy (default + vector + wasm32 "wasm
   vector"), fmt. (Python `write_rerank` binding deferred — re-rank is optional.)
+
+### 2026-06-03 — First real RRVI built (top-100K OpenAlex subset)
+Mode 2 on real data, end to end.
+
+- **`dump_records` example** (`rust/examples/dump_records.rs`, `required-features
+  =["zstd"]`): a `pread`-based `FileFetch` opens the 115 GB `records-full.bin`/`.idx`
+  + `.dict` and streams the first N records (rank order) as `<doc_id>\t<json>`.
+  Dumped the top **100,000** most-cited works in 1.7s (83 MB JSONL).
+- **`build_openalex_rrvi.py`**: parse title+abstract → model2vec embed (512-d) →
+  FAISS `OPQ32,IVF1024,PQ32` → `export_to_rrvi`. Built `openalex-head.rrvi`:
+  100K vectors, **6.9 MB** (dim 512, nlist 1024, m 32, OPQ on), ~2.5 min total.
+- **`query_openalex_rrvi.py`**: embed a text query → `rrvi_query` → titles.
+  Sanity queries return exactly the right top-cited papers:
+  "transformer attention NMT" → Bahdanau/Cho/Luong; "CRISPR genome editing" → all
+  CRISPR-Cas9; "black hole gravitational waves" → LIGO discovery, GWTC-3, etc.
+- Artifacts live in /tmp/oa-out (not committed); upload to S3 alongside the
+  `.rrs`/`.rrf`/records like the other demo artifacts. Scaling to the full 484M is
+  the multi-day embed the spec flags; 100K validates the pipeline on real data.
