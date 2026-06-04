@@ -44,10 +44,11 @@ pub use secondary::{SecondaryCursor, SecondaryIndex};
 pub use sortcols::{ColInfo, SortCols, Value, ValueType};
 
 #[cfg(feature = "vector")]
-pub use vector::{VectorHit, VectorIndex};
+pub use vector::{reciprocal_rank_fusion, RerankStore, VectorHit, VectorIndex};
 #[cfg(all(feature = "vector", not(target_arch = "wasm32")))]
 pub use vector_build::{
-    build_ivfpq, build_ivfpq_from_parts, Ivfpq, IvfpqParams, IvfpqParts, VectorBuildError,
+    build_ivfpq, build_ivfpq_from_parts, write_rerank, Ivfpq, IvfpqParams, IvfpqParts,
+    VectorBuildError,
 };
 
 #[cfg(feature = "wasm")]

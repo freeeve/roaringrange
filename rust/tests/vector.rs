@@ -7,10 +7,10 @@
 #![cfg(feature = "vector")]
 
 use futures::executor::block_on;
-use roaringrange::vector::{VectorIndex, METRIC_L2};
+use roaringrange::vector::{reciprocal_rank_fusion, RerankStore, VectorIndex, METRIC_L2};
 use roaringrange::{
-    build_ivfpq, build_ivfpq_from_parts, IvfpqParams, IvfpqParts, MemoryFetch, VectorBuildError,
-    VectorHit,
+    build_ivfpq, build_ivfpq_from_parts, write_rerank, IvfpqParams, IvfpqParts, MemoryFetch,
+    VectorBuildError, VectorHit,
 };
 
 /// A tiny deterministic PRNG (xorshift64*) so the synthetic corpora and queries
@@ -315,6 +315,117 @@ fn from_parts_rejects_inconsistent_arrays() {
         build_ivfpq_from_parts(parts),
         Err(VectorBuildError::BadParams(_))
     ));
+}
+
+/// Builds an `RRVR` re-rank sidecar from a corpus (in doc-ID order) and opens it.
+fn open_rerank(corpus: &[(u32, Vec<f32>)], dim: usize) -> RerankStore<MemoryFetch> {
+    let vecs: Vec<Vec<f32>> = corpus.iter().map(|(_, v)| v.clone()).collect();
+    let mut bytes = Vec::new();
+    write_rerank(&mut bytes, dim, &vecs, true).expect("write_rerank");
+    block_on(RerankStore::open(MemoryFetch::new(bytes))).expect("open rerank")
+}
+
+#[test]
+fn rerank_recovers_near_exact_topk() {
+    // Re-ranking every probed candidate (nprobe = nlist, r = N) against the bf16
+    // sidecar should reproduce the exact-cosine top-k almost perfectly — far
+    // closer than the lossy PQ ADC scan alone. Uses non-degenerate random vectors
+    // so the true top-k are well-separated (no cosine near-ties for bf16 to flip).
+    let mut rng = Rng::new(31);
+    let dim = 16usize;
+    let n = 800u32;
+    let corpus: Vec<(u32, Vec<f32>)> = (0..n)
+        .map(|i| {
+            (
+                i,
+                normalize(&(0..dim).map(|_| rng.gauss()).collect::<Vec<_>>()),
+            )
+        })
+        .collect();
+    let params = IvfpqParams::new(dim, 16, 8);
+    let idx = open_index(&corpus, &params);
+    let rerank = open_rerank(&corpus, dim);
+    assert_eq!(rerank.dim(), dim);
+    assert_eq!(rerank.len(), n as u64);
+
+    let k = 10usize;
+    let mut qrng = Rng::new(64);
+    let mut total = 0.0f64;
+    let queries = 30usize;
+    for _ in 0..queries {
+        let base = &corpus[qrng.next_u64() as usize % corpus.len()].1;
+        let q: Vec<f32> = base.iter().map(|&x| x + qrng.gauss() * 0.05).collect();
+        let q = normalize(&q);
+        let exact = exact_topk(&corpus, &q, k);
+        let got: Vec<u32> = block_on(idx.search_rerank(&q, k, idx.nlist(), corpus.len(), &rerank))
+            .expect("search_rerank")
+            .into_iter()
+            .map(|h| h.doc_id)
+            .collect();
+        total += got.iter().filter(|id| exact.contains(id)).count() as f64 / k as f64;
+    }
+    let recall = total / queries as f64;
+    assert!(
+        recall >= 0.95,
+        "rerank recall@{k} = {recall:.3}, expected >= 0.95"
+    );
+}
+
+#[test]
+fn rerank_improves_over_adc() {
+    // At a realistic nprobe, exact re-ranking of the ADC top-r must do at least as
+    // well as the ADC scan it post-processes (and noticeably better here).
+    let mut rng = Rng::new(17);
+    let dim = 16usize;
+    let corpus = blob_corpus(&mut rng, dim, 16, 100);
+    let params = IvfpqParams::new(dim, 16, 8);
+    let idx = open_index(&corpus, &params);
+    let rerank = open_rerank(&corpus, dim);
+
+    let (k, nprobe, r) = (10usize, 8usize, 50usize);
+    let mut qrng = Rng::new(88);
+    let (mut adc_recall, mut rer_recall) = (0.0f64, 0.0f64);
+    let queries = 40usize;
+    for _ in 0..queries {
+        let base = &corpus[qrng.next_u64() as usize % corpus.len()].1;
+        let q: Vec<f32> = base.iter().map(|&x| x + qrng.gauss() * 0.1).collect();
+        let q = normalize(&q);
+        let exact = exact_topk(&corpus, &q, k);
+        let adc: Vec<u32> = block_on(idx.search(&q, k, nprobe))
+            .unwrap()
+            .into_iter()
+            .map(|h| h.doc_id)
+            .collect();
+        let rer: Vec<u32> = block_on(idx.search_rerank(&q, k, nprobe, r, &rerank))
+            .unwrap()
+            .into_iter()
+            .map(|h| h.doc_id)
+            .collect();
+        adc_recall += adc.iter().filter(|id| exact.contains(id)).count() as f64 / k as f64;
+        rer_recall += rer.iter().filter(|id| exact.contains(id)).count() as f64 / k as f64;
+    }
+    adc_recall /= queries as f64;
+    rer_recall /= queries as f64;
+    assert!(
+        rer_recall >= adc_recall,
+        "rerank ({rer_recall:.3}) should be >= adc ({adc_recall:.3})"
+    );
+    assert!(rer_recall >= 0.9, "rerank recall {rer_recall:.3} too low");
+}
+
+#[test]
+fn rrf_orders_by_fused_rank() {
+    // Reciprocal-rank fusion of [1,2,3] and [3,2,4] (k=60): doc 3 is top of list B
+    // and present in both, edging out doc 2 (mid in both); then 1, then 4.
+    let a: &[u32] = &[1, 2, 3];
+    let b: &[u32] = &[3, 2, 4];
+    let fused = reciprocal_rank_fusion(&[a, b], 60.0);
+    let order: Vec<u32> = fused.iter().map(|(id, _)| *id).collect();
+    assert_eq!(order, vec![3, 2, 1, 4]);
+    // scores are descending
+    for w in fused.windows(2) {
+        assert!(w[0].1 >= w[1].1);
+    }
 }
 
 #[test]

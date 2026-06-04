@@ -1129,6 +1129,7 @@ impl RrsSecondaryCursor {
 #[wasm_bindgen]
 pub struct RrviIndex {
     inner: VectorIndex<WasmFetch>,
+    rerank: Option<crate::vector::RerankStore<WasmFetch>>,
 }
 
 #[cfg(feature = "vector")]
@@ -1141,7 +1142,21 @@ impl RrviIndex {
         let inner = VectorIndex::open(WasmFetch::new(url))
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(RrviIndex { inner })
+        Ok(RrviIndex {
+            inner,
+            rerank: None,
+        })
+    }
+
+    /// Opens the optional `RRVR` re-rank sidecar at `url` and attaches it, enabling
+    /// [`RrviIndex::search_rerank`].
+    #[wasm_bindgen(js_name = openRerank)]
+    pub async fn open_rerank(&mut self, url: String) -> Result<(), JsError> {
+        let store = crate::vector::RerankStore::open(WasmFetch::new(url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.rerank = Some(store);
+        Ok(())
     }
 
     /// Searches for the `k` nearest vectors to `query` (a `Float32Array` of length
@@ -1160,13 +1175,29 @@ impl RrviIndex {
             .search(&query, k, nprobe)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let mut ids = Vec::with_capacity(hits.len());
-        let mut scores = Vec::with_capacity(hits.len());
-        for h in hits {
-            ids.push(h.doc_id);
-            scores.push(h.score);
-        }
-        Ok(RrviHits { ids, scores })
+        Ok(RrviHits::from_hits(hits))
+    }
+
+    /// Like [`RrviIndex::search`] but re-ranks the ADC top-`r` candidates against
+    /// the higher-precision re-rank sidecar (open it first with `openRerank`),
+    /// returning the exact top-`k`. Rejects if no sidecar is open.
+    #[wasm_bindgen(js_name = searchRerank)]
+    pub async fn search_rerank(
+        &self,
+        query: Vec<f32>,
+        k: usize,
+        nprobe: usize,
+        r: usize,
+    ) -> Result<RrviHits, JsError> {
+        let rerank = self.rerank.as_ref().ok_or_else(|| {
+            JsError::new("re-rank sidecar not opened; call openRerank(url) first")
+        })?;
+        let hits = self
+            .inner
+            .search_rerank(&query, k, nprobe, r, rerank)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrviHits::from_hits(hits))
     }
 
     /// Vector dimensionality the index was built with.
@@ -1215,4 +1246,34 @@ impl RrviHits {
     pub fn scores(&self) -> Vec<f32> {
         self.scores.clone()
     }
+}
+
+#[cfg(feature = "vector")]
+impl RrviHits {
+    /// Splits search hits into aligned id/score vectors for JS.
+    fn from_hits(hits: Vec<crate::vector::VectorHit>) -> Self {
+        let mut ids = Vec::with_capacity(hits.len());
+        let mut scores = Vec::with_capacity(hits.len());
+        for h in hits {
+            ids.push(h.doc_id);
+            scores.push(h.score);
+        }
+        RrviHits { ids, scores }
+    }
+}
+
+/// Reciprocal-rank fusion of a vector (`RRVI`) and a trigram (`RRS`) result list
+/// into one ranking of doc IDs, best-first — the no-score-normalization hybrid.
+/// `kParam` is conventionally ~60. Returns a `Uint32Array`.
+#[cfg(feature = "vector")]
+#[wasm_bindgen(js_name = reciprocalRankFusion)]
+pub fn reciprocal_rank_fusion_js(
+    vector_ids: Vec<u32>,
+    trigram_ids: Vec<u32>,
+    k_param: f64,
+) -> Vec<u32> {
+    crate::vector::reciprocal_rank_fusion(&[&vector_ids, &trigram_ids], k_param)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
 }

@@ -277,3 +277,21 @@ Corpus side of mode 2: text → static embeddings → `.rrvi`, no FAISS, no back
 model2vec recipe in the browser needs a wasm tokenizer + the token-embedding
 matrix (the spec's "biggest unknown"). Remaining: **5b** in-browser model2vec,
 **6** open-model + Lambda (mode 1), **7** re-rank + trigram hybrid.
+
+### 2026-06-03 — Step 7 done (re-rank sidecar + trigram hybrid)
+Quality layer on the reserved-header space.
+
+- **`RRVR` re-rank sidecar** (`VECTORS.md`): dense bf16 vectors keyed by doc ID
+  (20-B header + `vec[id]` at `20+id*dim*2`). Reader `RerankStore` (`vector.rs`,
+  wasm-safe) + writer `write_rerank` (`vector_build.rs`, bf16 round-to-nearest).
+  `VectorIndex::search_rerank(q, k, nprobe, r, &rerank)` fetches the exact vectors
+  for the ADC top-r and rescores → exact top-k for a few small ranged reads.
+- **Hybrid**: `reciprocal_rank_fusion(&[vector_ids, trigram_ids], k)` blends RRVI
+  and RRS result lists (no score normalization).
+- **wasm**: `RrviIndex.openRerank(url)` + `searchRerank(q,k,nprobe,r)`, and a free
+  `reciprocalRankFusion(vectorIds, trigramIds, kParam)`.
+- **Tests**: rerank recovers near-exact top-k (recall ≥ 0.95 on random data;
+  bf16-limited to ~0.94 on degenerate blob data), rerank ≥ ADC recall at realistic
+  nprobe, and an exact RRF ordering case ([1,2,3]+[3,2,4] → [3,2,1,4]).
+- Gates: 55 lib + 11 vector tests, clippy (default + vector + wasm32 "wasm
+  vector"), fmt. (Python `write_rerank` binding deferred — re-rank is optional.)

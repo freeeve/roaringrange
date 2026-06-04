@@ -13,7 +13,9 @@
 //! production path trains the index with FAISS and exports the same `RRVI`
 //! layout. The output of either path is byte-compatible with the reader.
 
-use crate::vector::{normalize, FLAG_OPQ, HEADER_SIZE, MAGIC, METRIC_IP, VERSION};
+use crate::vector::{
+    normalize, FLAG_OPQ, HEADER_SIZE, MAGIC, METRIC_IP, RERANK_BF16, RRVR_MAGIC, VERSION,
+};
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Write};
@@ -206,6 +208,55 @@ fn write_f32_all<W: Write>(w: &mut W, xs: &[f32]) -> io::Result<()> {
     let mut buf = Vec::with_capacity(xs.len() * 4);
     for &x in xs {
         buf.extend_from_slice(&x.to_le_bytes());
+    }
+    w.write_all(&buf)
+}
+
+/// Rounds an `f32` to bf16 (its high 16 bits) with round-to-nearest-even. Finite
+/// inputs in a normalized vector's range never overflow; `NaN` stays `NaN`.
+fn f32_to_bf16(x: f32) -> u16 {
+    let bits = x.to_bits();
+    if x.is_nan() {
+        return ((bits >> 16) as u16) | 0x0040; // keep it a (quiet) NaN
+    }
+    let rounding_bias = ((bits >> 16) & 1) + 0x7fff;
+    (bits.wrapping_add(rounding_bias) >> 16) as u16
+}
+
+/// Writes the `RRVR` re-rank sidecar read by [`crate::vector::RerankStore`]: a
+/// 20-byte header then a dense bf16 array of `vectors` keyed by doc ID (the slice
+/// index is the doc ID). Every vector must have length `dim`. Set `l2_normalize`
+/// for an inner-product index so the stored vectors match the unit-sphere space
+/// the index was built in. Pair the file with the `RRVI` index it re-ranks.
+pub fn write_rerank<W: Write>(
+    mut w: W,
+    dim: usize,
+    vectors: &[Vec<f32>],
+    l2_normalize: bool,
+) -> io::Result<()> {
+    w.write_all(RRVR_MAGIC)?;
+    w.write_all(&1u16.to_le_bytes())?; // version
+    w.write_all(&[RERANK_BF16, 0])?; // precision, pad
+    w.write_all(&(dim as u32).to_le_bytes())?;
+    w.write_all(&(vectors.len() as u64).to_le_bytes())?;
+
+    let mut buf = Vec::with_capacity(vectors.len() * dim * 2);
+    for v in vectors {
+        if v.len() != dim {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "rerank vector length != dim",
+            ));
+        }
+        if l2_normalize {
+            for &x in &normalize(v) {
+                buf.extend_from_slice(&f32_to_bf16(x).to_le_bytes());
+            }
+        } else {
+            for &x in v {
+                buf.extend_from_slice(&f32_to_bf16(x).to_le_bytes());
+            }
+        }
     }
     w.write_all(&buf)
 }

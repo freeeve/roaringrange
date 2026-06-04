@@ -78,6 +78,26 @@ per probed cluster — the standard residual-IVFPQ path.
 The pure-Rust trainer (`roaringrange::build_ivfpq`, native, behind the `vector`
 feature) trains the coarse quantizer and PQ codebooks with dependency-free
 k-means and emits this layout — intended for tests and small/medium corpora. The
-production path trains the index with FAISS (`OPQ`,`IVF`,`PQ`) and a Rust exporter
-writes the identical bytes; the reader is the same either way. One `RRVI` per
-embedding model (each model is a different vector space).
+production path trains the index with FAISS (`OPQ`,`IVF`,`PQ`) and
+`roaringrange::build_ivfpq_from_parts` writes the identical bytes (the reader is
+the same either way). One `RRVI` per embedding model (each model is a different
+vector space).
+
+## Re-rank sidecar (`RRVR`, optional)
+PQ ADC is lossy. The optional `<name>.rrvi.rerank` sidecar stores each vector at
+higher precision so a query can fetch the exact vectors for only its top-`r` PQ
+candidates and rescore them (`VectorIndex::search_rerank`). It is range-fetched —
+`r` small ranged reads — and **off by default** (full storage is large: ~248 GB
+at 484M·256·bf16).
+
+**Header — 20 B:** magic `"RRVR"`, version `u16`=1, precision `u8`, pad `u8`,
+dim `u32`, n `u64`. **Body:** a dense array keyed by doc ID — vector `id` is at
+`20 + id·dim·2`. Precision `0` = **bf16** (the high 16 bits of each f32: full f32
+exponent range, 8-bit mantissa, trivially exact to decode, 2 bytes/dim). Written
+by `roaringrange::write_rerank`.
+
+## Hybrid (vector + trigram)
+`reciprocal_rank_fusion(&[vector_ids, trigram_ids], k≈60)` blends an `RRVI` result
+list and an `RRS` (trigram) result list into one ranking with no score
+normalization — a doc near the top of either list ranks high. Exposed to the
+browser as `reciprocalRankFusion(vectorIds, trigramIds, kParam)`.
