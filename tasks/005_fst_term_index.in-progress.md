@@ -372,3 +372,12 @@ Pure-Rust, behind a non-default **`terms`** Cargo feature (only dep: `fst`).
 `fst` `levenshtein` feature); step 4 inline rare postings + residency; step 5 stemming
 (`rust-stemmers`) + stopwords; step 6 hot-phrase materialization; step 7 wasm binding +
 demo + CI/pre-push `terms` gate + Python builder binding; step 8 positions.
+
+### 2026-06-04 — Step 3 DONE: prefix (autocomplete) + fuzzy (Levenshtein) over the FST
+- `TermIndex::complete(prefix, max_terms) -> Vec<String>` — autocomplete; walks the
+  resident FST with `fst::automaton::Str::starts_with`, **zero fetches**.
+- `TermIndex::search_prefix(prefix, limit)` and `search_fuzzy(term, max_edits, limit)`
+  — OR (union) of every matching term's postings via a shared `search_union<A: Automaton>`
+  helper (heads in one wave, lazy tails only if the heads underflow `limit`). Fuzzy uses
+  `fst::automaton::Levenshtein`; an over-large automaton → `IndexError::BadQuery`.
+- Enabled the `fst` `levenshtein` feature on the `terms` dep. 63 tests / clippy / fmt green.
