@@ -44,8 +44,9 @@ futures = { version = "0.3", default-features = false, features = ["std", "execu
 # metadata, with native prefix streams and (later) a Levenshtein automaton for
 # fuzzy. Pure-Rust and wasm-safe — the same crate Tantivy/Meilisearch use.
 # Optional, behind the `terms` feature; `default-features = false` keeps the
-# optional `levenshtein`/`mmap` extras out until a step needs them.
-fst = { version = "0.4", optional = true, default-features = false }
+# optional `mmap` extra out, while `levenshtein` is enabled for the fuzzy
+# (edit-distance) query path.
+fst = { version = "0.4", optional = true, default-features = false, features = ["levenshtein"] }
 
 # All wasm deps stay behind the `wasm` feature; the crate builds and `cargo
 # test`s natively without it.

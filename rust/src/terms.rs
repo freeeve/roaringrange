@@ -20,7 +20,8 @@
 
 use crate::fetch::RangeFetch;
 use crate::index::{deserialize, read_u16, read_u32, read_u64, IndexError};
-use fst::Map;
+use fst::automaton::{Automaton, Levenshtein, Str};
+use fst::{IntoStreamer, Map, Streamer};
 use futures::future::join_all;
 use roaring::RoaringBitmap;
 
@@ -223,6 +224,100 @@ impl<F: RangeFetch> TermIndex<F> {
         }
         Ok(acc.iter().take(limit).collect())
     }
+
+    /// Autocompletes `prefix`: returns up to `max_terms` dictionary terms that
+    /// start with it, in lexicographic (FST) order. The prefix is lowercased the
+    /// same way [`tokenize`] lowercases, so a query prefix matches the indexed
+    /// terms. Walks the resident FST only — **zero** fetches.
+    pub fn complete(&self, prefix: &str, max_terms: usize) -> Vec<String> {
+        let p: String = prefix.chars().flat_map(|c| c.to_lowercase()).collect();
+        let mut out = Vec::new();
+        let mut stream = self.fst.search(Str::new(&p).starts_with()).into_stream();
+        while out.len() < max_terms {
+            match stream.next() {
+                Some((term, _)) => out.push(String::from_utf8_lossy(term).into_owned()),
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// Collects the matched terms' posting locations `(head_off, head_size)` by
+    /// walking the FST under `automaton`, then unions (ORs) their postings and
+    /// returns the first `limit` doc IDs ascending. The rank-ordered heads alone
+    /// usually fill `limit` in one fetch wave; the tails are fetched and ORed in
+    /// only when the heads underflow `limit` and at least one tail is non-empty.
+    /// Shared by [`Self::search_prefix`] and [`Self::search_fuzzy`].
+    async fn search_union<A: Automaton>(
+        &self,
+        automaton: A,
+        limit: usize,
+    ) -> Result<Vec<u32>, IndexError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut locs = Vec::new();
+        let mut stream = self.fst.search(automaton).into_stream();
+        while let Some((_, out)) = stream.next() {
+            locs.push((out >> SIZE_BITS, (out & SIZE_MASK) as usize));
+        }
+        if locs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Wave 1: fetch every matched term's head posting concurrently and OR them.
+        let heads = join_all(locs.iter().map(|&(off, size)| self.head_block(off, size))).await;
+        let mut blocks: Vec<HeadBlock> = Vec::with_capacity(heads.len());
+        for h in heads {
+            blocks.push(h?);
+        }
+        let mut acc = RoaringBitmap::new();
+        for b in &blocks {
+            acc |= &b.head;
+        }
+        let has_tail = blocks.iter().any(|b| b.tail_size > 0);
+        if acc.len() as usize >= limit || !has_tail {
+            return Ok(acc.iter().take(limit).collect());
+        }
+
+        // Wave 2: the head union underflowed and tails exist — fetch them and OR
+        // the full `(head | tail)` postings.
+        let tails = join_all(blocks.iter().map(|b| self.tail(b.tail_off, b.tail_size))).await;
+        let mut acc = RoaringBitmap::new();
+        for (b, t) in blocks.iter().zip(tails) {
+            acc |= &b.head;
+            acc |= &t?;
+        }
+        Ok(acc.iter().take(limit).collect())
+    }
+
+    /// Returns up to `limit` doc IDs matching **any** term that starts with
+    /// `prefix` (the OR / union of every prefix-matching term's posting), most
+    /// popular first (ascending doc ID == descending rank). The prefix is
+    /// lowercased the same way [`tokenize`] lowercases. An empty match set yields
+    /// no results.
+    pub async fn search_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<u32>, IndexError> {
+        let p: String = prefix.chars().flat_map(|c| c.to_lowercase()).collect();
+        self.search_union(Str::new(&p).starts_with(), limit).await
+    }
+
+    /// Returns up to `limit` doc IDs matching **any** term within Levenshtein edit
+    /// distance `max_edits` of `term` (the OR / union of every fuzzy-matching
+    /// term's posting), most popular first (ascending doc ID == descending rank).
+    /// The term is lowercased the same way [`tokenize`] lowercases. A Levenshtein
+    /// automaton that the `fst` crate refuses to build (too large for the given
+    /// edits/length) maps to [`IndexError::BadQuery`].
+    pub async fn search_fuzzy(
+        &self,
+        term: &str,
+        max_edits: u32,
+        limit: usize,
+    ) -> Result<Vec<u32>, IndexError> {
+        let lower: String = term.chars().flat_map(|c| c.to_lowercase()).collect();
+        let lev = Levenshtein::new(&lower, max_edits)
+            .map_err(|_| IndexError::BadQuery("fuzzy automaton too large"))?;
+        self.search_union(lev, limit).await
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -320,5 +415,108 @@ mod tests {
             block_on(TermIndex::open(bogus)),
             Err(IndexError::BadMagic(_))
         ));
+    }
+
+    #[test]
+    fn complete_returns_capped_prefix_terms() {
+        let docs = [
+            (0u32, "learn learner learning learned"),
+            (1, "learns lethal"),
+        ];
+        let ti = build(&docs, 65_536);
+
+        // "learn" prefixes five terms, returned in lexicographic (FST) order.
+        assert_eq!(
+            ti.complete("learn", 10),
+            vec!["learn", "learned", "learner", "learning", "learns"]
+        );
+        // `max_terms` caps the stream; the first two in order.
+        assert_eq!(ti.complete("learn", 2), vec!["learn", "learned"]);
+        // The prefix is lowercased the same way the tokens are.
+        assert_eq!(
+            ti.complete("LEARN", 10),
+            vec!["learn", "learned", "learner", "learning", "learns"]
+        );
+        // "le" widens to include "lethal".
+        assert_eq!(
+            ti.complete("le", 10),
+            vec!["learn", "learned", "learner", "learning", "learns", "lethal"]
+        );
+        // A prefix that matches nothing yields nothing — zero fetches throughout.
+        assert!(ti.complete("zzz", 10).is_empty());
+        // An empty prefix matches everything (capped).
+        assert_eq!(ti.complete("", 1), vec!["learn"]);
+    }
+
+    #[test]
+    fn search_prefix_unions_matching_terms() {
+        let docs = [
+            (0u32, "learn"),
+            (1, "learning"),
+            (2, "lethal"),
+            (3, "unrelated"),
+        ];
+        let ti = build(&docs, 65_536);
+
+        // "learn" matches both "learn" (doc 0) and "learning" (doc 1) — their OR.
+        assert_eq!(block_on(ti.search_prefix("learn", 10)).unwrap(), vec![0, 1]);
+        // "le" widens to also include "lethal" (doc 2); ascending == rank order.
+        assert_eq!(block_on(ti.search_prefix("le", 10)).unwrap(), vec![0, 1, 2]);
+        // `limit` keeps the most-popular (lowest doc-ID) prefix hits.
+        assert_eq!(block_on(ti.search_prefix("le", 2)).unwrap(), vec![0, 1]);
+        // A prefix matching no term yields no results.
+        assert!(block_on(ti.search_prefix("zzz", 10)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_prefix_spans_head_and_tail() {
+        // A tiny head boundary forces a split; "alpha" spans head {0,1} and tail
+        // {2,3,4}, "alpine" adds doc 5, so the prefix "alp" unions all of them.
+        let docs = [
+            (0u32, "alpha"),
+            (1, "alpha"),
+            (2, "alpha"),
+            (3, "alpha"),
+            (4, "alpha"),
+            (5, "alpine"),
+        ];
+        let ti = build(&docs, 2);
+        assert_eq!(
+            block_on(ti.search_prefix("alp", 10)).unwrap(),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+        // limit 2 is satisfied by the rank heads alone — no tail fetch needed.
+        assert_eq!(block_on(ti.search_prefix("alp", 2)).unwrap(), vec![0, 1]);
+    }
+
+    #[test]
+    fn search_fuzzy_finds_typos_excludes_far_terms() {
+        let docs = [
+            (0u32, "learning"),
+            (1, "learnings"),
+            (2, "lemming"),
+            (3, "unrelated"),
+        ];
+        let ti = build(&docs, 65_536);
+
+        // "learnimg" is one edit from "learning" (doc 0). "lemming" is far (>1).
+        assert_eq!(
+            block_on(ti.search_fuzzy("learnimg", 1, 10)).unwrap(),
+            vec![0]
+        );
+        // Edit distance 1 also reaches "learnings" (one insertion) — their OR.
+        assert_eq!(
+            block_on(ti.search_fuzzy("learning", 1, 10)).unwrap(),
+            vec![0, 1]
+        );
+        // A word far from every term yields no results.
+        assert!(block_on(ti.search_fuzzy("xyzzy", 1, 10))
+            .unwrap()
+            .is_empty());
+        // The query is lowercased the same way the tokens are.
+        assert_eq!(
+            block_on(ti.search_fuzzy("LEARNIMG", 1, 10)).unwrap(),
+            vec![0]
+        );
     }
 }
