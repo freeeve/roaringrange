@@ -23,6 +23,8 @@ use crate::lookup::Lookup;
 use crate::records::RecordStore;
 use crate::secondary::{SecondaryCursor, SecondaryIndex};
 use crate::sortcols::SortCols;
+#[cfg(feature = "terms")]
+use crate::terms::TermIndex;
 #[cfg(feature = "vector")]
 use crate::vector::VectorIndex;
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint32Array, Uint8Array};
@@ -1474,5 +1476,84 @@ impl Model2vecEmbedder {
     /// embedding mean-pool → L2-normalize). Pass it to `RrviIndex.search`.
     pub fn embed(&self, text: &str) -> Vec<f32> {
         self.inner.embed(text)
+    }
+}
+
+/// A range-fetchable `RRTI` term-level inverted index exposed to JavaScript. Boot
+/// holds the FST term dictionary in memory; each query range-fetches only the
+/// matched terms' postings. Built with
+/// `wasm-pack build --target web --features "wasm terms"`.
+#[cfg(feature = "terms")]
+#[wasm_bindgen]
+pub struct RrtIndex {
+    inner: TermIndex<WasmFetch>,
+}
+
+#[cfg(feature = "terms")]
+#[wasm_bindgen]
+impl RrtIndex {
+    /// Boots the index at `url`: one boot read of the FST term dictionary, held
+    /// resident so a term resolves to its posting location with no further reads.
+    /// Returns a `Promise<RrtIndex>`.
+    pub async fn open(url: String) -> Result<RrtIndex, JsError> {
+        let inner = TermIndex::open(WasmFetch::new(url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrtIndex { inner })
+    }
+
+    /// Returns up to `limit` doc IDs matching every query term (whole-word AND),
+    /// most popular first (ascending doc ID == descending rank). Resolves to a
+    /// `Uint32Array`. A query term absent from the dictionary yields no results.
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<u32>, JsError> {
+        self.inner
+            .search(query, limit)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Returns up to `limit` doc IDs matching any term that starts with `prefix`
+    /// (the union of every prefix-matching term's posting), most popular first.
+    /// Resolves to a `Uint32Array`.
+    #[wasm_bindgen(js_name = searchPrefix)]
+    pub async fn search_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<u32>, JsError> {
+        self.inner
+            .search_prefix(prefix, limit)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Returns up to `limit` doc IDs matching any term within Levenshtein edit
+    /// distance `max_edits` of `term` (the union of every fuzzy-matching term's
+    /// posting), most popular first. Resolves to a `Uint32Array`.
+    #[wasm_bindgen(js_name = searchFuzzy)]
+    pub async fn search_fuzzy(
+        &self,
+        term: &str,
+        max_edits: u32,
+        limit: usize,
+    ) -> Result<Vec<u32>, JsError> {
+        self.inner
+            .search_fuzzy(term, max_edits, limit)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Autocompletes `prefix`: returns up to `max_terms` dictionary terms that
+    /// start with it, in lexicographic order, as a JS `string[]`. Walks the
+    /// resident FST only — no fetches.
+    pub fn complete(&self, prefix: &str, max_terms: usize) -> Vec<String> {
+        self.inner.complete(prefix, max_terms)
+    }
+
+    /// Number of distinct terms in the dictionary.
+    pub fn len(&self) -> u32 {
+        self.inner.len() as u32
+    }
+
+    /// Whether the dictionary holds no terms.
+    #[wasm_bindgen(js_name = isEmpty)]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 }
