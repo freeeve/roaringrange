@@ -23,6 +23,10 @@ echo "[pre-push] rust: cargo clippy --features vector…"
 echo "[pre-push] rust: cargo clippy --features terms…"
 (cd "$repo/rust" && cargo clippy --all-targets --features terms -- -D warnings)
 
+# The `hotcache` feature (RRHC catalog hotcache) is also off by default.
+echo "[pre-push] rust: cargo clippy --features hotcache…"
+(cd "$repo/rust" && cargo clippy --all-targets --features hotcache -- -D warnings)
+
 echo "[pre-push] go: gofmt -s check…"
 unformatted="$(cd "$repo" && gofmt -s -l .)"
 if [ -n "$unformatted" ]; then

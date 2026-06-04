@@ -384,3 +384,23 @@ the formats are already immutable. The inline-vs-reference threshold is the FST'
 inline-rare-postings instinct one level up, and the one thing the hotcache can't
 front-load — data-dependent reads — is the same limit Quickwit has, because we only ever
 front-load the static boot metadata our boots already are.
+
+---
+
+## Progress
+
+### 2026-06-04 — Tier-1 RRHC format module DONE (reader + builder), behind `hotcache`
+Pure-Rust, no new dependency, behind a non-default `hotcache` Cargo feature.
+- **`rust/src/hotcache.rs`** (reader, wasm-safe): `Hotcache::open` does ONE ranged read
+  of the whole `.rrhc` and parses header + manifest + string blob + inlined-boot blob
+  resident per §5; `members()` + `inlined(&Member)` (resident boot bytes vs fetch-by-range).
+  `MemberTag` enum (RRS=1..RRM2=9). Bad magic/version/truncation → IndexError.
+- **`rust/src/hotcache_build.rs`** (native): `MemberSpec` + `write_hotcache(w, members,
+  inline_threshold)` — inline boots ≤ threshold, reference the rest.
+- **`HOTCACHE.md`** freezes the RRHC v1 layout. 7 tests (mixed inline/reference round-trip,
+  threshold boundary, non-zero boot_off, malformed no-panic, bad magic, tag round-trip).
+- Gates green across `terms`+`hotcache`+`vector` (72 lib tests); default unaffected;
+  pre-push hook lints `hotcache` too.
+- **DEFERRED** (next): `Catalog::open_hotcache` + per-format `from_boot` constructors (the
+  invasive wiring that boots every member from the inlined bytes), demo wiring, and Tier-2
+  `.rrsplit` (`write_split` + footer). The format + read/write substrate is in place.
