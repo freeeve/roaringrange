@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>How it works — OpenAlex static in-browser search</title>
+<title>How it works — OpenAlex Search (a RoaringRange demo)</title>
 <meta name="description" content="How a static, no-backend, in-browser full-text search over 47.8M OpenAlex works is built from byte-range reads — powered by roaringrange." />
 <!-- system font stack only; no external font/CDN dependency (keeps the page self-contained) -->
 <style>
@@ -242,8 +242,8 @@
       <div class="brand">
         <span class="mark" aria-hidden="true">OA</span>
         <span class="wordmark">
-          <span class="w1">OpenAlex search</span>
-          <span class="w2">how it works</span>
+          <span class="w1">OpenAlex Search</span>
+          <span class="w2">a RoaringRange demo · how it works</span>
         </span>
       </div>
       <nav class="bar-links">
@@ -262,12 +262,14 @@
 
 <section class="hero">
   <div class="wrap">
-    <p class="eyebrow">OpenAlex · in-browser search</p>
-    <h1 class="hero-title">Searching 47.8 million papers, with <em>no server.</em></h1>
+    <p class="eyebrow">Powered by RoaringRange</p>
+    <h1 class="hero-title">Searching millions of papers, with <em>no server.</em></h1>
     <p class="lead">
-      This demo searches <b>~47.8M OpenAlex works</b> entirely in your browser, with <b>no backend</b>.
+      This <b>RoaringRange</b> demo searches OpenAlex works entirely in your browser, with <b>no backend</b>.
       The index is one static file on S3, and a query fetches just a few small byte-ranges over HTTP —
-      never the whole file. It's powered by the <code>roaringrange</code> library.
+      never the whole file. It's powered by <a href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener"><b>RoaringRange</b></a>, and inspired by
+      <a href="https://lunrjs.com/" target="_blank" rel="noopener">Lunr.js</a> and
+      <a href="https://pagefind.app/" target="_blank" rel="noopener">Pagefind</a>.
     </p>
     <div class="specs reveal">
       <div class="spec"><div class="num">47.8<small>M</small></div><div class="lbl">OpenAlex works indexed</div></div>
@@ -285,7 +287,8 @@
       <ol>
         <li><a href="#data"><span class="tn">01</span><span>The data, mapped</span></a></li>
         <li><a href="#search"><span class="tn">02</span><span>Searching in the browser</span></a></li>
-        <li><a href="#formats"><span class="tn">03</span><span>The file formats</span></a></li>
+        <li><a href="#semantic"><span class="tn">03</span><span>Semantic &amp; hybrid search</span></a></li>
+        <li><a href="#formats"><span class="tn">04</span><span>The file formats</span></a></li>
       </ol>
     </aside>
 
@@ -305,6 +308,9 @@
         <p class="body">
           The searchable text of each work is concatenated and cut into <b>trigrams</b>, so a query matches across any field —
           a phrase from the abstract, an author, or a journal, not just the title.
+          OpenAlex doesn&rsquo;t ship abstracts as plain text; it stores an <code>abstract_inverted_index</code> &mdash; a map of
+          each word to the positions where it occurs &mdash; so the builder <b>reconstructs</b> the running abstract from that
+          index before indexing it (that&rsquo;s what the <span class="mono-i">abstract &larr; abstract_inverted_index</span> chip below means).
         </p>
         <div class="pipe reveal">
           <span class="pchip">title</span>
@@ -574,9 +580,241 @@
       </section>
 
       <!-- ====================== 03 ====================== -->
+      <!-- ====================== 03 ====================== -->
+      <section class="sect" id="semantic">
+        <div class="sect-head">
+          <div class="sect-kicker"><span class="sect-num">03</span><span class="sect-tag">Meaning, not characters</span></div>
+          <h2 class="sect-title">Semantic &amp; hybrid search</h2>
+          <p class="sect-intro">
+            Trigram search matches <em>characters</em> &mdash; exact substrings. <b>Semantic search</b> matches <em>meaning</em>:
+            the query and every work become vectors, and the nearest by cosine win &mdash; even with no shared words.
+            Same static ethos &mdash; an <b>IVFPQ</b> index (the <code>.rrvi</code> file) boots once, and each query
+            range-fetches only a few clusters.
+          </p>
+        </div>
+
+        <h3 class="sub">From query to nearest works</h3>
+        <p class="body">
+          The corpus is partitioned into <code>nlist</code> clusters by coarse centroids, and every vector is stored as a
+          compact <b>product-quantization</b> code &mdash; 32 bytes, not a 2&nbsp;KB float array &mdash; optionally rotated
+          by <b>OPQ</b> for accuracy. Boot downloads the small <b>boot region</b> once: the OPQ rotation, the centroids,
+          the PQ codebooks, and a cluster directory. Per query, the reader finds the <code>nprobe</code> nearest centroids
+          in memory, range-fetches just those clusters&rsquo; code lists, and ranks them by <b>asymmetric distance</b>
+          &mdash; the real query vector scored against quantized codes through precomputed tables, no full vectors needed.
+        </p>
+        <div class="pipe reveal">
+          <span class="pchip">query text</span>
+          <span class="parrow">&rarr;</span>
+          <span class="pchip">embed <span>&larr; 512-d unit vector</span></span>
+          <span class="parrow">&rarr;</span>
+          <span class="pchip">nprobe clusters <span>&larr; range reads</span></span>
+          <span class="parrow">&rarr;</span>
+          <span class="pchip">PQ ADC rank</span>
+          <span class="parrow">&rarr;</span>
+          <span class="pout">top-K doc IDs</span>
+        </div>
+
+        <p class="fig-lead">The query path mirrors the trigram one &mdash; a near-constant number of round-trips, <b>independent of corpus size.</b></p>
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">flow</span><span class="fig-name">Semantic search <span class="muted">&middot; embed &rarr; range-fetch clusters</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 512" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="Semantic search: embed the query, then range-fetch the nearest clusters">
+  <defs>
+    <marker id="sv2" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b5bdb"></path></marker>
+    <marker id="sv4" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#0d9488"></path></marker>
+  </defs>
+  <text x="32" y="38" class="title">Semantic search — embed the query, then range-fetch the nearest clusters</text>
+  <text x="32" y="60" class="sub">no backend in mode 2; one tiny embed call in mode 1 — the rest is the same range-read path as the text index</text>
+
+  <rect x="32" y="86" width="330" height="352" rx="10" fill="#eef2ff" stroke="#3b5bdb"></rect>
+  <text x="52" y="114" class="box">Browser — WASM reader (Rust)</text>
+  <line x1="52" y1="124" x2="344" y2="124" stroke="#c7d2fe"></line>
+  <text x="52" y="152" class="step"><tspan class="wave">①</tspan> boot once: OPQ + centroids +</text>
+  <text x="68" y="170" class="step">PQ codebooks + directory (in memory)</text>
+  <text x="52" y="200" class="step"><tspan class="wave">②</tspan> embed query → 512-d unit vector</text>
+  <text x="68" y="218" class="step mono" font-size="11.5">model2vec·wasm  or  Lambda·Gemma</text>
+  <text x="52" y="250" class="step"><tspan class="wave">③</tspan> nprobe nearest centroids (in memory)</text>
+  <text x="52" y="282" class="step"><tspan class="wave">④</tspan> fetch those clusters&#39; codes →</text>
+  <text x="68" y="300" class="step">ADC-rank → top-K doc IDs</text>
+  <text x="68" y="318" class="step" fill="#64748b" font-size="12">(PQ: 32 B/doc; no full vectors)</text>
+  <text x="52" y="350" class="step"><tspan class="wave">⑤</tspan> optional facet filter —</text>
+  <text x="68" y="368" class="step">keep IDs in selected bitmaps</text>
+  <text x="52" y="400" class="step"><tspan class="wave">⑥</tspan> fetch record JSON → render cards</text>
+
+  <text x="706" y="78" class="box" text-anchor="middle">CloudFront → S3 (+ Lambda)</text>
+  <rect x="618" y="86" width="176" height="46" rx="8" fill="#3b5bdb"></rect>
+  <text x="706" y="106" class="seg" text-anchor="middle" font-size="12.5">boot region</text>
+  <text x="706" y="122" class="seg mono" text-anchor="middle" font-size="9.5">.rrvi · centroids+codebooks+dir</text>
+  <rect x="618" y="136" width="176" height="42" rx="8" fill="#3b5bdb"></rect>
+  <text x="706" y="155" class="seg" text-anchor="middle" font-size="12.5">.rrm2 model matrix</text>
+  <text x="706" y="170" class="seg mono" text-anchor="middle" font-size="9.5">static · mode 2</text>
+  <rect x="618" y="182" width="176" height="48" rx="8" fill="#0d9488"></rect>
+  <text x="706" y="202" class="seg" text-anchor="middle" font-size="12.5">Lambda · Gemma</text>
+  <text x="706" y="218" class="seg mono" text-anchor="middle" font-size="9.5">ONNX · mode 1</text>
+  <rect x="618" y="234" width="176" height="128" fill="#64748b"></rect>
+  <text x="706" y="290" class="seg" text-anchor="middle">cluster code lists</text>
+  <text x="706" y="308" class="seg mono" text-anchor="middle" font-size="10">.rrvi · [u32 ids][u8 codes]</text>
+  <text x="706" y="326" class="seg mono" text-anchor="middle" font-size="10" fill="#cbd5e1">× nlist clusters</text>
+  <rect x="618" y="366" width="176" height="44" rx="8" fill="#94a3b8"></rect>
+  <text x="706" y="393" class="seg mono" text-anchor="middle" font-size="11">records.bin</text>
+
+  <line x1="362" y1="150" x2="616" y2="109" stroke="#3b5bdb" stroke-width="1.6" marker-end="url(#sv2)"></line>
+  <text x="378" y="140" class="req"><tspan class="wave">①</tspan> GET boot region (once)</text>
+  <line x1="362" y1="202" x2="616" y2="157" stroke="#3b5bdb" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#sv2)"></line>
+  <text x="378" y="192" class="req"><tspan class="wave">②</tspan> GET .rrm2 (once · mode 2)</text>
+  <line x1="362" y1="222" x2="616" y2="206" stroke="#0d9488" stroke-width="1.6" marker-end="url(#sv4)"></line>
+  <text x="378" y="240" class="req" fill="#0d9488"><tspan font-weight="700">②</tspan> or POST /embed (mode 1)</text>
+  <line x1="362" y1="290" x2="616" y2="298" stroke="#3b5bdb" stroke-width="1.6" marker-end="url(#sv2)"></line>
+  <text x="378" y="280" class="req"><tspan class="wave">④</tspan> GET nprobe cluster lists (parallel)</text>
+  <line x1="362" y1="400" x2="616" y2="388" stroke="#3b5bdb" stroke-width="1.6" marker-end="url(#sv2)"></line>
+  <text x="378" y="420" class="req"><tspan class="wave">⑥</tspan> GET records (coalesced)</text>
+
+  <rect x="378" y="452" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
+  <text x="396" y="462" class="req">downloaded once</text>
+  <rect x="520" y="452" width="12" height="12" rx="3" fill="#64748b"></rect>
+  <text x="538" y="462" class="req">range-fetched per query</text>
+  <rect x="694" y="452" width="12" height="12" rx="3" fill="#0d9488"></rect>
+  <text x="712" y="462" class="req">live · mode 1</text>
+
+  <text x="32" y="496" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">VectorIndex::open(f).search(query_vec, k, nprobe) → [ VectorHit { doc_id, score } ]</tspan></text>
+</svg></div>
+          <figcaption>The query embeds to a 512-d vector (in the browser, or via the mode-1 Lambda), the reader picks the <code>nprobe</code> nearest centroids from the in-memory boot region, and range-fetches only those clusters&rsquo; PQ codes to rank by asymmetric distance. <b>Out come ranked doc IDs in the same numbering as the text index</b> &mdash; so records render through the very same path.</figcaption>
+        </figure>
+
+        <h3 class="sub">Two ways to embed a query</h3>
+        <p class="body">
+          The search machinery is identical; only the <b>embedder</b> differs. Each model defines its own vector space,
+          so each mode has its own <code>.rrvi</code> &mdash; but the corpus is embedded once, offline, for <b>$0</b> either way.
+        </p>
+        <div class="facets-grid reveal">
+          <div class="facet">
+            <div class="fname">In the browser &mdash; model2vec</div>
+            <span class="fkey">mode 2 &middot; no backend</span>
+            <div class="fdesc">
+              A <b>static</b> model (<code>potion-retrieval-32M</code>) ported to wasm: tokenize (BERT WordPiece), average
+              the per-token vectors, normalize. No neural net, no API key, <b>$0</b>. The token matrix
+              (<code>.rrm2</code>, ~33&nbsp;MB int8) downloads once and is browser-cached. Slightly lower quality than a transformer.
+            </div>
+          </div>
+          <div class="facet">
+            <div class="fname">Lambda-based &mdash; EmbeddingGemma</div>
+            <span class="fkey">mode 1 &middot; AWS Lambda</span>
+            <div class="fdesc">
+              <code>EmbeddingGemma-300M</code> runs in a Lambda as <b>ONNX</b> (no PyTorch), fronted by CloudFront. A real
+              transformer with <b>asymmetric prompts</b> (<code>query:</code> vs <code>document:</code>) gives stronger
+              paraphrase recall; ~40&nbsp;ms warm. Only the live query calls it &mdash; the corpus was embedded locally.
+            </div>
+          </div>
+        </div>
+        <div class="rule reveal">
+          <span class="rk">INVARIANT</span>
+          <span class="rt">Corpus and query must share the <b>identical</b> model, pooling, and prompt, or the query lands in the wrong space. Both modes guarantee it &mdash; the <em>same</em> model embeds both sides (the Lambda runs the very model the corpus was built with).</span>
+        </div>
+
+        <h3 class="sub">Facets over vector results</h3>
+        <p class="body">
+          Vectors reuse the <b>exact doc-ID numbering</b> of the text index and the facet sidecar
+          (<code>vector_id&nbsp;==&nbsp;doc_id</code>) &mdash; so the same roaring-bitmap facets apply with no remapping.
+          <b>Filtering</b> a semantic search keeps only the candidate IDs that fall in the selected category bitmaps,
+          the same membership test the trigram path already does. Two strategies trade recall for simplicity:
+        </p>
+        <div class="facets-grid reveal">
+          <div class="facet">
+            <div class="fname">Post-filter</div>
+            <span class="fkey">retrieve &rarr; drop</span>
+            <div class="fdesc">Over-fetch a larger top-<em>N</em>, then drop IDs outside the selected bitmaps. Dead simple &mdash; one bitmap test per candidate &mdash; but a very selective filter can thin a page, so <em>N</em> is raised to compensate.</div>
+          </div>
+          <div class="facet">
+            <div class="fname">Pre-filter (ID&nbsp;selector)</div>
+            <span class="fkey">filter while scanning</span>
+            <div class="fdesc">Push the allowed-set bitmap into the cluster scan: skip codes whose doc ID isn&rsquo;t allowed and probe more clusters until top-K fills. Guarantees a full page even under a tight filter.</div>
+          </div>
+        </div>
+        <p class="body">
+          <b>Counts</b> are computed over the retrieved candidate pool rather than a complete bitmap &mdash;
+          &ldquo;semantic matches&rdquo; is a ranked list, not an exact set &mdash; with the same in-wasm machinery and no backend.
+          And <b>hybrid</b> inherits all of it: it fuses the <em>filtered</em> trigram and <em>filtered</em> semantic lists.
+        </p>
+
+        <h3 class="sub">Hybrid &mdash; reciprocal rank fusion</h3>
+        <p class="body">
+          Run both. Trigram nails exact terms (names, identifiers, rare phrases); semantic catches paraphrase and synonymy.
+          <b>Reciprocal rank fusion</b> blends the two ranked lists without needing comparable scores: each list contributes
+          <code>1 / (k + rank)</code> to a doc (<code>k &asymp; 60</code>), so anything near the top of either ranks high.
+        </p>
+        <div class="rule reveal">
+          <span class="rk">RRF</span>
+          <span class="rt">score(doc) = <span class="and">&Sigma;</span> 1 / (k + rank<sub>list</sub>(doc)) across the trigram and semantic lists &mdash; exact matches and meaning matches fused into one ranking, no score calibration required.</span>
+        </div>
+
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">.rrvi</span><span class="fig-name">Vector index <span class="muted">&middot; one static file</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 500" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRVI vector index file format">
+  <defs><marker id="vf" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#475569"></path></marker></defs>
+  <text x="32" y="38" class="title">Vector index — one static file (<tspan class="mono">.rrvi</tspan>)</text>
+  <text x="32" y="60" class="sub">IVFPQ: a boot region read once, then per-cluster PQ code lists range-fetched only for the nprobe nearest clusters</text>
+  <rect x="648" y="26" width="12" height="12" rx="3" fill="#3b5bdb"></rect><text x="666" y="36" class="note">loaded at boot</text>
+  <rect x="792" y="26" width="12" height="12" rx="3" fill="#64748b"></rect><text x="810" y="36" class="note">range-fetched</text>
+
+  <g>
+    <rect x="32" y="86" width="92" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="128" y="86" width="124" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="256" y="86" width="156" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="416" y="86" width="148" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="568" y="86" width="120" height="56" rx="6" fill="#3b5bdb"></rect>
+    <rect x="692" y="86" width="256" height="56" rx="6" fill="#64748b"></rect>
+    <text x="78" y="110" class="seg" text-anchor="middle">Header</text>
+    <text x="78" y="126" class="seg mono" text-anchor="middle" font-size="11">48 B</text>
+    <text x="190" y="110" class="seg" text-anchor="middle">OPQ rot.</text>
+    <text x="190" y="126" class="seg mono" text-anchor="middle" font-size="10">D×D · optional</text>
+    <text x="334" y="110" class="seg" text-anchor="middle">Centroids</text>
+    <text x="334" y="126" class="seg mono" text-anchor="middle" font-size="11">nlist×D f32</text>
+    <text x="490" y="110" class="seg" text-anchor="middle">PQ codebooks</text>
+    <text x="490" y="126" class="seg mono" text-anchor="middle" font-size="10">m×256×dsub f32</text>
+    <text x="628" y="110" class="seg" text-anchor="middle">Directory</text>
+    <text x="628" y="126" class="seg mono" text-anchor="middle" font-size="10">nlist×(u64,u32)</text>
+    <text x="820" y="110" class="seg" text-anchor="middle">Cluster lists</text>
+    <text x="820" y="126" class="seg mono" text-anchor="middle" font-size="10">per cluster · range-fetched</text>
+  </g>
+  <text x="32" y="172" class="lbl mono">magic &#34;RRVI&#34; · version · dim · nlist · m · nbits · metric · flags (OPQ?)</text>
+
+  <line x1="334" y1="142" x2="240" y2="210" stroke="#3b5bdb" stroke-width="1.5"></line>
+  <rect x="32" y="210" width="448" height="158" rx="8" fill="#eef0fd" stroke="#3b5bdb"></rect>
+  <text x="48" y="236" class="lbl" font-weight="700">boot region — read once, kept in memory</text>
+  <text x="48" y="262" class="note" font-size="13"><tspan class="mono" fill="#3b5bdb">centroids</tspan>  nlist coarse vectors → find the nprobe nearest</text>
+  <text x="48" y="286" class="note" font-size="13"><tspan class="mono" fill="#3b5bdb">codebooks</tspan>  m subspaces × 256 entries → score PQ codes</text>
+  <text x="48" y="310" class="note" font-size="13"><tspan class="mono" fill="#3b5bdb">OPQ</tspan>  optional D×D rotation → applied to the query</text>
+  <text x="48" y="334" class="note" font-size="13"><tspan class="mono" fill="#3b5bdb">directory</tspan>  per cluster → (byte offset, count)</text>
+  <text x="48" y="358" class="note" font-size="12" fill="#94a3b8">centroids dominate the boot size (≈ nlist × D × 4 bytes)</text>
+
+  <line x1="820" y1="142" x2="820" y2="210" stroke="#64748b" stroke-width="1.5" marker-end="url(#vf)"></line>
+  <rect x="496" y="210" width="452" height="158" rx="8" fill="#f1f5f9" stroke="#64748b"></rect>
+  <text x="512" y="236" class="lbl" font-weight="700">one cluster list — fetched only if among the nprobe nearest</text>
+  <rect x="512" y="252" width="200" height="46" rx="5" fill="#64748b"></rect>
+  <text x="612" y="274" class="seg" text-anchor="middle" font-size="13">u32 doc IDs</text>
+  <text x="612" y="290" class="seg mono" text-anchor="middle" font-size="10">× count</text>
+  <rect x="716" y="252" width="216" height="46" rx="5" fill="#94a3b8"></rect>
+  <text x="824" y="274" class="seg" text-anchor="middle" font-size="13">u8 PQ codes</text>
+  <text x="824" y="290" class="seg mono" text-anchor="middle" font-size="10">× count · m</text>
+  <text x="512" y="324" class="note" font-size="13">doc IDs share the text index&#39;s numbering →</text>
+  <text x="512" y="344" class="note" font-size="13">records &amp; facets reuse them with no remapping.</text>
+  <text x="512" y="362" class="note" font-size="12" fill="#94a3b8">count comes from the directory; m bytes/doc (here 32).</text>
+
+  <rect x="32" y="384" width="916" height="74" rx="8" fill="#f8fafc" stroke="#cbd5e1"></rect>
+  <text x="48" y="406" class="note" font-weight="700">Reader</text>
+  <text x="120" y="406" class="note">— boot once, then one wave of nprobe ranged reads.</text>
+  <text x="48" y="426" class="note" font-size="13"><tspan font-weight="700" fill="#3b5bdb">boot</tspan>  header + OPQ + centroids + codebooks + directory → memory (one read).</text>
+  <text x="48" y="446" class="note" font-size="13"><tspan font-weight="700" fill="#64748b">per query</tspan>  embed → nprobe nearest centroids → GET those clusters&#39; codes → ADC rank → top-K doc IDs.</text>
+
+  <text x="32" y="486" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">write  build_ivfpq_from_parts(parts).write(w)      read  VectorIndex::open(f).search(q, k, nprobe)</tspan></text>
+</svg></div>
+          <figcaption>A 48-byte header, then the boot region &mdash; an optional OPQ rotation, the coarse centroids, the PQ codebooks, and a cluster directory &mdash; read once into memory. Each query fetches only the <code>nprobe</code> nearest clusters&rsquo; code lists (<code>[u32 ids][u8 codes]</code>). An optional <code>.rrm2</code> (mode-2 static matrix) and <code>.rrvr</code> (bf16 full-vector re-rank sidecar, fetched only for the surviving top-K) ride alongside. <b>The whole index is never downloaded.</b></figcaption>
+        </figure>
+      </section>
+
+      <!-- ====================== 04 ====================== -->
       <section class="sect" id="formats">
         <div class="sect-head">
-          <div class="sect-kicker"><span class="sect-num">03</span><span class="sect-tag">One index, three sidecars</span></div>
+          <div class="sect-kicker"><span class="sect-num">04</span><span class="sect-tag">One index, a family of sidecars</span></div>
           <h2 class="sect-title">The file formats</h2>
           <p class="sect-intro">
             One static text index plus a family of companion files. Every box below loads by HTTP byte-range; nothing runs server-side.

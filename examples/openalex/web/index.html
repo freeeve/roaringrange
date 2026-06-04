@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>OpenAlex — static in-browser search</title>
+    <title>OpenAlex Search — a RoaringRange demo</title>
     <!-- system font stack; no external font CDN (avoids the SRI advisory) -->
     <style>
       :root {
@@ -112,6 +112,10 @@
         letter-spacing: 0.01em;
         margin-top: 3px;
       }
+      .wordmark .w2 a.rrlink { color: var(--accent); font-weight: 600; }
+      .wordmark .w2 a.rrlink:hover { text-decoration: underline; }
+      .wordmark .w2 a.oalink { color: inherit; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; }
+      .wordmark .w2 a.oalink:hover { text-decoration-color: currentColor; }
 
       /* stat pills + credit */
       .metarow {
@@ -335,6 +339,7 @@
       }
       .perfval { font-size: 10.5px; color: #8b9ab5; white-space: nowrap; }
       .perfval b { color: #fff; font-weight: 500; }
+      .perfval .perfna { color: #5a6b8c; }   /* em-dash for compute-only phases (no network) */
       .perfgroup {
         display: flex;
         align-items: baseline;
@@ -609,8 +614,8 @@
           <div class="brand">
             <span class="mark" aria-hidden="true">OA</span>
             <span class="wordmark">
-              <h1 class="w1">OpenAlex search</h1>
-              <span class="w2">484M scholarly works · static, no backend</span>
+              <h1 class="w1">OpenAlex Search</h1>
+              <span class="w2">a <a class="rrlink" href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener">RoaringRange</a> demo · data from <a class="oalink" href="https://openalex.org" target="_blank" rel="noopener">OpenAlex</a> (CC0)</span>
             </span>
           </div>
           <nav class="bar-links">
@@ -664,14 +669,12 @@
         <div class="metarow">
           <div class="stats">
             <span class="stat"><b id="ds-works">…</b> works</span>
-            <span class="stat"><b id="ds-index">…</b> index</span>
+            <span class="stat"><b id="ds-index">…</b> text index</span>
             <span class="stat"><b id="ds-records">…</b> records</span>
+            <span class="stat" id="ds-vectors-pill" hidden><b id="ds-vectors">…</b> vector index</span>
+            <span class="stat" id="ds-model-pill" hidden><b id="ds-model">…</b> embed model</span>
             <span class="stat ghost">all static on S3 · range-fetched</span>
           </div>
-          <p class="credit">
-            <a href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener">roaringrange</a>
-            · data from <a href="https://openalex.org" target="_blank" rel="noopener">OpenAlex</a> (CC0)
-          </p>
         </div>
 
         <div class="srvtoggle">
@@ -733,7 +736,7 @@
     </main>
 
     <script type="module">
-      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder } from "./roaringrange.js";
+      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets } from "./roaringrange.js";
 
       /* -------- byte/request accounting via fetch interception (from webtest) -------- */
       const realFetch = self.fetch.bind(self);
@@ -761,7 +764,7 @@
       // browser embeds the query with (no backend). doc IDs are shared with the
       // text index + record store, so results render through the same path.
       const DATASETS = {
-        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-head.rrvi", rrm2: "potion.rrm2" },
+        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-1m.rrvi", rrm2: "potion.rrm2" },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
       };
@@ -788,7 +791,9 @@
       let embedder = null;          // Model2vecEmbedder — embeds the query in-browser
       let vectorReady = false;      // rrvi + embedder both opened OK
       let trigramAvailable = true;  // the text .rrs opened (false while the full index is still uploading)
+      let facetSrc = null;          // facet source: the text index, or a standalone .rrf when the .rrs isn't up yet
       const SEM_NPROBE = 32, SEM_K = 60, RRF_K = 60;  // vector probes, candidate depth, RRF constant
+      const SEM_K_FILTER = 600;  // over-fetch depth when facets filter vector results (the extra depth is free — same nprobe clusters)
 
       const $ = (id) => document.getElementById(id);
       const dec = new TextDecoder();
@@ -815,6 +820,8 @@
         perfbar: $("perfbar"), perftoggle: $("perftoggle"),
         perfrows: $("perfrows"), mBarNote: $("m-barnote"), mTotal: $("m-total"), mSummary: $("m-summary"),
         dsWorks: $("ds-works"), dsIndex: $("ds-index"), dsRecords: $("ds-records"),
+        dsVectors: $("ds-vectors"), dsVectorsPill: $("ds-vectors-pill"),
+        dsModel: $("ds-model"), dsModelPill: $("ds-model-pill"),
         servermode: $("servermode"),
       };
 
@@ -828,11 +835,18 @@
           try { const r = await realFetch(url, { method: "HEAD" }); return +r.headers.get("content-length") || 0; }
           catch (_) { return 0; }
         };
-        const [rrs, rrf, idx, bin] = await Promise.all([head(RRS_URL), head(RRF_URL), head(IDX_URL), head(BIN_URL)]);
+        const [rrs, rrf, idx, bin, rrvi, rrm2] = await Promise.all([
+          head(RRS_URL), head(RRF_URL), head(IDX_URL), head(BIN_URL),
+          RRVI_URL ? head(RRVI_URL) : 0, RRM2_URL ? head(RRM2_URL) : 0,
+        ]);
         const docs = idx > 0 ? Math.round(idx / 8) - 1 : 0;
         if (docs > 0) els.dsWorks.textContent = fmtCount(docs);
+        // "text index" = postings + facet sidecar; while the full .rrs is still
+        // uploading only the facet sidecar reports, which is honest enough here.
         if (rrs + rrf > 0) els.dsIndex.textContent = fmtBytes(rrs + rrf);
         if (idx + bin > 0) els.dsRecords.textContent = fmtBytes(idx + bin);
+        if (rrvi > 0) { els.dsVectors.textContent = fmtBytes(rrvi); els.dsVectorsPill.hidden = false; }
+        if (rrm2 > 0) { els.dsModel.textContent = fmtBytes(rrm2); els.dsModelPill.hidden = false; }
       }
 
       /* facet field display names + which groups get a scroll box + text filter */
@@ -942,7 +956,7 @@
          boot holds just ms (a number) or null.
          Calling setPerf({ ... }) patches the model and re-renders.
          tail: null clears/hides the "Load all matches" row. */
-      const perfModel = { index: null, facets: null, recstore: null, lookup: null, search: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null, headN: null, query: null, summary: null };
+      const perfModel = { index: null, facets: null, recstore: null, lookup: null, vecindex: null, embedder: null, search: null, embed: null, vsearch: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null, headN: null, query: null, summary: null };
 
       /** Render the "How this search ran" rows from perfModel. */
       function renderPerf() {
@@ -956,6 +970,10 @@
           { g: "startup", name: "Open facets", desc: "facet sidecar", get: () => perfModel.facets },
           { g: "startup", name: "Open records", desc: "record store header", get: () => perfModel.recstore },
           { g: "startup", name: "Open lookup", desc: "DOI lookup index", get: () => perfModel.lookup },
+          { g: "startup", name: "Open vectors", desc: "IVFPQ boot: centroids + codebooks", get: () => perfModel.vecindex },
+          { g: "startup", name: "Open embedder", desc: "model2vec matrix (full GET)", get: () => perfModel.embedder },
+          { g: "popular", name: "Embed query", desc: "model2vec · local compute, no fetch", get: () => perfModel.embed },
+          { g: "popular", name: "Vector fetch", desc: `${SEM_NPROBE} clusters · PQ ADC`, get: () => perfModel.vsearch },
           {
             g: "popular",
             name: serverMode ? "ID fetch (lambda)" : "ID fetch",
@@ -982,8 +1000,8 @@
         const visible = steps.map((s) => ({ ...s, d: s.get() })).filter((s) => s.d != null);
         const dims = [
           { color: "#5c85ff", get: (d) => d.ms || 0, val: (d) => `<b>${d.ms.toFixed(d.ms >= 10 ? 0 : 1)}</b> ms` },
-          { color: "#9775fa", get: (d) => d.reqs || 0, val: (d) => `<b>${d.reqs}</b> req` },
-          { color: "#f76707", get: (d) => d.bytes || 0, val: (d) => `<b>${fmtBytes(d.bytes)}</b>` },
+          { color: "#9775fa", get: (d) => d.reqs || 0, val: (d) => d.reqs ? `<b>${d.reqs}</b> req` : `<span class="perfna" title="in-browser compute — no network">—</span>` },
+          { color: "#f76707", get: (d) => d.bytes || 0, val: (d) => d.bytes ? `<b>${fmtBytes(d.bytes)}</b>` : `<span class="perfna" title="in-browser compute — no network">—</span>` },
         ];
         const pct = (v, m) => (v > 0 ? Math.max(4, Math.round((v / m) * 100)) : 0);
 
@@ -1050,7 +1068,7 @@
        * row, and omitting a key leaves its prior value untouched.
        */
       function setPerf(patch = {}) {
-        for (const k of ["index", "facets", "recstore", "lookup", "search", "doilookup", "facetcount", "results", "tail", "tailresults", "headN", "query", "summary"]) {
+        for (const k of ["index", "facets", "recstore", "lookup", "vecindex", "embedder", "search", "embed", "vsearch", "doilookup", "facetcount", "results", "tail", "tailresults", "headN", "query", "summary"]) {
           if (patch[k] !== undefined) perfModel[k] = patch[k];   // null clears the row
         }
         renderPerf();
@@ -1062,7 +1080,7 @@
          is registered in countSpans so a later facetCountsJson() can update it in place. */
       function renderFacets() {
         let groups = [];
-        try { groups = JSON.parse(idx.facetsJson()) || []; } catch (_) { groups = []; }
+        try { groups = JSON.parse(facetSrc ? facetSrc.facetsJson() : "[]") || []; } catch (_) { groups = []; }
         const byField = new Map(groups.map((g) => [g.field, g]));
         els.facetgroups.innerHTML = "";
         countSpans.clear();
@@ -1150,7 +1168,7 @@
          checked regardless. Pass null to restore the full (unfiltered) index counts. */
       function applyFacetCounts(json) {
         let groups = null;
-        const src = json != null ? json : (idx ? idx.facetsJson() : null);
+        const src = json != null ? json : (facetSrc ? facetSrc.facetsJson() : null);
         if (src == null) return;
         try { groups = JSON.parse(src) || []; } catch (_) { return; }
 
@@ -1449,10 +1467,10 @@
 
       /* Render an explicit doc-ID list (a DOI lookup hit) as a single page,
          bypassing the trigram cursor. */
-      async function showDocs(ids, seq, summary) {
+      async function showDocs(ids, seq, summary, keepFacets = false) {
         skeletons(Math.min(ids.length, 8));
         offset = 0; tailLoaded = true; tailPending = false;
-        applyFacetCounts(null);
+        if (!keepFacets) applyFacetCounts(null);   // semantic/hybrid set their own (filtered) counts first
         const r0 = reqs, b0 = bytes, t0 = performance.now();
         const map = await fetchRecords(ids);
         const recMs = performance.now() - t0, recReqs = reqs - r0, recBytes = bytes - b0;
@@ -1470,8 +1488,23 @@
         if (!RRVI_URL || !RRM2_URL) return false;
         try {
           els.mSummary.textContent = "loading vector index + embedder…";
-          if (!rrvi) rrvi = await RrviIndex.open(RRVI_URL);
-          if (!embedder) embedder = await Model2vecEmbedder.open(RRM2_URL);
+          // Vector index boot — header + centroids + PQ codebooks + directory,
+          // all range-fetched once (so the byte/request meters already see it).
+          if (!rrvi) {
+            const r0 = reqs, b0 = bytes, t0 = performance.now();
+            rrvi = await RrviIndex.open(RRVI_URL);
+            setPerf({ vecindex: { ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 } });
+          }
+          // Embedder — the model2vec token-embedding matrix is a single full GET
+          // (no Range header → invisible to the meters); a bodyless HEAD recovers
+          // its size for the perf row.
+          if (!embedder) {
+            const t0 = performance.now();
+            embedder = await Model2vecEmbedder.open(RRM2_URL);
+            let embBytes = 0;
+            try { embBytes = +(await realFetch(RRM2_URL, { method: "HEAD" })).headers.get("content-length") || 0; } catch (_) {}
+            setPerf({ embedder: { ms: performance.now() - t0, reqs: 1, bytes: embBytes } });
+          }
           vectorReady = embedder.dim() === rrvi.dim();
           return vectorReady;
         } catch (e) { els.mSummary.textContent = `vector load failed: ${e}`; return false; }
@@ -1480,9 +1513,12 @@
       /* Semantic search: embed the query in-browser, range-fetch the nprobe nearest
          IVFPQ clusters, ADC-rank → ranked doc IDs (shared id space with the records). */
       async function semanticIds(q, k) {
+        const e0 = performance.now();
         const vec = embedder.embed(q);
+        const embedMs = performance.now() - e0;
+        const r0 = reqs, b0 = bytes, s0 = performance.now();
         const hits = await rrvi.search(vec, k, SEM_NPROBE);
-        return Array.from(hits.ids);
+        return { ids: Array.from(hits.ids), embedMs, searchMs: performance.now() - s0, reqs: reqs - r0, bytes: bytes - b0 };
       }
 
       /* Reciprocal-rank fusion of two ranked lists (k≈60): each adds 1/(k+rank), so a
@@ -1491,6 +1527,25 @@
         const s = new Map();
         for (const list of [a, b]) list.forEach((id, i) => s.set(id, (s.get(id) || 0) + 1 / (RRF_K + i + 1)));
         return [...s.entries()].sort((x, y) => y[1] - x[1] || x[0] - y[0]).map(([id]) => id);
+      }
+
+      /* Apply the active facets to a ranked doc-ID list. Because vector_id == doc_id,
+         the trigram facet sidecar (.rrf) applies unchanged: the reader fetches the
+         selected categories' postings, ANDs them, and keeps the candidate IDs that
+         survive — in rank order. Also refreshes the facet panel with counts over the
+         survivors. A no-op (counts only) when no text-index sidecar is open. Returns
+         the surviving IDs and the fetch cost for the perf bar. */
+      async function facetFilter(ids, filters) {
+        if (!facetSrc) { applyFacetCounts(null); return { ids, ms: 0, reqs: 0, bytes: 0 }; }
+        const r0 = reqs, b0 = bytes, t0 = performance.now();
+        try {
+          const fr = await facetSrc.filterIds(Uint32Array.from(ids), filters);
+          applyFacetCounts(fr.countsJson());
+          return { ids: Array.from(fr.ids), ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 };
+        } catch (_) {
+          applyFacetCounts(null);
+          return { ids, ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 };
+        }
       }
 
       /* -------- run a query (resetPaging=true on new query / fuzz change) -------- */
@@ -1504,7 +1559,7 @@
           els.pager.hidden = true;
           tailPending = false;
           applyFacetCounts(null);
-          setPerf({ query: null, search: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null });
+          setPerf({ query: null, search: null, embed: null, vsearch: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null });
           syncUrl();
           return;
         }
@@ -1521,7 +1576,7 @@
           let docs = [];
           try { docs = Array.from(await lookup.lookup(bareDoi)); } catch (_) {}
           if (mySeq !== searchSeq) return;
-          setPerf({ doilookup: { ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 }, search: null, facetcount: null, tail: null, tailresults: null });
+          setPerf({ doilookup: { ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 }, search: null, embed: null, vsearch: null, facetcount: null, tail: null, tailresults: null });
           if (docs.length) { cur = null; await showDocs(docs, mySeq, `DOI → ${docs.length} match${docs.length === 1 ? "" : "es"}`); return; }
           // no exact match — fall through to a normal search for the typed string
         } else {
@@ -1532,30 +1587,62 @@
         if (searchMode === "semantic" || searchMode === "hybrid") {
           const ok = await ensureVector();
           if (mySeq !== searchSeq) return;
+          // Active facets filter the ranked vector results (vector_id == doc_id, so
+          // the trigram .rrf applies unchanged). Over-fetch when filtering so a
+          // selective facet still fills a page — the extra depth costs no extra bytes.
+          const filters = Array.from(activeFilters);
+          const depth = filters.length ? SEM_K_FILTER : SEM_K;
           if (searchMode === "semantic") {
             if (!ok) { els.mSummary.textContent = "semantic search unavailable for this dataset"; return; }
             const t0 = performance.now();
-            let ids;
-            try { ids = await semanticIds(q, SEM_K); }
+            let sr;
+            try { sr = await semanticIds(q, depth); }
             catch (e) { els.mSummary.textContent = `semantic error: ${e}`; return; }
             if (mySeq !== searchSeq) return;
-            cur = null; applyFacetCounts(null);
-            await showDocs(ids.slice(0, PAGE), mySeq,
-              `semantic · ${ids.length} match${ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`);
+            const ff = await facetFilter(sr.ids, filters);
+            if (mySeq !== searchSeq) return;
+            cur = null;
+            // Per-search vector phases: in-browser embed (compute only), the
+            // range-fetched IVFPQ probe, and the facet-posting fetch when filtering.
+            setPerf({
+              embed: { ms: sr.embedMs, reqs: 0, bytes: 0 },
+              vsearch: { ms: sr.searchMs, reqs: sr.reqs, bytes: sr.bytes },
+              facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
+              search: null, tail: null, tailresults: null,
+            });
+            await showDocs(ff.ids.slice(0, PAGE), mySeq,
+              `semantic${filters.length ? " + facets" : ""} · ${ff.ids.length} match${ff.ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`, true);
             return;
           }
           // hybrid: fuse the trigram and semantic result lists by reciprocal rank
           const t0 = performance.now();
-          let sem = [], tri = [];
-          if (ok) { try { sem = await semanticIds(q, SEM_K); } catch (_) {} }
-          if (idx) { try { tri = Array.from(await idx.search(q, SEM_K)); } catch (_) {} }
+          let sem = null, tri = [];
+          if (ok) { try { sem = await semanticIds(q, depth); } catch (_) {} }
+          let triMs = 0, triReqs = 0, triBytes = 0;
+          if (idx) {
+            const tr0 = reqs, tb0 = bytes, tt0 = performance.now();
+            try { tri = Array.from(await idx.search(q, depth)); } catch (_) {}
+            triMs = performance.now() - tt0; triReqs = reqs - tr0; triBytes = bytes - tb0;
+          }
           if (mySeq !== searchSeq) return;
-          const fused = rrfFuse(tri, sem);
-          cur = null; applyFacetCounts(null);
-          await showDocs(fused.slice(0, PAGE), mySeq,
-            `hybrid (RRF) · ${fused.length} result${fused.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`);
+          const fused = rrfFuse(tri, sem ? sem.ids : []);
+          const ff = await facetFilter(fused, filters);
+          if (mySeq !== searchSeq) return;
+          cur = null;
+          // Both arms shown side by side: embed + vector fetch (semantic) and the
+          // trigram intersection (the existing "ID fetch" row); facets filter the fusion.
+          setPerf({
+            embed: sem ? { ms: sem.embedMs, reqs: 0, bytes: 0 } : null,
+            vsearch: sem ? { ms: sem.searchMs, reqs: sem.reqs, bytes: sem.bytes } : null,
+            search: idx ? { ms: triMs, reqs: triReqs, bytes: triBytes } : null,
+            facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
+            tail: null, tailresults: null,
+          });
+          await showDocs(ff.ids.slice(0, PAGE), mySeq,
+            `hybrid (RRF)${filters.length ? " + facets" : ""} · ${ff.ids.length} result${ff.ids.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`, true);
           return;
         }
+        setPerf({ embed: null, vsearch: null });   // leaving the vector modes: drop their rows
         // Trigram mode needs the text index (may still be uploading for the full set).
         if (!idx) {
           els.results.innerHTML = `<div class="empty">The full text index is still uploading — <b>Semantic</b> search works now.</div>`;
@@ -1619,8 +1706,15 @@
 
         let facets = null;
         if (idx) {
-          try { await idx.openFacets(RRF_URL); facets = seg(); }
+          try { await idx.openFacets(RRF_URL); facetSrc = idx; facets = seg(); }
           catch (_) { mr = reqs; mb = bytes; mt = performance.now(); /* facet sidecar optional */ }
+        }
+        // Text index absent (its large `.rrs` is still uploading) but the facet
+        // sidecar is up: open it standalone so semantic/hybrid can still filter by
+        // facets and show counts — they share the doc-ID space, so `.rrf` applies.
+        if (!facetSrc && RRF_URL) {
+          try { facetSrc = await RrfFacets.open(RRF_URL); facets = seg(); }
+          catch (_) { mr = reqs; mb = bytes; mt = performance.now(); /* sidecar optional / not up yet */ }
         }
 
         // Open the record store; a compressed dataset (zstd records) ships a trained
