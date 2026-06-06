@@ -820,7 +820,10 @@
       let rterm = null;             // RrtIndex — the FST term-index reader (whole-word/stemmed)
       let trigramAvailable = true;  // the text .rrs opened (false while the full index is still uploading)
       let facetSrc = null;          // facet source: the text index, or a standalone .rrf when the .rrs isn't up yet
-      const SEM_NPROBE = 32, SEM_K = 60, RRF_K = 60;  // vector probes, candidate depth, RRF constant
+      const SEM_NPROBE = 32, SEM_K = 250, RRF_K = 60;  // vector probes, ranked depth (≈10 pages), RRF constant
+      // The ranked depth is the page-through ceiling, not a per-page cap: the nprobe
+      // clusters are already range-fetched, so returning a deeper top-K is essentially
+      // free (a larger heap over the same ADC scores — no extra network).
       const SEM_K_FILTER = 600;  // over-fetch depth when facets filter vector results (the extra depth is free — same nprobe clusters)
 
       const $ = (id) => document.getElementById(id);
@@ -906,6 +909,11 @@
       let idx = null, cur = null, records = null, lookup = null;
       let offset = 0, lastPage = [], lastTotal = 0;
       let tailLoaded = false, tailPending = false;   // lazy tail: defer the (large) tail intersection until the full set is asked for
+      // Ranked-list modes (semantic / term / hybrid) have no cursor: the search
+      // returns the whole ranked list up front, so paging is a client-side slice of
+      // it (no re-search, no extra index bytes). null in trigram/DOI mode.
+      let rankedIds = null;
+      let rankedSummary = "";   // search-phase summary prefix; goPageRanked appends each page's record-fetch ms
       const activeFilters = new Set();   // "field\tcategory"
       const recCache = new Map();        // docID -> record JSON
       const countSpans = new Map();      // "field\tname" -> count <span> (live, updated per search)
@@ -1469,7 +1477,30 @@
         });
       }
 
-      const pageTo = (o) => (serverMode ? goPageServer(o) : goPage(o));
+      /* Page over a ranked doc-ID list (semantic / term / hybrid). The vector or term
+         search already produced the full ranked list (rankedIds), so a page is just a
+         slice of it plus that slice's records — no re-search and no extra index bytes;
+         only the page's record Range reads hit the network. pageTo routes here instead
+         of the trigram cursor's goPage whenever rankedIds is set. */
+      async function goPageRanked(o) {
+        if (!rankedIds) return;
+        const seq = searchSeq;
+        const lastStart = Math.max(0, Math.floor((rankedIds.length - 1) / PAGE) * PAGE);
+        offset = Math.min(Math.max(0, o), lastStart);
+        skeletons(Math.min(PAGE, 8));
+        const page = rankedIds.slice(offset, offset + PAGE);
+        const recReq0 = reqs, recByte0 = bytes, recT0 = performance.now();
+        const missing = page.filter((id) => !recCache.has(id));
+        const map = await fetchRecords(missing);
+        const recMs = performance.now() - recT0, recReqs = reqs - recReq0, recBytes = bytes - recByte0;
+        if (seq !== searchSeq) return;   // a newer query superseded this page
+        for (const [id, rec] of map) recCache.set(id, rec);
+        lastPage = page; lastTotal = rankedIds.length; tailLoaded = true; tailPending = false;
+        renderCards(recCache); updateResultsHead(); updatePager(); syncUrl();
+        setPerf({ results: { ms: recMs, reqs: recReqs, bytes: recBytes }, summary: `${rankedSummary} · ${recMs.toFixed(0)} ms` });
+      }
+
+      const pageTo = (o) => (rankedIds ? goPageRanked(o) : serverMode ? goPageServer(o) : goPage(o));
 
       /* -------- pull the full result set (the lazy tail); fired automatically once a query settles -------- */
       async function loadAll() {
@@ -1651,6 +1682,7 @@
         const mySeq = ++searchSeq;
         reqs = 0; bytes = 0;
         recCache.clear();
+        rankedIds = null;     // a ranked mode (semantic/term/hybrid) sets this; trigram/DOI leave it null
         tailLoaded = false;   // a new query starts from the popular head; the tail loads on demand
         // DOI exact-lookup fast path: a DOI-shaped query resolves to the exact work
         // via the lookup sidecar, independent of client/server search mode.
@@ -1683,13 +1715,14 @@
           const ff = await facetFilter(ids, filters);
           if (mySeq !== searchSeq) return;
           cur = null;
+          rankedIds = ff.ids;
+          rankedSummary = `term${filters.length ? " + facets" : ""} · ${ff.ids.length} match${ff.ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`;
           setPerf({
             search: { ms: searchMs, reqs: searchReqs, bytes: searchBytes },
             facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
             embed: null, vsearch: null, tail: null, tailresults: null,
           });
-          await showDocs(ff.ids.slice(0, PAGE), mySeq,
-            `term${filters.length ? " + facets" : ""} · ${ff.ids.length} match${ff.ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`, true);
+          await goPageRanked(resetPaging ? 0 : offset);
           return;
         }
         // Semantic / hybrid: embed the query in-browser (model2vec) and search the
@@ -1712,6 +1745,8 @@
             const ff = await facetFilter(sr.ids, filters);
             if (mySeq !== searchSeq) return;
             cur = null;
+            rankedIds = ff.ids;
+            rankedSummary = `semantic${filters.length ? " + facets" : ""} · ${ff.ids.length} match${ff.ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`;
             // Per-search vector phases: in-browser embed (compute only), the
             // range-fetched IVFPQ probe, and the facet-posting fetch when filtering.
             setPerf({
@@ -1720,8 +1755,7 @@
               facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
               search: null, tail: null, tailresults: null,
             });
-            await showDocs(ff.ids.slice(0, PAGE), mySeq,
-              `semantic${filters.length ? " + facets" : ""} · ${ff.ids.length} match${ff.ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`, true);
+            await goPageRanked(resetPaging ? 0 : offset);
             return;
           }
           // hybrid: fuse the trigram and semantic result lists by reciprocal rank
@@ -1739,6 +1773,8 @@
           const ff = await facetFilter(fused, filters);
           if (mySeq !== searchSeq) return;
           cur = null;
+          rankedIds = ff.ids;
+          rankedSummary = `hybrid (RRF)${filters.length ? " + facets" : ""} · ${ff.ids.length} result${ff.ids.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`;
           // Both arms shown side by side: embed + vector fetch (semantic) and the
           // trigram intersection (the existing "ID fetch" row); facets filter the fusion.
           setPerf({
@@ -1748,8 +1784,7 @@
             facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
             tail: null, tailresults: null,
           });
-          await showDocs(ff.ids.slice(0, PAGE), mySeq,
-            `hybrid (RRF)${filters.length ? " + facets" : ""} · ${ff.ids.length} result${ff.ids.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`, true);
+          await goPageRanked(resetPaging ? 0 : offset);
           return;
         }
         setPerf({ embed: null, vsearch: null });   // leaving the vector modes: drop their rows
