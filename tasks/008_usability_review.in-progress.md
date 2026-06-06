@@ -184,6 +184,54 @@ builder+serialization in Go (large, byte-exact-output is the hard part) PLUS a S
 matches `rust-stemmers` byte-for-byte. So it's a real porting project, not a builder tweak. Pragmatic
 status: Go stays trigram-split-only (it has no term-index writer at all).
 
+## Remaining deferred items (consolidated for a fresh session)
+Everything still outstanding, gathered here so the review can be resumed cold. Tiers 1–4 + the
+non-breaking cluster above are DONE and committed (v0.6.0). Each item: what · why deferred · breaking?
+
+### Larger / breaking — need a decision first
+- **Builder/Writer taxonomy rename (theme E).** Commit to an axis (Writer = stateful/resumable,
+  Builder = one-shot finalize) and align names — e.g. `RecordWriter` → `RecordStoreBuilder`; reconcile
+  `finish(w)` vs `finish()->struct`. Breaking across Rust + Python + Go + docs; needs a convention call.
+- **`SplitSetWriter::resume` → `ResumeConfig`** (theme D). Replace the 6 positional args (3
+  transposable `u16`/`u32`s, `splitset_write.rs:151`) with a config. A full `WriterConfig` won't fit
+  (it carries `policy`/`tier_count`/`sortcol`/`byte_cap` that `resume` reads from `prev`). Breaking
+  (Rust signature + the Python `resume` binding).
+- **Go RRTI term-bodied splits (#7).** See "Open question" above — a real `fst`-crate-port project
+  (byte-exact FST output + a Snowball stemmer matching `rust-stemmers`), not a builder tweak.
+  Additive but large/risky; Go currently has no term-index writer at all.
+
+### Non-breaking, but need a wasm rebuild
+- **JS error messages prefixed with `Class.op`** (theme C). ~40 wasm methods wrap a bare
+  `e.toString()` with no context; prefix with class+op. Mechanical, MED value.
+- **JS `RrtIndex` faceting + cursor parity** (theme I). The term reader has no `searchCursor`/
+  filtered/facet path despite sharing the doc-ID space; a term-search web app must hand-roll
+  `RrfFacets.filterIds`. Add the cursor/filtered variants (additive) or document the post-filter path.
+
+### Non-breaking, small / additive
+- **`Model2vec::open(fetch)`** (theme A). The only reader with no async `open` (just
+  `from_bytes`). Needs a whole-file fetch — `RangeFetch` has no length, so add a fetch-all/length
+  helper. Do NOT rename `Index::from_boot`/`SplitSet::from_bytes` (different concepts — see tier 2).
+- **Build-config `::new(required)` constructors** (theme D). Instead of `Default` (the `byte_cap: 0`
+  footgun), add `SplitBuildConfig::new(...)` etc. so callers needn't spell every field.
+- **Python `Builder.add_keys`** (theme F). Raw pre-hashed n-gram keys on the split builders; niche.
+- **`Catalog` sortcols re-rank hook** (theme I). The monolith facade has no "search then sort by
+  rating"; `SplitSet` does it internally. Add an optional `SortCols` + a re-rank `search` variant, or
+  document that re-ranking is caller-side.
+
+### Consistency calls — decide first (may be mildly breaking)
+- **Python finalizer naming** (theme A). `build()` (3 classes) vs `finish()` (`TermBuilder`); Python
+  `add` also means different things across builders. Unify on one verb (add an alias to stay
+  non-breaking).
+- **Reader count-type drift** (reader review). `len()` returns `u32`/`u64`/`usize` across readers,
+  and `SortCols::rows` instead of `len`. Settle on one width (`u64`) + the `len`/`is_empty` pair;
+  changing return types is breaking, so consider aliases.
+- **Single-vs-batch OOB policy** (reader review). `RecordStore::get` / `SortCols::value` return
+  `Ok(None)` for an out-of-range id, but `SortCols::values` *errors* — make the batch path match the
+  single path (or document the chosen contract).
+- **Term-split facet-filtered search** (theme I). Currently returns `IndexError::Unsupported`
+  (`splitset.rs` `search_split_filtered`). To implement: `TermIndex` has no filtered cursor, so it'd
+  need a post-hoc facet AND at the `SplitSet` level rather than per-split.
+
 ## Gates
 Rust fmt/clippy(`-D warnings`)/test for default + each feature combo (`vector`, `terms`,
 `hotcache`, `splits`, `splits hotcache`, `splits terms`); wasm32 check; Go gofmt/test; builder
