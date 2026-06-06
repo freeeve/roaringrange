@@ -20,7 +20,7 @@
 
 use crate::fetch::RangeFetch;
 use crate::index::{deserialize, read_u16, read_u32, read_u64, IndexError};
-use fst::automaton::{Automaton, Levenshtein, Str};
+use crate::terms_dict::{iter_block, scan_block, unpack_loc};
 use fst::{IntoStreamer, Map, Streamer};
 use futures::future::join_all;
 use roaring::RoaringBitmap;
@@ -29,15 +29,12 @@ use rust_stemmers::{Algorithm, Stemmer};
 /// `RRTI` magic.
 const MAGIC: &[u8; 4] = b"RRTI";
 /// Header size in bytes: magic[4] + version[2] + flags[2] + termCount[4] +
-/// headBoundary[4] + fstLen[8] + reserved[8]. Kept in sync with the builder.
-const HEADER_SIZE: usize = 32;
-/// Format version written into / accepted from the header.
-const VERSION: u16 = 1;
-/// Bits of the FST output `u64` used for the head posting's byte length; the
-/// remaining high bits hold the block's byte offset in the postings region.
-const SIZE_BITS: u32 = 24;
-/// Low-bit mask selecting the head size out of an FST output.
-const SIZE_MASK: u64 = (1 << SIZE_BITS) - 1;
+/// headBoundary[4] + routerLen[8] + dictLen[8] + blockCap[4] + reserved[4]
+/// (stemmer language at offset 36). Kept in sync with the builder.
+const HEADER_SIZE: usize = 40;
+/// Format version written into / accepted from the header (v2 = blocked dictionary
+/// with a router FST; the original monolithic-FST v1 is no longer read).
+const VERSION: u16 = 2;
 
 /// Splits `text` into lowercased terms, mirroring Tantivy's `SimpleTokenizer`
 /// (a token is a maximal run of `char::is_alphanumeric`) followed by its
@@ -170,12 +167,18 @@ struct HeadBlock {
     tail_size: usize,
 }
 
-/// A range-fetchable `RRTI` term index. Boot holds the FST term dictionary in
-/// memory; each query range-fetches only the matched terms' postings.
+/// A range-fetchable `RRTI` term index. Boot holds only the small **router FST**
+/// (mapping each dict block's last term to its byte range — O(#blocks), not
+/// O(vocab)); each query range-fetches the front-coded dict blocks and the posting
+/// blocks it needs.
 pub struct TermIndex<F: RangeFetch> {
     fetch: F,
-    fst: Map<Vec<u8>>,
-    /// Byte offset of the postings region (right after the FST blob).
+    /// Resident router: each dict block's last term -> `(block_off, block_len)`
+    /// (relative to `dict_start`).
+    router: Map<Vec<u8>>,
+    /// Absolute byte offset of the front-coded dict-blocks region.
+    dict_start: u64,
+    /// Byte offset of the postings region.
     postings_offset: u64,
     /// The head/tail doc-ID split baked into the postings (metadata).
     head_boundary: u32,
@@ -187,9 +190,9 @@ pub struct TermIndex<F: RangeFetch> {
 }
 
 impl<F: RangeFetch> TermIndex<F> {
-    /// Boots the index: reads the fixed header, then the whole FST dictionary blob
-    /// in one ranged read, parsing it into memory. Subsequent queries fetch only
-    /// per-term posting blocks.
+    /// Boots the index: reads the header, then the small resident **router FST** in
+    /// one ranged read (the front-coded dict blocks stay on the wire). Subsequent
+    /// queries fetch only the dict blocks and posting blocks they need.
     pub async fn open(fetch: F) -> Result<Self, IndexError> {
         let header = fetch.read(0, HEADER_SIZE).await?;
         if header.len() < HEADER_SIZE {
@@ -207,17 +210,19 @@ impl<F: RangeFetch> TermIndex<F> {
         let flags = read_u16(&header, 6);
         let term_count = read_u32(&header, 8);
         let head_boundary = read_u32(&header, 12);
-        let fst_len = read_u64(&header, 16);
-        // The language byte lives in the first reserved header byte (offset 24); a
-        // zero-flags / zero-language v1 file (pre-stemming) yields a plain tokenizer.
-        let tokenizer = Tokenizer::from_header(flags, header[24]);
-        let fst_bytes = fetch.read(HEADER_SIZE as u64, fst_len as usize).await?;
-        let fst =
-            Map::new(fst_bytes).map_err(|_| IndexError::Malformed("invalid FST dictionary"))?;
+        let router_len = read_u64(&header, 16);
+        let dict_len = read_u64(&header, 24);
+        // blockCap (offset 32) is informational; the language byte is at offset 36.
+        let tokenizer = Tokenizer::from_header(flags, header[36]);
+        let router_bytes = fetch.read(HEADER_SIZE as u64, router_len as usize).await?;
+        let router =
+            Map::new(router_bytes).map_err(|_| IndexError::Malformed("invalid router FST"))?;
+        let dict_start = HEADER_SIZE as u64 + router_len;
         Ok(Self {
             fetch,
-            fst,
-            postings_offset: HEADER_SIZE as u64 + fst_len,
+            router,
+            dict_start,
+            postings_offset: dict_start + dict_len,
             head_boundary,
             term_count,
             tokenizer,
@@ -239,12 +244,60 @@ impl<F: RangeFetch> TermIndex<F> {
         self.head_boundary
     }
 
-    /// Resolves a term to its posting block `(head_off, head_size)` via the FST,
-    /// or `None` if the term is absent. No fetch — the FST is resident.
-    fn locate(&self, term: &str) -> Option<(u64, usize)> {
-        self.fst
-            .get(term.as_bytes())
-            .map(|out| (out >> SIZE_BITS, (out & SIZE_MASK) as usize))
+    /// Bytes held resident after boot — the header plus the block router FST
+    /// (`[0, dictStart)`). This is O(#blocks), not O(vocabulary): the front-coded
+    /// dict blocks stay on the wire and are range-fetched per query. The headline
+    /// scaling win over the old whole-term FST, which was resident in full.
+    pub fn resident_len(&self) -> u64 {
+        self.dict_start
+    }
+
+    /// Byte range of the dict block that could contain `term` — the first block
+    /// whose last term `>= term` (a resident router-FST lookup, no fetch). `None`
+    /// when `term` sorts past every block (so it is absent).
+    fn block_range_for(&self, term: &str) -> Option<(u64, usize)> {
+        let mut stream = self.router.range().ge(term.as_bytes()).into_stream();
+        let (_, packed) = stream.next()?;
+        let (block_off, block_len) = unpack_loc(packed);
+        Some((self.dict_start + block_off, block_len))
+    }
+
+    /// Resolves every query `term` to its posting location `(head_off, head_size)`
+    /// for a strict AND, returning `Ok(None)` the moment any term is absent (the AND
+    /// is then empty). Issues one concurrent wave of (deduped) dict-block reads, then
+    /// scans each front-coded block.
+    async fn resolve_locs(
+        &self,
+        terms: &[String],
+    ) -> Result<Option<Vec<(u64, usize)>>, IndexError> {
+        let mut ranges = Vec::with_capacity(terms.len());
+        for t in terms {
+            match self.block_range_for(t) {
+                Some(r) => ranges.push(r),
+                None => return Ok(None),
+            }
+        }
+        // Fetch each distinct block once (a query's terms often share one).
+        let mut unique: Vec<(u64, usize)> = Vec::new();
+        for &r in &ranges {
+            if !unique.contains(&r) {
+                unique.push(r);
+            }
+        }
+        let fetched = join_all(unique.iter().map(|&(off, len)| self.fetch.read(off, len))).await;
+        let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(fetched.len());
+        for r in fetched {
+            blocks.push(r?);
+        }
+        let mut locs = Vec::with_capacity(terms.len());
+        for (t, r) in terms.iter().zip(&ranges) {
+            let idx = unique.iter().position(|u| u == r).unwrap();
+            match scan_block(&blocks[idx], t.as_bytes()) {
+                Some(loc) => locs.push(loc),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(locs))
     }
 
     /// Fetches one term's head posting and learns its tail's location.
@@ -286,23 +339,30 @@ impl<F: RangeFetch> TermIndex<F> {
         if terms.is_empty() {
             return Ok(Vec::new());
         }
-
-        let mut locs = Vec::with_capacity(terms.len());
-        for t in &terms {
-            match self.locate(t) {
-                Some(loc) => locs.push(loc),
-                None => return Ok(Vec::new()),
-            }
+        match self.resolve_locs(&terms).await? {
+            None => Ok(Vec::new()),
+            Some(locs) => self.and_locs(locs, limit).await,
         }
+    }
 
-        // Wave 1: fetch every term's head posting concurrently.
+    /// Intersects the postings at `locs` (one per query term) and returns the first
+    /// `limit` doc IDs ascending (== descending rank). Wave 1 fetches every head
+    /// concurrently and ANDs smallest-first; the rank-ordered head usually fills
+    /// `limit`, so wave 2 (the tails) runs only when it underflows and a tail exists.
+    async fn and_locs(
+        &self,
+        locs: Vec<(u64, usize)>,
+        limit: usize,
+    ) -> Result<Vec<u32>, IndexError> {
+        if locs.is_empty() {
+            return Ok(Vec::new());
+        }
         let heads = join_all(locs.iter().map(|&(off, size)| self.head_block(off, size))).await;
         let mut blocks: Vec<HeadBlock> = Vec::with_capacity(heads.len());
         for h in heads {
             blocks.push(h?);
         }
 
-        // AND the heads smallest-first; the rank-ordered head often fills top-K.
         blocks.sort_by_key(|b| b.head.len());
         let mut acc = blocks[0].head.clone();
         for b in &blocks[1..] {
@@ -316,8 +376,6 @@ impl<F: RangeFetch> TermIndex<F> {
             return Ok(acc.iter().take(limit).collect());
         }
 
-        // Wave 2: the head AND underflowed and tails exist — fetch them and AND
-        // the full `(head | tail)` postings.
         let tails = join_all(blocks.iter().map(|b| self.tail(b.tail_off, b.tail_size))).await;
         let mut fulls: Vec<RoaringBitmap> = Vec::with_capacity(blocks.len());
         for (b, t) in blocks.iter().zip(tails) {
@@ -336,47 +394,100 @@ impl<F: RangeFetch> TermIndex<F> {
         Ok(acc.iter().take(limit).collect())
     }
 
-    /// Autocompletes `prefix`: returns up to `max_terms` dictionary terms that
-    /// start with it, in lexicographic (FST) order. The prefix is lowercased the
-    /// same way [`tokenize`] lowercases, so a query prefix matches the indexed
-    /// terms. Walks the resident FST only — **zero** fetches.
-    pub fn complete(&self, prefix: &str, max_terms: usize) -> Vec<String> {
-        let p: String = prefix.chars().flat_map(|c| c.to_lowercase()).collect();
-        let mut out = Vec::new();
-        let mut stream = self.fst.search(Str::new(&p).starts_with()).into_stream();
-        while out.len() < max_terms {
-            match stream.next() {
-                Some((term, _)) => out.push(String::from_utf8_lossy(term).into_owned()),
-                None => break,
-            }
-        }
-        out
-    }
-
-    /// Collects the matched terms' posting locations `(head_off, head_size)` by
-    /// walking the FST under `automaton`, then unions (ORs) their postings and
-    /// returns the first `limit` doc IDs ascending. The rank-ordered heads alone
-    /// usually fill `limit` in one fetch wave; the tails are fetched and ORed in
-    /// only when the heads underflow `limit` and at least one tail is non-empty.
-    /// Shared by [`Self::search_prefix`] and [`Self::search_fuzzy`].
-    async fn search_union<A: Automaton>(
-        &self,
-        automaton: A,
-        limit: usize,
-    ) -> Result<Vec<u32>, IndexError> {
+    /// Returns up to `limit` doc IDs matching **any** dictionary term that starts
+    /// with `prefix` (the OR / union of every prefix-matching term's posting), most
+    /// popular first (ascending doc ID == descending rank). The prefix is lowercased
+    /// the same way [`tokenize`] lowercases. An empty match set yields no results.
+    pub async fn search_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<u32>, IndexError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let p: String = prefix.chars().flat_map(|c| c.to_lowercase()).collect();
+        let locs = self.prefix_locs(&p).await?;
+        self.union_locs(locs, limit).await
+    }
+
+    /// Autocompletes `prefix`: up to `max_terms` dictionary terms that start with it,
+    /// in lexicographic order. The prefix is lowercased the same way [`tokenize`]
+    /// lowercases. Range-fetches only the dict blocks spanning the prefix.
+    pub async fn complete(
+        &self,
+        prefix: &str,
+        max_terms: usize,
+    ) -> Result<Vec<String>, IndexError> {
+        let p: String = prefix.chars().flat_map(|c| c.to_lowercase()).collect();
+        Ok(self.scan_prefix(&p, max_terms, true).await?.1)
+    }
+
+    /// Posting locations of every dictionary term starting with `p` (scans the dict
+    /// blocks spanning the prefix).
+    async fn prefix_locs(&self, p: &str) -> Result<Vec<(u64, usize)>, IndexError> {
+        Ok(self.scan_prefix(p, usize::MAX, false).await?.0)
+    }
+
+    /// Scans the dictionary forward from the first block that could contain `p`,
+    /// fetching blocks on demand and gathering matches until a term sorts past the
+    /// prefix or `max` are found. Returns `(locs, terms)` — `terms` is filled only
+    /// when `want_terms`. Stops fetching as soon as the prefix range ends.
+    async fn scan_prefix(
+        &self,
+        p: &str,
+        max: usize,
+        want_terms: bool,
+    ) -> Result<(Vec<(u64, usize)>, Vec<String>), IndexError> {
+        let pb = p.as_bytes();
         let mut locs = Vec::new();
-        let mut stream = self.fst.search(automaton).into_stream();
-        while let Some((_, out)) = stream.next() {
-            locs.push((out >> SIZE_BITS, (out & SIZE_MASK) as usize));
+        let mut terms = Vec::new();
+        if max == 0 {
+            return Ok((locs, terms));
         }
-        if locs.is_empty() {
+        // Candidate blocks: every block whose last term >= the prefix, in order.
+        let mut ranges: Vec<(u64, usize)> = Vec::new();
+        {
+            let mut stream = self.router.range().ge(pb).into_stream();
+            while let Some((_, packed)) = stream.next() {
+                let (off, len) = unpack_loc(packed);
+                ranges.push((self.dict_start + off, len));
+            }
+        }
+        for (off, len) in ranges {
+            let bytes = self.fetch.read(off, len).await?;
+            let mut passed = false;
+            for (t, head_off, head_size) in iter_block(&bytes) {
+                if t.as_slice() < pb {
+                    continue; // before the prefix (only possible in the first block)
+                }
+                if !t.starts_with(pb) {
+                    passed = true; // sorted: the prefix range has ended
+                    break;
+                }
+                locs.push((head_off, head_size));
+                if want_terms {
+                    terms.push(String::from_utf8_lossy(&t).into_owned());
+                }
+                if locs.len() >= max {
+                    return Ok((locs, terms));
+                }
+            }
+            if passed {
+                break;
+            }
+        }
+        Ok((locs, terms))
+    }
+
+    /// Unions (ORs) the postings at `locs` and returns the first `limit` doc IDs
+    /// ascending (== descending rank). Wave 1 ORs the heads; wave 2 (the tails) runs
+    /// only when the heads underflow `limit` and a tail exists. Shared by the prefix
+    /// and (v1) fuzzy paths.
+    async fn union_locs(
+        &self,
+        locs: Vec<(u64, usize)>,
+        limit: usize,
+    ) -> Result<Vec<u32>, IndexError> {
+        if locs.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-
-        // Wave 1: fetch every matched term's head posting concurrently and OR them.
         let heads = join_all(locs.iter().map(|&(off, size)| self.head_block(off, size))).await;
         let mut blocks: Vec<HeadBlock> = Vec::with_capacity(heads.len());
         for h in heads {
@@ -390,9 +501,6 @@ impl<F: RangeFetch> TermIndex<F> {
         if acc.len() as usize >= limit || !has_tail {
             return Ok(acc.iter().take(limit).collect());
         }
-
-        // Wave 2: the head union underflowed and tails exist — fetch them and OR
-        // the full `(head | tail)` postings.
         let tails = join_all(blocks.iter().map(|b| self.tail(b.tail_off, b.tail_size))).await;
         let mut acc = RoaringBitmap::new();
         for (b, t) in blocks.iter().zip(tails) {
@@ -400,34 +508,6 @@ impl<F: RangeFetch> TermIndex<F> {
             acc |= &t?;
         }
         Ok(acc.iter().take(limit).collect())
-    }
-
-    /// Returns up to `limit` doc IDs matching **any** term that starts with
-    /// `prefix` (the OR / union of every prefix-matching term's posting), most
-    /// popular first (ascending doc ID == descending rank). The prefix is
-    /// lowercased the same way [`tokenize`] lowercases. An empty match set yields
-    /// no results.
-    pub async fn search_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<u32>, IndexError> {
-        let p: String = prefix.chars().flat_map(|c| c.to_lowercase()).collect();
-        self.search_union(Str::new(&p).starts_with(), limit).await
-    }
-
-    /// Returns up to `limit` doc IDs matching **any** term within Levenshtein edit
-    /// distance `max_edits` of `term` (the OR / union of every fuzzy-matching
-    /// term's posting), most popular first (ascending doc ID == descending rank).
-    /// The term is lowercased the same way [`tokenize`] lowercases. A Levenshtein
-    /// automaton that the `fst` crate refuses to build (too large for the given
-    /// edits/length) maps to [`IndexError::BadQuery`].
-    pub async fn search_fuzzy(
-        &self,
-        term: &str,
-        max_edits: u32,
-        limit: usize,
-    ) -> Result<Vec<u32>, IndexError> {
-        let lower: String = term.chars().flat_map(|c| c.to_lowercase()).collect();
-        let lev = Levenshtein::new(&lower, max_edits)
-            .map_err(|_| IndexError::BadQuery("fuzzy automaton too large"))?;
-        self.search_union(lev, limit).await
     }
 }
 
@@ -438,10 +518,32 @@ mod tests {
     use crate::terms_build::{write_term_index, write_term_index_with, TermIndexConfig};
     use futures::executor::block_on;
 
-    /// Builds an in-memory `RRTI` over the docs at the default head boundary.
+    /// Builds an in-memory v2 `RRTI` over the docs at the default head boundary.
     fn build(docs: &[(u32, &str)], head_boundary: u32) -> TermIndex<MemoryFetch> {
         let mut buf = Vec::new();
         write_term_index(&mut buf, docs, head_boundary).unwrap();
+        block_on(TermIndex::open(MemoryFetch::new(buf))).unwrap()
+    }
+
+    /// Builds an in-memory v2 `RRTI` with an explicit dict block cap — a tiny cap
+    /// forces many blocks, exercising the router and the cross-block scan paths.
+    fn build_capped(
+        docs: &[(u32, &str)],
+        head_boundary: u32,
+        block_cap: usize,
+    ) -> TermIndex<MemoryFetch> {
+        let mut buf = Vec::new();
+        write_term_index_with(
+            &mut buf,
+            docs,
+            &TermIndexConfig {
+                head_boundary,
+                language: None,
+                stopwords: false,
+                block_cap,
+            },
+        )
+        .unwrap();
         block_on(TermIndex::open(MemoryFetch::new(buf))).unwrap()
     }
 
@@ -536,27 +638,63 @@ mod tests {
         ];
         let ti = build(&docs, 65_536);
 
-        // "learn" prefixes five terms, returned in lexicographic (FST) order.
+        // "learn" prefixes five terms, returned in lexicographic order.
         assert_eq!(
-            ti.complete("learn", 10),
+            block_on(ti.complete("learn", 10)).unwrap(),
             vec!["learn", "learned", "learner", "learning", "learns"]
         );
-        // `max_terms` caps the stream; the first two in order.
-        assert_eq!(ti.complete("learn", 2), vec!["learn", "learned"]);
+        // `max_terms` caps the result; the first two in order.
+        assert_eq!(
+            block_on(ti.complete("learn", 2)).unwrap(),
+            vec!["learn", "learned"]
+        );
         // The prefix is lowercased the same way the tokens are.
         assert_eq!(
-            ti.complete("LEARN", 10),
+            block_on(ti.complete("LEARN", 10)).unwrap(),
             vec!["learn", "learned", "learner", "learning", "learns"]
         );
         // "le" widens to include "lethal".
         assert_eq!(
-            ti.complete("le", 10),
+            block_on(ti.complete("le", 10)).unwrap(),
             vec!["learn", "learned", "learner", "learning", "learns", "lethal"]
         );
-        // A prefix that matches nothing yields nothing — zero fetches throughout.
-        assert!(ti.complete("zzz", 10).is_empty());
+        // A prefix that matches nothing yields nothing.
+        assert!(block_on(ti.complete("zzz", 10)).unwrap().is_empty());
         // An empty prefix matches everything (capped).
-        assert_eq!(ti.complete("", 1), vec!["learn"]);
+        assert_eq!(block_on(ti.complete("", 1)).unwrap(), vec!["learn"]);
+    }
+
+    #[test]
+    fn blocked_dict_many_blocks_round_trips() {
+        // A tiny block cap forces many front-coded blocks, so exact lookup, the
+        // dict-block wave, and the cross-block prefix scan all span block boundaries.
+        let docs: Vec<(u32, String)> = (0..200u32)
+            .map(|i| (i, format!("term{i:04} shared{}", i % 5)))
+            .collect();
+        let refs: Vec<(u32, &str)> = docs.iter().map(|(d, t)| (*d, t.as_str())).collect();
+        let ti = build_capped(&refs, 65_536, 24);
+
+        // Exact lookups resolve across many blocks.
+        assert_eq!(block_on(ti.search("term0000", 10)).unwrap(), vec![0]);
+        assert_eq!(block_on(ti.search("term0137", 10)).unwrap(), vec![137]);
+        assert_eq!(block_on(ti.search("term0199", 10)).unwrap(), vec![199]);
+        // Absent term -> no results (fetches its candidate block, scans, misses).
+        assert!(block_on(ti.search("term9999", 10)).unwrap().is_empty());
+        // A two-term AND whose terms live in different blocks.
+        assert_eq!(
+            block_on(ti.search("term0000 shared0", 10)).unwrap(),
+            vec![0]
+        );
+        // "shared0" appears on docs 0,5,10,...; prefix scan crosses blocks and unions.
+        assert_eq!(
+            block_on(ti.search_prefix("shared0", 5)).unwrap(),
+            vec![0, 5, 10, 15, 20]
+        );
+        // Completion crosses block boundaries and is capped.
+        assert_eq!(
+            block_on(ti.complete("term001", 3)).unwrap(),
+            vec!["term0010", "term0011", "term0012"]
+        );
     }
 
     #[test]
@@ -601,33 +739,30 @@ mod tests {
     }
 
     #[test]
-    fn search_fuzzy_finds_typos_excludes_far_terms() {
-        let docs = [
-            (0u32, "learning"),
-            (1, "learnings"),
-            (2, "lemming"),
-            (3, "unrelated"),
-        ];
-        let ti = build(&docs, 65_536);
-
-        // "learnimg" is one edit from "learning" (doc 0). "lemming" is far (>1).
-        assert_eq!(
-            block_on(ti.search_fuzzy("learnimg", 1, 10)).unwrap(),
-            vec![0]
+    fn resident_router_is_small_vs_dictionary() {
+        // The scaling property: with the default block cap, what stays resident
+        // (header + router FST) is a small fraction of the full dictionary bytes —
+        // O(#blocks), not O(vocabulary). The old v1 FST held the whole dictionary.
+        let docs: Vec<(u32, String)> = (0..8_000u32)
+            .map(|i| (i, format!("scholarlyterm{i:05}")))
+            .collect();
+        let refs: Vec<(u32, &str)> = docs.iter().map(|(d, t)| (*d, t.as_str())).collect();
+        let mut buf = Vec::new();
+        write_term_index(&mut buf, &refs, 65_536).unwrap();
+        let dict_len = read_u64(&buf, 24); // header field: dict-blocks region length
+        let ti = block_on(TermIndex::open(MemoryFetch::new(buf))).unwrap();
+        assert_eq!(ti.len(), 8_000);
+        // The resident boot (header + router) is well under a third of the dict it
+        // routes — and shrinks relative to the dict as the vocabulary grows.
+        assert!(
+            ti.resident_len() * 3 < dict_len,
+            "resident {} should be << dict {dict_len}",
+            ti.resident_len()
         );
-        // Edit distance 1 also reaches "learnings" (one insertion) — their OR.
+        // And it still resolves a term across the many blocks.
         assert_eq!(
-            block_on(ti.search_fuzzy("learning", 1, 10)).unwrap(),
-            vec![0, 1]
-        );
-        // A word far from every term yields no results.
-        assert!(block_on(ti.search_fuzzy("xyzzy", 1, 10))
-            .unwrap()
-            .is_empty());
-        // The query is lowercased the same way the tokens are.
-        assert_eq!(
-            block_on(ti.search_fuzzy("LEARNIMG", 1, 10)).unwrap(),
-            vec![0]
+            block_on(ti.search("scholarlyterm04242", 10)).unwrap(),
+            vec![4242]
         );
     }
 
@@ -650,6 +785,7 @@ mod tests {
                 head_boundary: 65_536,
                 language: Some(Language::English),
                 stopwords: false,
+                block_cap: 0,
             },
         )
         .unwrap();
@@ -673,6 +809,7 @@ mod tests {
                 head_boundary: 65_536,
                 language: None,
                 stopwords: true,
+                block_cap: 0,
             },
         )
         .unwrap();

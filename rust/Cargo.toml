@@ -65,13 +65,13 @@ unicode-normalization = { version = "0.1", optional = true }
 # pulled in (no `async-await` macros).
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
 
-# FST term dictionary for the `RRTI` term-level index: maps term -> u64 posting
-# metadata, with native prefix streams and (later) a Levenshtein automaton for
-# fuzzy. Pure-Rust and wasm-safe — the same crate Tantivy/Meilisearch use.
-# Optional, behind the `terms` feature; `default-features = false` keeps the
-# optional `mmap` extra out, while `levenshtein` is enabled for the fuzzy
-# (edit-distance) query path.
-fst = { version = "0.4", optional = true, default-features = false, features = ["levenshtein"] }
+# FST used as the `RRTI` v2 dictionary's resident block router: a small FST mapping
+# each front-coded block's last term -> its byte range (the Quickwit/tantivy-sstable
+# shape). Pure-Rust and wasm-safe — the same crate Tantivy/Meilisearch use. Optional,
+# behind the `terms` feature; `default-features = false` keeps the optional `mmap`
+# extra out (and the `levenshtein` automaton is no longer needed — typo/substring
+# search routes to the trigram `RRS` index).
+fst = { version = "0.4", optional = true, default-features = false }
 # Snowball stemmers for the optional `terms` stemming filter — the same pure-Rust
 # crate Tantivy uses. wasm-safe (no C), so the browser reader can stem queries to
 # match a stemmed index (build/query symmetry). Optional, pulled in by `terms`.

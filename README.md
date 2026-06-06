@@ -99,7 +99,7 @@ reader and builder are listed below.
 | `RRSR` | `.idx`+`.bin`(+`.dict`) | [RECORDS.md](RECORDS.md) | `RecordStore` / `RrsRecords` | Rust `write_records`, Go `WriteRecords` | record store (paired files; optional zstd dict) |
 | `RRIL` | `.rril` | [LOOKUP.md](LOOKUP.md) | `Lookup` / `RrsLookup` | Rust `write_lookup` | identifier exact-match index |
 | `RRSC` | `.rrsc` | [SORTCOLS.md](SORTCOLS.md) | `SortCols` / `RrsSortCols` | Rust `write_sortcols` | static sort/rank columns |
-| `RRTI` | `.rrt` | [TERMS.md](TERMS.md) | `TermIndex` / `RrtIndex` | Rust `write_term_index`, Python | term/FST index |
+| `RRTI` | `.rrt` | [TERMS.md](TERMS.md) | `TermIndex` / `RrtIndex` | Rust `write_term_index`, Python | term index (blocked, range-fetched dict) |
 | `RRVI` | `.rrvi` | [VECTORS.md](VECTORS.md) | `VectorIndex` / `RrviIndex` | Rust `build_ivfpq`, Python | IVFPQ vector index |
 | `RRVR` | `.rrvi.rerank` | [VECTORS.md](VECTORS.md#re-rank-sidecar-rrvr-optional) | `RerankStore` | Rust `write_rerank` | bf16 re-rank sidecar |
 | `RRM2` | `.rrm2` | [VECTORS.md](VECTORS.md#model2vec-embedder-rrm2) | `Model2vec` / `Model2vecEmbedder` | `python/scripts/model2vec_export.py` | in-browser query embedder |
@@ -123,7 +123,7 @@ Rust, Go, or Python. Rust is the reference — Go and Python expose deliberate s
 | Model2vec `RRM2` | read | — | export¹ | read |
 | Hotcache `RRHC` | build + read | — | — | —² |
 | Split set `RRSS` (trigram) | build + read | build³ | build | read |
-| Split set `RRSS` (term/FST) | build + read | — | build | read |
+| Split set `RRSS` (term) | build + read | — | build | read |
 
 ¹ via `python/scripts/model2vec_export.py`. &nbsp;² no JS reader yet (server-side only). &nbsp;³ trigram bodies only (Go builds the split set + per-split facet sidecars, but not RRTI term bodies).
 

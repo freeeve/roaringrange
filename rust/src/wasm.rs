@@ -1332,8 +1332,8 @@ impl Model2vecEmbedder {
 }
 
 /// A range-fetchable `RRTI` term-level inverted index exposed to JavaScript. Boot
-/// holds the FST term dictionary in memory; each query range-fetches only the
-/// matched terms' postings. Built with
+/// holds only the small resident block router in memory (O(#blocks), not O(vocab));
+/// each query range-fetches the dict blocks and postings it needs. Built with
 /// `wasm-pack build --target web --features "wasm terms"`.
 #[cfg(feature = "terms")]
 #[wasm_bindgen]
@@ -1344,8 +1344,8 @@ pub struct RrtIndex {
 #[cfg(feature = "terms")]
 #[wasm_bindgen]
 impl RrtIndex {
-    /// Boots the index at `url`: one boot read of the FST term dictionary, held
-    /// resident so a term resolves to its posting location with no further reads.
+    /// Boots the index at `url`: one boot read of the small block router, held
+    /// resident so a term resolves to its dict block with a single ranged read.
     /// Returns a `Promise<RrtIndex>`.
     pub async fn open(url: String) -> Result<RrtIndex, JsError> {
         let inner = TermIndex::open(WasmFetch::new(url))
@@ -1375,27 +1375,15 @@ impl RrtIndex {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Returns up to `limit` doc IDs matching any term within Levenshtein edit
-    /// distance `max_edits` of `term` (the union of every fuzzy-matching term's
-    /// posting), most popular first. Resolves to a `Uint32Array`.
-    #[wasm_bindgen(js_name = searchFuzzy)]
-    pub async fn search_fuzzy(
-        &self,
-        term: &str,
-        max_edits: u32,
-        limit: usize,
-    ) -> Result<Vec<u32>, JsError> {
+    /// Autocompletes `prefix`: up to `max_terms` dictionary terms that start with
+    /// it, in lexicographic order, as a JS `string[]`. Range-fetches only the dict
+    /// blocks spanning the prefix. Resolves to a `Promise<string[]>`. (Typo/substring
+    /// search is the trigram `RRS` index's job — it composes over the same doc IDs.)
+    pub async fn complete(&self, prefix: &str, max_terms: usize) -> Result<Vec<String>, JsError> {
         self.inner
-            .search_fuzzy(term, max_edits, limit)
+            .complete(prefix, max_terms)
             .await
             .map_err(|e| JsError::new(&e.to_string()))
-    }
-
-    /// Autocompletes `prefix`: returns up to `max_terms` dictionary terms that
-    /// start with it, in lexicographic order, as a JS `string[]`. Walks the
-    /// resident FST only — no fetches.
-    pub fn complete(&self, prefix: &str, max_terms: usize) -> Vec<String> {
-        self.inner.complete(prefix, max_terms)
     }
 
     /// Number of distinct terms in the dictionary.

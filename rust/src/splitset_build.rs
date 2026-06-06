@@ -733,21 +733,25 @@ pub struct TermSplitBuildConfig {
 }
 
 /// Bytes charged per new term: the posting block base (`[tail_size u32][head roaring base]`) plus
-/// the term's FST framing overhead — the term's own byte length is added on top (an upper bound,
-/// since the FST shares prefixes). Keeps the running estimate at or above the real `RRTI` size.
+/// the front-coded dict-entry framing (shared/suffix-len/head-off/head-size varints) and the block
+/// router's amortized per-term cost. The term's own byte length is added on top — an upper bound,
+/// since front-coding stores only each term's suffix. Keeps the estimate at or above the real
+/// `RRTI` v2 size.
 #[cfg(feature = "terms")]
 const PER_NEW_TERM_BYTES: u64 = 24;
 /// Bytes charged per `(term, doc)` occurrence — a roaring array element (`u16`); over-counts once
 /// a container turns bitmap, keeping the estimate an upper bound.
 #[cfg(feature = "terms")]
 const PER_TERM_ELEMENT_BYTES: u64 = 2;
-/// Fixed `RRTI` header + FST framing allowance, added once to each open split's estimate.
+/// Fixed `RRTI` v2 header (40 B) + block-router FST base allowance, added once to each open
+/// split's estimate.
 #[cfg(feature = "terms")]
-const TERM_INDEX_HEADER_EST: u64 = 64;
+const TERM_INDEX_HEADER_EST: u64 = 128;
 
 /// The term-bodied analogue of [`SplitSetBuilder`]: greedily packs documents into byte-capped
-/// splits, but each sealed split is an `RRTI` term index (FST dictionary keyed by whole token)
-/// instead of a trigram `RRS`. Everything cross-split — the policy, tiering, doc-ID ranges,
+/// splits, but each sealed split is an `RRTI` term index (a blocked, front-coded term dictionary
+/// keyed by whole token) instead of a trigram `RRS`. Everything cross-split — the policy, tiering,
+/// doc-ID ranges,
 /// facet-presence summaries, per-split `RRSF` sidecars, and the streaming
 /// [`drain_sealed`](Self::drain_sealed) — is identical to the trigram builder; only the open
 /// accumulator (keyed by term string, not n-gram `u64`) and [`seal`](Self::seal)'s body encoder
@@ -889,6 +893,7 @@ impl TermSplitSetBuilder {
             self.head_boundary,
             self.language,
             self.stopwords,
+            0, // default dictionary block cap
         )?;
 
         let idx = self.specs.len();

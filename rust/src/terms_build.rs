@@ -8,6 +8,7 @@
 
 use crate::build::split_posting;
 use crate::terms::{Language, Tokenizer, FLAG_STEMMED, FLAG_STOPWORDS};
+use crate::terms_dict::{pack_loc, BlockWriter, DEFAULT_DICT_BLOCK_CAP, SIZE_BITS};
 use fst::MapBuilder;
 use roaring::RoaringBitmap;
 use std::collections::BTreeMap;
@@ -15,11 +16,9 @@ use std::io::{self, Write};
 
 /// `RRTI` magic.
 const MAGIC: &[u8; 4] = b"RRTI";
-/// Format version written into the header.
-const VERSION: u16 = 1;
-/// Bits of the FST output reserved for the head posting's byte length; the rest
-/// hold the block's byte offset within the postings region (see [`crate::terms`]).
-const SIZE_BITS: u32 = 24;
+/// Format version written into the header: v2 is the blocked, front-coded
+/// dictionary with a small resident FST routing over block boundaries.
+const VERSION: u16 = 2;
 
 /// Build-time configuration for an `RRTI` index. The tokenizer settings (`language`
 /// for Snowball stemming, `stopwords`) are recorded in the header so the reader
@@ -32,6 +31,10 @@ pub struct TermIndexConfig {
     pub language: Option<Language>,
     /// Remove common stop words from the index (and, symmetrically, from queries).
     pub stopwords: bool,
+    /// Dictionary block byte cap — the dictionary is partitioned into front-coded
+    /// blocks sized for one cheap ranged GET. `0` selects the default
+    /// (~[`DEFAULT_DICT_BLOCK_CAP`] bytes / a few hundred terms per block).
+    pub block_cap: usize,
 }
 
 /// Builds an unstemmed `RRTI` term index over `(doc_id, text)` documents and writes it
@@ -51,6 +54,7 @@ pub fn write_term_index<W: Write>(
             head_boundary,
             language: None,
             stopwords: false,
+            block_cap: 0,
         },
     )
 }
@@ -83,6 +87,7 @@ pub struct TermIndexBuilder {
     head_boundary: u32,
     language: Option<Language>,
     stopwords: bool,
+    block_cap: usize,
 }
 
 impl TermIndexBuilder {
@@ -94,6 +99,7 @@ impl TermIndexBuilder {
             head_boundary: config.head_boundary,
             language: config.language,
             stopwords: config.stopwords,
+            block_cap: config.block_cap,
         }
     }
 
@@ -125,31 +131,40 @@ impl TermIndexBuilder {
             self.head_boundary,
             self.language,
             self.stopwords,
+            self.block_cap,
         )
     }
 }
 
-/// Writes an `RRTI` term index body to `w` from already-accumulated `term -> doc-id bitmap`
-/// `postings`. Terms are drained in byte-lexicographic order (a `BTreeMap`, exactly the FST
-/// builder's required order), and each posting bitmap is freed right after it is serialized, so
-/// peak memory is the postings region rather than double it. Doc IDs must be the shared
-/// rank-order IDs; `head_boundary` is the head/tail split. The tokenizer settings
-/// (`language`/`stopwords`) are recorded in the header so the reader tokenizes queries
-/// identically. Shared by [`TermIndexBuilder::finish`] and the split-set term builder.
+/// Writes an `RRTI` v2 term index body to `w` from already-accumulated `term -> doc-id bitmap`
+/// `postings`. Terms are drained in byte-lexicographic order (a `BTreeMap`, exactly the
+/// blocked dictionary's required order), and each posting bitmap is freed right after it is
+/// serialized, so peak memory is the postings region rather than double it.
+///
+/// The dictionary is partitioned into byte-capped, front-coded blocks
+/// ([`crate::terms_dict`]) that the reader range-fetches one at a time; a small **router FST**
+/// maps each block's last term to its byte range, so only O(#blocks) — not O(vocab) — is
+/// resident. The postings region is byte-identical to v1. Doc IDs must be the shared rank-order
+/// IDs; `head_boundary` is the head/tail split; the tokenizer settings (`language`/`stopwords`)
+/// are recorded in the header so the reader tokenizes queries identically; `block_cap` is the
+/// dict block byte cap (`0` selects [`DEFAULT_DICT_BLOCK_CAP`]). Shared by
+/// [`TermIndexBuilder::finish`] and the split-set term builder.
 pub(crate) fn write_term_index_from_postings<W: Write>(
     mut w: W,
     postings: BTreeMap<String, RoaringBitmap>,
     head_boundary: u32,
     language: Option<Language>,
     stopwords: bool,
+    block_cap: usize,
 ) -> io::Result<()> {
     let term_count = postings.len() as u32;
 
-    // Lay out the postings region and build the FST in one sorted, draining pass.
-    // Each block is `[tail_size: u32 LE][head bytes][tail bytes]`; the FST output
-    // packs `(head_off << 24) | head_size`.
+    // Lay out the (unchanged) postings region and front-code the dictionary into
+    // blocks in one sorted, draining pass. Each posting block is
+    // `[tail_size: u32 LE][head bytes][tail bytes]`; the dict records each term's
+    // `(head_off within the postings region, head_size)`.
     let mut region: Vec<u8> = Vec::new();
-    let mut fst = MapBuilder::memory();
+    let mut blocks = BlockWriter::new(block_cap);
     for (term, bm) in postings {
         let (head, tail) = split_posting(&bm, head_boundary);
         let head_off = region.len() as u64;
@@ -167,27 +182,61 @@ pub(crate) fn write_term_index_from_postings<W: Write>(
         region.extend_from_slice(&(tail.len() as u32).to_le_bytes());
         region.extend_from_slice(&head);
         region.extend_from_slice(&tail);
-        fst.insert(term.as_bytes(), (head_off << SIZE_BITS) | head_size as u64)
-            .map_err(|e| io::Error::other(format!("fst insert: {e}")))?;
+        blocks.push(term.as_bytes(), head_off, head_size as u64);
     }
-    let fst_bytes = fst
-        .into_inner()
-        .map_err(|e| io::Error::other(format!("fst finish: {e}")))?;
+    let blocks = blocks.finish();
 
-    // Header (32 B): `flags` records the tokenizer (stemmed / stop-words); the first
-    // reserved byte carries the stemmer language so the reader rebuilds it.
+    // Router FST: each block's last term -> `(block_off << 24) | block_len`, where
+    // `block_off` is relative to the dict region. Keys are already sorted (blocks
+    // are in term order) and distinct, as `MapBuilder` requires.
+    let mut router = MapBuilder::memory();
+    let mut dict_len: u64 = 0;
+    for b in &blocks {
+        let block_len = b.bytes.len() as u64;
+        if block_len >= (1u64 << SIZE_BITS) {
+            return Err(io::Error::other(
+                "dict block exceeds the 24-bit block-length limit",
+            ));
+        }
+        if b.off >= (1u64 << (64 - SIZE_BITS)) {
+            return Err(io::Error::other(
+                "dict region exceeds the 40-bit block-offset limit",
+            ));
+        }
+        router
+            .insert(&b.last_term, pack_loc(b.off, block_len))
+            .map_err(|e| io::Error::other(format!("router fst insert: {e}")))?;
+        dict_len += block_len;
+    }
+    let router_bytes = router
+        .into_inner()
+        .map_err(|e| io::Error::other(format!("router fst finish: {e}")))?;
+
+    // Header (40 B): `flags` records the tokenizer (stemmed / stop-words); the
+    // first reserved byte (offset 36) carries the stemmer language so the reader
+    // rebuilds it. `routerLen`/`dictLen` locate the dict region and postings.
     let flags = (if language.is_some() { FLAG_STEMMED } else { 0 })
         | (if stopwords { FLAG_STOPWORDS } else { 0 });
-    let mut reserved = [0u8; 8];
+    let block_cap_used = if block_cap == 0 {
+        DEFAULT_DICT_BLOCK_CAP
+    } else {
+        block_cap
+    } as u32;
+    let mut reserved = [0u8; 4];
     reserved[0] = language.map_or(0, |l| l.to_u8());
     w.write_all(MAGIC)?;
     w.write_all(&VERSION.to_le_bytes())?;
     w.write_all(&flags.to_le_bytes())?;
     w.write_all(&term_count.to_le_bytes())?;
     w.write_all(&head_boundary.to_le_bytes())?;
-    w.write_all(&(fst_bytes.len() as u64).to_le_bytes())?;
-    w.write_all(&reserved)?; // first byte = stemmer language; pads the header to 32 B
-    w.write_all(&fst_bytes)?;
+    w.write_all(&(router_bytes.len() as u64).to_le_bytes())?;
+    w.write_all(&dict_len.to_le_bytes())?;
+    w.write_all(&block_cap_used.to_le_bytes())?;
+    w.write_all(&reserved)?; // reserved[0] (offset 36) = stemmer language; pads to 40 B
+    w.write_all(&router_bytes)?;
+    for b in &blocks {
+        w.write_all(&b.bytes)?;
+    }
     w.write_all(&region)?;
     Ok(())
 }

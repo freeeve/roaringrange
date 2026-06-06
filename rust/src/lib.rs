@@ -26,11 +26,17 @@ pub mod vector;
 #[cfg(feature = "vector")]
 pub mod model2vec;
 
-/// The `RRTI` range-fetchable term-level inverted index reader: an FST term
-/// dictionary over term-keyed roaring postings, sharing the doc-ID space with the
+/// The `RRTI` range-fetchable term-level inverted index reader: a blocked,
+/// front-coded term dictionary (with a small resident FST routing over block
+/// boundaries) over term-keyed roaring postings, sharing the doc-ID space with the
 /// other formats. Behind the `terms` feature; wasm-safe.
 #[cfg(feature = "terms")]
 pub mod terms;
+
+/// Pure front-coded block codec for the `RRTI` v2 term dictionary, shared by the
+/// reader and the builder. Behind the `terms` feature; wasm-safe (no I/O / `fst`).
+#[cfg(feature = "terms")]
+pub(crate) mod terms_dict;
 
 /// Native build-side writer for the `RRTI` term index (excluded from wasm).
 /// Behind the `terms` feature.

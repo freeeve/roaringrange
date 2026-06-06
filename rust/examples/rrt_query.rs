@@ -4,16 +4,17 @@
 //! Run with the `terms` feature:
 //! ```sh
 //! cargo run --release --example rrt_query --features terms -- \
-//!     index.rrt <search|prefix|fuzzy|complete> "<query>" [k]
+//!     index.rrt <search|prefix|complete> "<query>" [k]
 //! ```
 //! Prints space-separated top-`k` doc IDs (or terms, for `complete`) to stdout.
+//! (Typo/substring search is the trigram `RRS` index's job, not the term index's.)
 
 use roaringrange::{MemoryFetch, TermIndex};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("usage: rrt_query <index.rrt> <search|prefix|fuzzy|complete> <query> [k]");
+        eprintln!("usage: rrt_query <index.rrt> <search|prefix|complete> <query> [k]");
         std::process::exit(2);
     }
     let mode = args[2].as_str();
@@ -21,9 +22,15 @@ fn main() {
     let k: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(10);
 
     let bytes = std::fs::read(&args[1]).expect("read rrt");
+    let file_len = bytes.len();
     let idx =
         futures::executor::block_on(TermIndex::open(MemoryFetch::new(bytes))).expect("open RRTI");
-    eprintln!("terms in dictionary: {}", idx.len());
+    eprintln!(
+        "terms in dictionary: {} | resident boot: {} B (header + block router) of {} B file",
+        idx.len(),
+        idx.resident_len(),
+        file_len
+    );
 
     let join = |ids: Vec<u32>| {
         ids.iter()
@@ -36,10 +43,9 @@ fn main() {
         "prefix" => {
             join(futures::executor::block_on(idx.search_prefix(query, k)).expect("search_prefix"))
         }
-        "fuzzy" => {
-            join(futures::executor::block_on(idx.search_fuzzy(query, 1, k)).expect("search_fuzzy"))
-        }
-        "complete" => idx.complete(query, k).join(" "),
+        "complete" => futures::executor::block_on(idx.complete(query, k))
+            .expect("complete")
+            .join(" "),
         other => {
             eprintln!("unknown mode {other}");
             std::process::exit(2);

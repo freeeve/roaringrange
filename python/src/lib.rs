@@ -543,11 +543,12 @@ struct TermBuilder {
 #[pymethods]
 impl TermBuilder {
     #[new]
-    #[pyo3(signature = (head_boundary = None, language = None, stopwords = false))]
+    #[pyo3(signature = (head_boundary = None, language = None, stopwords = false, block_cap = None))]
     fn new(
         head_boundary: Option<u32>,
         language: Option<String>,
         stopwords: bool,
+        block_cap: Option<usize>,
     ) -> PyResult<Self> {
         let language = match language.as_deref() {
             None => None,
@@ -562,6 +563,7 @@ impl TermBuilder {
             head_boundary: head_boundary.unwrap_or(DEFAULT_HEAD_BOUNDARY),
             language,
             stopwords,
+            block_cap: block_cap.unwrap_or(0),
         };
         Ok(TermBuilder {
             inner: Some(TermIndexBuilder::new(&config)),

@@ -60,12 +60,14 @@ class VectorBuilder:
     def __len__(self) -> int: ...
 
 class TermBuilder:
-    """Streaming term/FST index builder (`RRTI`). `language` e.g. `"english"`."""
+    """Streaming term index builder (`RRTI` v2 blocked dictionary). `language` e.g.
+    `"english"`; `block_cap` is the dict block byte cap (`None`/`0` = default)."""
     def __init__(
         self,
         head_boundary: int | None = ...,
         language: str | None = ...,
         stopwords: bool = False,
+        block_cap: int | None = ...,
     ) -> None: ...
     def add_batch(self, docs: list[tuple[int, str]]) -> None: ...
     def term_count(self) -> int: ...
