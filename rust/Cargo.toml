@@ -50,6 +50,12 @@ required-features = ["splits"]
 name = "splitset_demo_data"
 required-features = ["splits"]
 
+# Native parallel, bounded-RAM term split-set builder over an RRSR record store
+# (records are zstd-compressed, so the reader needs the `zstd` decode path too).
+[[example]]
+name = "build_term_splitset"
+required-features = ["splits", "terms", "zstd"]
+
 [dependencies]
 roaring = "0.11"
 # Unicode general-category lookup so the tokenizer filters exactly on letters
@@ -112,6 +118,10 @@ wasm-bindgen-test = "0.3"
 # the async `RangeFetch` reader). Already a crate dependency; declared here too so
 # the separate test crate can reach it. No new external crate is pulled in.
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
+# Example-only: the parallel term split-set builder fans record JSON parsing across a
+# rayon pool and parses with serde_json. Not used by the library/reader.
+rayon = "1"
+serde_json = "1"
 
 [dependencies.web-sys]
 version = "0.3"
