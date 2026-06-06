@@ -30,6 +30,26 @@ required-features = ["vector"]
 name = "rrt_query"
 required-features = ["terms"]
 
+# Side-by-side monolith-vs-split-set byte/request benchmark; needs `splits`.
+[[example]]
+name = "splitset_bench"
+required-features = ["splits"]
+
+# Head-to-head: trigram (RRS) vs term/FST (RRTI) split set over the same corpus.
+[[example]]
+name = "term_vs_trigram_bench"
+required-features = ["splits", "terms"]
+
+# Worked queue-as-WAL ingestion client over the pure SplitSetWriter; needs `splits`.
+[[example]]
+name = "splitset_ingest"
+required-features = ["splits"]
+
+# Generates the standalone split-set demo's sample artifacts; needs `splits`.
+[[example]]
+name = "splitset_demo_data"
+required-features = ["splits"]
+
 [dependencies]
 roaring = "0.11"
 # Unicode general-category lookup so the tokenizer filters exactly on letters
@@ -150,3 +170,10 @@ terms = ["dep:fst", "dep:rust-stemmers"]
 # dependencies. The reader is wasm-safe; the builder is native-only (excluded from
 # wasm32 via a cfg in lib.rs). Off by default; enable with `--features hotcache`.
 hotcache = []
+
+# Range-fetchable split set: the `RRSS` manifest reader + native writer over many
+# byte-capped immutable `RRS` splits, queried with pruning (rank tiering) and a
+# base+delta lifecycle. Pure Rust — adds NO dependencies. The reader is wasm-safe; the
+# builder is native-only (excluded from wasm32 via a cfg in lib.rs). Off by default;
+# enable with `--features splits`.
+splits = []

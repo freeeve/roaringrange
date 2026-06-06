@@ -22,5 +22,7 @@ roaring = "0.11"
 # `vector` enables the core's IVFPQ trainer/writer (`build_ivfpq`/`Ivfpq`) that
 # the `VectorBuilder` binding wraps. Adds no third-party deps (pure-Rust k-means).
 # `terms` enables the core's `RRTI` term-index writer (`write_term_index`) that
-# the `write_term_index` binding wraps (pulls in the `fst` crate).
-roaringrange_core = { package = "roaringrange", path = "../rust", features = ["vector", "terms"] }
+# the `write_term_index` binding wraps (pulls in the `fst` crate). `splits` enables
+# the `RRSS` split-set builder + ingestion writer that the `SplitSetBuilder` /
+# `SplitSetWriter` bindings wrap (pure Rust, no extra deps).
+roaringrange_core = { package = "roaringrange", path = "../rust", features = ["vector", "terms", "splits"] }

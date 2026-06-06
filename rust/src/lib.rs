@@ -48,6 +48,23 @@ pub mod hotcache;
 #[cfg(all(feature = "hotcache", not(target_arch = "wasm32")))]
 pub mod hotcache_build;
 
+/// The `RRSS` split-set manifest reader: names many immutable `RRS` splits and carries the
+/// cross-split pruning metadata (rank tier, doc-id range, byte size, epoch) plus the
+/// base/delta boundary. Behind the `splits` feature; wasm-safe.
+#[cfg(feature = "splits")]
+pub mod splitset;
+
+/// Native build-side writer for the `RRSS` split-set manifest (excluded from wasm).
+/// Behind the `splits` feature.
+#[cfg(all(feature = "splits", not(target_arch = "wasm32")))]
+pub mod splitset_build;
+
+/// Native ingestion writer for the `RRSS` split set (excluded from wasm): the pure
+/// `SplitSetWriter` builder (open/add/delete/flush/compact, bytes in/out) driving the
+/// base+delta+manifest lifecycle. Behind the `splits` feature.
+#[cfg(all(feature = "splits", not(target_arch = "wasm32")))]
+pub mod splitset_write;
+
 /// Container-level ranged reads into tail postings (search-fetch reduction).
 mod posting;
 
@@ -89,6 +106,20 @@ pub use terms_build::{write_term_index, write_term_index_with, TermIndexBuilder,
 pub use hotcache::{Hotcache, Member, MemberTag};
 #[cfg(all(feature = "hotcache", not(target_arch = "wasm32")))]
 pub use hotcache_build::{write_hotcache, MemberSpec};
+
+#[cfg(feature = "splits")]
+pub use splitset::{
+    Policy, SortColDescriptor, Split, SplitFetcher, SplitSet, BODY_KIND_TERM, BODY_KIND_TRIGRAM,
+};
+#[cfg(all(feature = "splits", not(target_arch = "wasm32")))]
+pub use splitset_build::{
+    write_splitset, BuiltSplitSet, NamedFiles, SortColSpec, SplitBuildConfig, SplitSetBuilder,
+    SplitSetConfig, SplitSpec,
+};
+#[cfg(all(feature = "splits", feature = "terms", not(target_arch = "wasm32")))]
+pub use splitset_build::{TermSplitBuildConfig, TermSplitSetBuilder};
+#[cfg(all(feature = "splits", not(target_arch = "wasm32")))]
+pub use splitset_write::{CompactOutput, FlushOutput, SplitSetWriter, WriterConfig};
 
 #[cfg(feature = "wasm")]
 mod wasm;

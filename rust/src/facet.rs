@@ -20,6 +20,29 @@ use std::collections::BTreeMap;
 const MAGIC: &[u8; 4] = b"RRSF";
 /// Header size in bytes.
 const HEADER_SIZE: usize = 24;
+
+/// FNV-1a 64-bit offset basis / prime (the facet key derivation).
+const FNV_OFFSET64: u64 = 14695981039346656037;
+const FNV_PRIME64: u64 = 1099511628211;
+
+/// Derives the facet category key: FNV-1a 64-bit over `lower(field)`, a `0x1f` separator byte,
+/// then `lower(category)`. Mirrors Go `FacetKey` (see `FACETS.md`). Used by the build side
+/// (`RRSF` category table) and by the split-set reader's facet-presence pruning, so it lives
+/// here in the wasm-safe reader rather than the native builder.
+pub(crate) fn facet_key(field: &str, category: &str) -> u64 {
+    let mut h = FNV_OFFSET64;
+    for b in field.to_lowercase().bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME64);
+    }
+    h ^= 0x1f;
+    h = h.wrapping_mul(FNV_PRIME64);
+    for b in category.to_lowercase().bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME64);
+    }
+    h
+}
 /// Field-table entry size: nameOff(4) + nameLen(2) + pad(2) + catStart(4) + catCount(4).
 const FIELD_ENTRY: usize = 16;
 /// Category-table entry size: key(8) + headOff(8) + headSize(4) + tailSize(4) +

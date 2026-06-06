@@ -39,3 +39,7 @@ Repository = "https://github.com/freeeve/roaringrange"
 # `roaringrange` (set by [lib] name in Cargo.toml).
 manifest-path = "Cargo.toml"
 strip = true
+# Mixed layout: the `roaringrange` package (with the hand-written type stub
+# `__init__.pyi` + `py.typed` marker) lives here; maturin drops the compiled
+# extension into it. This is what gives IDEs/mypy signatures for the bindings.
+python-source = "python_src"

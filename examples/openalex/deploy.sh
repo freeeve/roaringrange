@@ -5,6 +5,7 @@
 # Usage:
 #   ./deploy.sh                  deploy web assets (html/js/wasm/svg) + invalidate
 #   ./deploy.sh --data DIR       ALSO upload the built index/record files from DIR
+#   ./deploy.sh --splits DIR     ALSO upload a split set (.rrss + per-split .rrs/.rrf) from DIR
 #   BUCKET=… DISTRIBUTION=… ./deploy.sh   override the defaults below
 #
 # The wasm reader (roaringrange.js + roaringrange_bg.wasm) is uploaded under
@@ -28,9 +29,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WEB="$HERE/web"
 
 DATA_DIR=""
+SPLITS_DIR=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --data) DATA_DIR="${2:?--data needs a directory}"; shift 2 ;;
+    --splits) SPLITS_DIR="${2:?--splits needs a directory}"; shift 2 ;;
     -h|--help) sed -n '3,11p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -61,7 +64,7 @@ aws s3 cp "$WEB/roaringrange_bg.wasm" "s3://$BUCKET/roaringrange.${ASSET_HASH}_b
 
 # Rewrite each HTML page to reference the hashed reader, then upload it no-cache so
 # the browser always picks up the current build (and its matching reader).
-for h in index.html how-it-works.html; do
+for h in index.html how-it-works.html splitset.html; do
   [[ -f "$WEB/$h" ]] || continue
   tmp_html="$(mktemp)"
   sed -e "s|\./roaringrange\.js|./roaringrange.$ASSET_HASH.js|g" \
@@ -84,10 +87,25 @@ if [[ -n "$DATA_DIR" ]]; then
   done
 fi
 
+# Split-set artifacts: the `.rrss` manifest, the per-split `.rrs`/`.rrf` files, and the split
+# set's OWN record store `*-records.{idx,bin}` (all built by `openalex-build -split-set -out DIR`).
+# Uploaded under the `openalex-split/` prefix so its `openalex-records.{idx,bin}` never collides
+# with a same-corpus monolith's records at the root, and to match the URLs in splitset.html.
+# Versioned/immutable like the monolith data files, so the cache is never invalidated. (The doc
+# ids match the monolith's ONLY when both are built over the same corpus, since both rank by
+# cited_by_count via the same rank_rows — but each reader uses its own record store regardless.)
+if [[ -n "$SPLITS_DIR" ]]; then
+  echo "==> split-set artifacts <- $SPLITS_DIR -> s3://$BUCKET/openalex-split/ (immutable; only changed files upload)"
+  aws s3 sync "$SPLITS_DIR/" "s3://$BUCKET/openalex-split/" \
+    --exclude "*" --include "*.rrss" --include "*-s*.rrs" --include "*-s*.rrt" \
+    --include "*-s*.rrf" --include "*-records.idx" --include "*-records.bin" \
+    --cache-control "public, max-age=31536000, immutable"
+fi
+
 echo "==> invalidating HTML on $DISTRIBUTION (hashed reader + data left cached)"
 aws cloudfront create-invalidation \
   --distribution-id "$DISTRIBUTION" \
-  --paths /index.html /how-it-works.html \
+  --paths /index.html /how-it-works.html /splitset.html \
   --query "Invalidation.{Id:Id,Status:Status}" --output table
 
 echo "==> done — https://openalex.evefreeman.com/"

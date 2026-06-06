@@ -112,13 +112,19 @@ func splitPosting(payload []byte) (head, tail []byte, err error) {
 // splitBitmap returns the head (docs [0,65536)) and tail (docs [65536, MaxUint32])
 // of bm as independently-deserializable portable RoaringBitmaps.
 func splitBitmap(bm *roaring.Bitmap) (head, tail []byte, err error) {
+	return splitBitmapHB(bm, headLimit)
+}
+
+// splitBitmapHB is splitBitmap with an explicit head/tail boundary (a multiple of
+// 65536). Used by the split-set builder, which mirrors the Rust split_posting.
+func splitBitmapHB(bm *roaring.Bitmap, headBoundary uint32) (head, tail []byte, err error) {
 	headBM := roaring.New()
-	headBM.AddRange(0, headLimit)
+	headBM.AddRange(0, uint64(headBoundary))
 	headBM.And(bm)
 	// Tail = the posting minus its head. Clone-and-remove avoids materializing a
 	// ~500 MB full-range mask (AddRange to MaxUint32) for every posting.
 	tailBM := bm.Clone()
-	tailBM.RemoveRange(0, headLimit)
+	tailBM.RemoveRange(0, uint64(headBoundary))
 
 	headBytes, err := headBM.ToBytes()
 	if err != nil {
@@ -132,8 +138,14 @@ func splitBitmap(bm *roaring.Bitmap) (head, tail []byte, err error) {
 }
 
 // writeIndex emits the header, sparse index, dictionary, and postings for the
-// given key-sorted entries.
+// given key-sorted entries, using the default head boundary (65536).
 func writeIndex(dst io.Writer, gramSize uint16, stride int, entries []splitEntry) error {
+	return writeIndexHB(dst, gramSize, stride, headLimit, entries)
+}
+
+// writeIndexHB is writeIndex with an explicit head boundary written into the
+// header — the build-side mirror of the Rust build::write_index.
+func writeIndexHB(dst io.Writer, gramSize uint16, stride int, headBoundary uint32, entries []splitEntry) error {
 	n := len(entries)
 	sparseCount := (n + stride - 1) / stride
 	dictStart := headerSize + sparseCount*8
@@ -145,13 +157,13 @@ func writeIndex(dst io.Writer, gramSize uint16, stride int, entries []splitEntry
 	binary.LittleEndian.PutUint16(header[6:8], gramSize)
 	binary.LittleEndian.PutUint32(header[8:12], uint32(n))
 	binary.LittleEndian.PutUint32(header[12:16], uint32(stride))
-	binary.LittleEndian.PutUint32(header[16:20], headLimit)
+	binary.LittleEndian.PutUint32(header[16:20], headBoundary)
 	if _, err := dst.Write(header); err != nil {
 		return err
 	}
 
 	sparse := make([]byte, sparseCount*8)
-	for i := 0; i < sparseCount; i++ {
+	for i := range sparseCount {
 		binary.LittleEndian.PutUint64(sparse[i*8:], entries[i*stride].key)
 	}
 	if _, err := dst.Write(sparse); err != nil {

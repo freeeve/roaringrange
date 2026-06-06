@@ -40,6 +40,13 @@
 //! from a sample re-derived from the record temps (exactly the single-pass
 //! selection), so a chunked compressed build is byte-identical to the single-pass
 //! one.
+//!
+//! `-split-set` mode builds an `RRSS` split set instead of the monolith — byte-capped tiered
+//! `RRS` splits (`-split-cap`, default 512 MiB; the resident per-split Bloom makes manifest/boot
+//! cost grow with split count, so the default favors a handful of large splits) with term Bloom
+//! filters (`-bloom-bits`) + per-split `RRSF` facet sidecars + a matching record store —
+//! streaming each sealed split to `-out` so the split output never all lives in RAM. See
+//! [`build_split_set`].
 
 use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
@@ -276,6 +283,20 @@ fn main() {
     }
     info!(shards = sources.len(), "resolved input sources");
     let t0 = Instant::now();
+
+    // Split-set mode: build an `RRSS` split set (many byte-capped immutable splits + per-split
+    // `RRSF` facet sidecars + a matching record store) instead of the monolith, so it can be
+    // compared side by side. `-split-set` builds trigram (`RRS`) bodies; `-term-splits` builds
+    // term/FST (`RRTI`) bodies for a head-to-head comparison. Both stream sealed splits to disk;
+    // see `build_split_set`. Use distinct `-out`/`-split-prefix` so the two don't collide.
+    if flag(&args, "-split-set") {
+        build_split_set(&args, &sources, limit, abstract_cap, t0, SplitBody::Trigram);
+        return;
+    }
+    if flag(&args, "-term-splits") {
+        build_split_set(&args, &sources, limit, abstract_cap, t0, SplitBody::Term);
+        return;
+    }
 
     // Chunked path: the phased, resumable, bounded-memory build for indexes larger
     // than RAM. It ranks internally (persisting the ranking so a resume skips it)
@@ -536,7 +557,8 @@ fn http_get(url: &str) -> std::io::Result<Box<dyn Read + Send + Sync>> {
 }
 
 /// Opens a source as a buffered line reader over its decompressed JSON Lines.
-/// Local files are read directly; S3 objects stream over HTTPS.
+/// Local files are read directly; S3 objects stream over HTTPS. OpenAlex ships
+/// gzipped JSON-Lines shards, so the input is gzip-decoded.
 fn open_source(src: &Source) -> std::io::Result<Box<dyn BufRead>> {
     let raw: Box<dyn Read> = match src {
         Source::Local(p) => Box::new(File::open(p)?),
@@ -593,6 +615,279 @@ fn rank_rows(sources: &[Source], limit: usize, t0: Instant) -> Vec<(u64, i64)> {
         rows.truncate(limit);
     }
     rows
+}
+
+/// Which per-split body encoding a split-set build uses: trigram `RRS` (`-split-set`) or
+/// term/FST `RRTI` (`-term-splits`).
+#[derive(Clone, Copy, PartialEq)]
+enum SplitBody {
+    Trigram,
+    Term,
+}
+
+/// A split-set builder over either body kind. Both inner builders expose the same body-agnostic
+/// build calls (`add_faceted`, `drain_sealed`, `finish`), so the chunked re-stream in
+/// [`build_split_set`] is shared verbatim between the trigram and term variants.
+enum SplitBuilder {
+    Trigram(roaringrange::SplitSetBuilder),
+    Term(roaringrange::TermSplitSetBuilder),
+}
+
+impl SplitBuilder {
+    fn add_faceted(&mut self, text: &str, facets: &[(String, String)]) -> std::io::Result<u32> {
+        match self {
+            SplitBuilder::Trigram(b) => b.add_faceted(text, facets),
+            SplitBuilder::Term(b) => b.add_faceted(text, facets),
+        }
+    }
+
+    fn drain_sealed(&mut self) -> (roaringrange::NamedFiles, roaringrange::NamedFiles) {
+        match self {
+            SplitBuilder::Trigram(b) => b.drain_sealed(),
+            SplitBuilder::Term(b) => b.drain_sealed(),
+        }
+    }
+
+    fn finish(self) -> std::io::Result<roaringrange::BuiltSplitSet> {
+        match self {
+            SplitBuilder::Trigram(b) => b.finish(),
+            SplitBuilder::Term(b) => b.finish(),
+        }
+    }
+}
+
+/// Builds an `RRSS` split set (the `-split-set` / `-term-splits` modes): rank the works by
+/// citations (doc 0 = most cited), then build the split set in `-chunks` contiguous doc-ID ranges.
+/// Each chunk re-streams the sources (in parallel, keeping only that chunk's works), buffers its
+/// text/facets/records in doc-ID order, and feeds them to a single streaming [`SplitBuilder`]
+/// (trigram or term per `body`) whose open split carries
+/// across chunk boundaries; sealed splits are drained to `-out` as they seal and records stream
+/// to an `RRSR` store in global doc-ID order. So peak RAM is **one open split (≤ cap) + one
+/// chunk's buffered text**, never the whole corpus — `-chunks K` builds the full 484 M corpus on
+/// a bounded box (more chunks = less RAM, at K re-streams of the input). `-chunks 1` (default) is
+/// the single-pass path, fine for subsets / large-RAM boxes.
+///
+/// Trigram (`-split-set`) writes `‹prefix›.rrss`, the split `‹prefix›-s*.rrs`/`.rrf`, and
+/// `‹prefix›-records.{idx,bin}`; term (`-term-splits`) writes the same with `-s*.rrt` bodies.
+/// Flags: `-out <dir>`, `-split-prefix <p>` (default `openalex`), `-split-cap <bytes>`
+/// (default 512 MiB). Trigram-only: `-bloom-bits <n>` (default 10; 0 disables). Term-only:
+/// `-stem` (Snowball English) and `-stopwords` (drop stop words) — `-bloom-bits`/`-gram` are
+/// ignored in term mode (no term Bloom yet).
+///
+/// On the cap (trigram): the per-split term Bloom is held **resident in the manifest**, and a
+/// rank-tiered split spans ~the full trigram vocabulary, so the manifest's bloom bytes ≈
+/// `distinct_trigrams_per_split × bits`, *repeated per split* — i.e. manifest/boot cost grows
+/// with the split *count*. A small cap (many splits) bloats the boot; the default targets a
+/// handful of large splits for a lean manifest. To trade pruning for an even leaner manifest,
+/// raise `-split-cap` or lower `-bloom-bits` (or `0` to drop blooms entirely — a rank-tiered
+/// split set already prunes the cold tiers by rank).
+fn build_split_set(
+    args: &[String],
+    sources: &[Source],
+    limit: usize,
+    abstract_cap: usize,
+    t0: Instant,
+    body: SplitBody,
+) {
+    use roaringrange::{
+        Language, Policy, SplitBuildConfig, SplitSetBuilder, TermSplitBuildConfig,
+        TermSplitSetBuilder,
+    };
+
+    let out_dir = PathBuf::from(arg(args, "-out", "/tmp/openalex-split"));
+    let prefix = arg(args, "-split-prefix", "openalex");
+    let cap: u64 = arg(args, "-split-cap", "536870912")
+        .parse()
+        .unwrap_or(512 << 20);
+    let bloom_bits: u32 = arg(args, "-bloom-bits", "10").parse().unwrap_or(10);
+    let stem = flag(args, "-stem");
+    let stopwords = flag(args, "-stopwords");
+    let chunks: usize = arg(args, "-chunks", "1").parse().unwrap_or(1).max(1);
+    std::fs::create_dir_all(&out_dir).expect("create -out dir");
+
+    // Pass 1: rank → doc IDs (doc 0 = most cited).
+    let rows = rank_rows(sources, limit, t0);
+    let n = rows.len();
+    if n == 0 {
+        warn!("no works ranked");
+        std::process::exit(1);
+    }
+    let id_to_doc: HashMap<u64, u32> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (wid, _))| (*wid, i as u32))
+        .collect();
+    drop(rows);
+    let chunk_size = n.div_ceil(chunks);
+    info!(
+        works = n,
+        chunks, chunk_size, "ranked; building split set (re-streaming per chunk)"
+    );
+
+    // One streaming builder + record store, both fed in global doc-ID order across chunks, so
+    // peak RAM is one open split (≤ cap) plus one chunk's buffered text. The builder's body kind
+    // (trigram RRS vs term RRTI) is the only thing that differs between the two modes.
+    let mut b = match body {
+        SplitBody::Trigram => SplitBuilder::Trigram(SplitSetBuilder::new(SplitBuildConfig {
+            policy: Policy::Tiered,
+            byte_cap: cap,
+            gram_size: GRAM as u16,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: prefix.clone(),
+            sortcol: None,
+            bloom_bits_per_key: bloom_bits,
+        })),
+        SplitBody::Term => SplitBuilder::Term(TermSplitSetBuilder::new(TermSplitBuildConfig {
+            policy: Policy::Tiered,
+            byte_cap: cap,
+            head_boundary: 0,
+            name_prefix: prefix.clone(),
+            sortcol: None,
+            language: stem.then_some(Language::English),
+            stopwords,
+        })),
+    };
+    let mut rec_w = RecordWriter::new(
+        BufWriter::with_capacity(
+            1 << 20,
+            File::create(out_dir.join(format!("{prefix}-records.bin"))).unwrap(),
+        ),
+        BufWriter::with_capacity(
+            1 << 20,
+            File::create(out_dir.join(format!("{prefix}-records.idx"))).unwrap(),
+        ),
+        n as u32,
+    )
+    .expect("create record store");
+    let write_files = |files: Vec<(String, Vec<u8>)>| {
+        for (name, bytes) in files {
+            std::fs::write(out_dir.join(&name), &bytes).expect("write split file");
+        }
+    };
+
+    // Pass 2: per doc-ID-range chunk, re-stream + parse the sources in parallel (keeping only
+    // this chunk's works), then feed the chunk's docs to the builder/record store in order.
+    type ChunkDoc = (usize, String, Vec<(String, String)>, Vec<u8>);
+    for c in 0..chunks {
+        let lo = c * chunk_size;
+        if lo >= n {
+            break;
+        }
+        let hi = (lo + chunk_size).min(n);
+        let span = hi - lo;
+
+        let per_src: Vec<Vec<ChunkDoc>> = sources
+            .par_iter()
+            .map(|src| {
+                let mut out: Vec<ChunkDoc> = Vec::new();
+                let reader = match open_source(src) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(source = %src.label(), error = %e, "skipping unreadable source");
+                        return out;
+                    }
+                };
+                for line in reader.lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => break,
+                    };
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let w: Work = match serde_json::from_str(&line) {
+                        Ok(w) => w,
+                        Err(_) => continue,
+                    };
+                    let title = w.display_name.as_deref().unwrap_or("");
+                    if title.is_empty() {
+                        continue;
+                    }
+                    let docid = match parse_wid(&w.id).and_then(|wid| id_to_doc.get(&wid)) {
+                        Some(d) => *d as usize,
+                        None => continue,
+                    };
+                    if docid < lo || docid >= hi {
+                        continue;
+                    }
+                    let abstract_ = reconstruct_abstract(&w.abstract_inverted_index);
+                    let authors = author_names(&w);
+                    let venue = w
+                        .primary_location
+                        .as_ref()
+                        .and_then(|p| p.source.as_ref())
+                        .and_then(|s| s.display_name.as_deref())
+                        .unwrap_or("");
+                    let topic = topic_name(&w);
+                    let text = build_text(title, &abstract_, &authors, venue);
+                    let facets = (0..FACET_FIELDS.len())
+                        .filter_map(|fi| {
+                            let v = facet_value(&w, fi, &topic);
+                            (!v.is_empty()).then(|| (FACET_FIELDS[fi].to_string(), v))
+                        })
+                        .collect();
+                    let rec = build_record(
+                        trim_openalex_id(&w.id),
+                        title,
+                        &authors,
+                        w.publication_year.unwrap_or(0),
+                        venue,
+                        w.cited_by_count.unwrap_or(0),
+                        &abstract_,
+                        abstract_cap,
+                    );
+                    out.push((docid - lo, text, facets, rec));
+                }
+                out
+            })
+            .collect();
+
+        // Place into chunk-local doc order (gaps stay empty: a keyword-less, recordless doc).
+        let mut text = vec![String::new(); span];
+        let mut facets: Vec<Vec<(String, String)>> = vec![Vec::new(); span];
+        let mut recs: Vec<Vec<u8>> = vec![Vec::new(); span];
+        for v in per_src {
+            for (i, t, f, r) in v {
+                text[i] = t;
+                facets[i] = f;
+                recs[i] = r;
+            }
+        }
+
+        // Feed in global doc-ID order; the open split carries across chunk boundaries.
+        for i in 0..span {
+            b.add_faceted(&text[i], &facets[i])
+                .expect("add work to split set");
+            rec_w.write(&recs[i]).expect("write record");
+        }
+        let (s, f) = b.drain_sealed();
+        write_files(s);
+        write_files(f);
+        info!(
+            chunk = c,
+            lo,
+            hi,
+            elapsed_s = t0.elapsed().as_secs_f64(),
+            "chunk indexed"
+        );
+    }
+
+    rec_w.flush().expect("flush records");
+    let built = b.finish().expect("finish split set");
+    let splits = built.splits.len();
+    write_files(built.splits);
+    write_files(built.facets);
+    std::fs::write(out_dir.join(format!("{prefix}.rrss")), &built.manifest)
+        .expect("write manifest");
+
+    info!(
+        docs = n,
+        splits,
+        elapsed_s = t0.elapsed().as_secs_f64(),
+        "split-set build done -> {}",
+        out_dir.display()
+    );
 }
 
 /// Streams one source for pass 2: tokenizes each work and inserts its doc ID into

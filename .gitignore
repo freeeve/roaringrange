@@ -26,3 +26,10 @@ rust/webtest/
 
 # local session handoff notes (contains AWS resource IDs; not for the public repo)
 .session-notes.md
+
+# local one-off corpus build/ops helpers (resumable Gemma embed, dashboards, uploaders;
+# corpus-specific scratch, not part of the library)
+python/scripts/embed_gemma_memmap.py
+dash.sh
+upload_s3.py
+resume_multipart.py

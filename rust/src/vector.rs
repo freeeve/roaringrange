@@ -109,6 +109,9 @@ impl PartialOrd for Candidate {
 /// A range-fetchable `RRVI` similarity index. Holds the boot region (centroids,
 /// PQ codebooks, optional OPQ rotation, cluster directory) in memory; the
 /// per-cluster code lists are read on demand via `F`.
+///
+/// For **hybrid search**, blend this index's ranked IDs with a trigram [`crate::index::Index`]'s
+/// (or a term [`crate::terms::TermIndex`]'s) using [`reciprocal_rank_fusion`].
 pub struct VectorIndex<F: RangeFetch> {
     fetch: F,
     /// Vector dimensionality.

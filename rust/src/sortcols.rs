@@ -218,7 +218,7 @@ impl<F: RangeFetch + Clone> SortCols<F> {
         let info = self
             .columns
             .get(col)
-            .ok_or(IndexError::Malformed("sortcols column index out of range"))?;
+            .ok_or(IndexError::BadQuery("sortcols column index out of range"))?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -227,7 +227,7 @@ impl<F: RangeFetch + Clone> SortCols<F> {
         let mut order: Vec<usize> = (0..ids.len()).collect();
         order.sort_unstable_by_key(|&i| ids[i]);
         if ids[order[order.len() - 1]] >= self.rows {
-            return Err(IndexError::Malformed("sortcols doc id out of range"));
+            return Err(IndexError::BadQuery("sortcols doc id out of range"));
         }
 
         // Coalesce the (offset-sorted) reads into spans, recording each id's span.
@@ -273,9 +273,9 @@ impl<F: RangeFetch + Clone> SortCols<F> {
         let info = self
             .columns
             .get(col)
-            .ok_or(IndexError::Malformed("sortcols column index out of range"))?;
+            .ok_or(IndexError::BadQuery("sortcols column index out of range"))?;
         if info.value_type != ValueType::U32 {
-            return Err(IndexError::Malformed("sortcols column is not u32"));
+            return Err(IndexError::BadQuery("sortcols column is not u32"));
         }
         Ok(self
             .values(col, ids)
@@ -309,9 +309,9 @@ impl<F: RangeFetch + Clone> SortCols<F> {
         let info = self
             .columns
             .get(col)
-            .ok_or(IndexError::Malformed("sortcols column index out of range"))?;
+            .ok_or(IndexError::BadQuery("sortcols column index out of range"))?;
         if info.value_type != ValueType::U32 {
-            return Err(IndexError::Malformed("sortcols column is not u32"));
+            return Err(IndexError::BadQuery("sortcols column is not u32"));
         }
         let avail = (self.rows as u64).saturating_sub(start as u64);
         let take = (len as u64).min(avail) as usize;
@@ -449,7 +449,7 @@ mod tests {
         }]);
         assert!(matches!(
             block_on(sc.slice_u32(0, 0, 2)),
-            Err(IndexError::Malformed(_))
+            Err(IndexError::BadQuery(_))
         ));
     }
 
@@ -478,7 +478,7 @@ mod tests {
         }]);
         assert!(matches!(
             block_on(sc.values(0, &[3])),
-            Err(IndexError::Malformed(_))
+            Err(IndexError::BadQuery(_))
         ));
     }
 

@@ -22,21 +22,14 @@ export class FilteredIds {
         wasm.__wbg_filteredids_free(ptr, 0);
     }
     /**
-     * Search-filtered facet counts over the survivors, as a JSON string (same
-     * shape as `facetsJson`). `"[]"` when no facet sidecar is open.
-     * @returns {string}
+     * Search-filtered facet counts over the survivors, as a JS array of
+     * `{ field, cats: [{ name, count }] }` (same shape as `facets()`); an empty array when no
+     * facet sidecar is open.
+     * @returns {any}
      */
-    countsJson() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.filteredids_countsJson(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
+    facetCounts() {
+        const ret = wasm.filteredids_facetCounts(this.__wbg_ptr);
+        return ret;
     }
     /**
      * The surviving doc IDs as a `Uint32Array`, in the input ranking order.
@@ -134,35 +127,25 @@ export class RrfFacets {
         wasm.__wbg_rrffacets_free(ptr, 0);
     }
     /**
-     * Facet fields and categories with full-corpus counts, as a JSON string
-     * (same shape as `RrsIndex.facetsJson`).
-     * @returns {string}
+     * Facet fields and categories with full-corpus counts, as a JS array of
+     * `{ field, cats: [{ name, count }] }` (same shape as `RrsIndex.facets()`).
+     * @returns {any}
      */
-    facetsJson() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.rrffacets_facetsJson(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
+    facets() {
+        const ret = wasm.rrffacets_facets(this.__wbg_ptr);
+        return ret;
     }
     /**
      * Filters a ranked doc-ID list by the selected facets (same contract as
      * `RrsIndex.filterIds`). Resolves to a `FilteredIds`.
      * @param {Uint32Array} ids
-     * @param {string[]} filters
+     * @param {Array<any>} filters
      * @returns {Promise<FilteredIds>}
      */
     filterIds(ids, filters) {
         const ptr0 = passArray32ToWasm0(ids, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArrayJsValueToWasm0(filters, wasm.__wbindgen_malloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.rrffacets_filterIds(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        const ret = wasm.rrffacets_filterIds(this.__wbg_ptr, ptr0, len0, filters);
         return ret;
     }
     /**
@@ -205,22 +188,14 @@ export class RrsCatalog {
         wasm.__wbg_rrscatalog_free(ptr, 0);
     }
     /**
-     * Returns the facet fields and their full-corpus category counts as a JSON
-     * string `[{"field":"<name>","cats":[{"name":"<name>","count":<u32>},...]},...]`,
-     * or `"[]"` when no facet sidecar is attached. Mirrors [`RrsIndex::facets_json`].
-     * @returns {string}
+     * Returns the facet fields and their full-corpus category counts as a JS array of
+     * `{ field, cats: [{ name, count }] }`, or an empty array when no facet sidecar is attached.
+     * Mirrors [`RrsIndex::facets`].
+     * @returns {any}
      */
-    facetsJson() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.rrscatalog_facetsJson(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
+    facets() {
+        const ret = wasm.rrscatalog_facets(this.__wbg_ptr);
+        return ret;
     }
     /**
      * Number of n-grams in the index dictionary.
@@ -320,9 +295,9 @@ export class RrsCatalog {
      * `{ ids: Uint32Array, records: Array<Uint8Array|null> | null,
      * facetCounts: Array<{field, cats:[{name, count}]}> | null }`.
      *
-     * `filters_json` is a JSON array of `[field, category]` pairs (e.g.
-     * `[["format","ebook"],["language","en"]]`); `null`, `""`, or `"[]"` means
-     * no filter. Within a field categories OR, across fields they AND. The page
+     * `filters` is an array of `[field, category]` pairs (e.g.
+     * `[["format","ebook"],["language","en"]]`); an empty array `[]` means no filter, and a
+     * malformed entry throws. Within a field categories OR, across fields they AND. The page
      * covers ranked doc IDs `[offset, offset+len)`; `max_missing` is the fuzzy
      * tolerance (0 = strict). `records`/`facetCounts` are `null` unless the
      * matching sidecar is attached.
@@ -330,15 +305,13 @@ export class RrsCatalog {
      * @param {number} offset
      * @param {number} len
      * @param {number} max_missing
-     * @param {string | null} [filters_json]
+     * @param {Array<any>} filters
      * @returns {Promise<any>}
      */
-    search(query, offset, len, max_missing, filters_json) {
+    search(query, offset, len, max_missing, filters) {
         const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        var ptr1 = isLikeNone(filters_json) ? 0 : passStringToWasm0(filters_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        var len1 = WASM_VECTOR_LEN;
-        const ret = wasm.rrscatalog_search(this.__wbg_ptr, ptr0, len0, offset, len, max_missing, ptr1, len1);
+        const ret = wasm.rrscatalog_search(this.__wbg_ptr, ptr0, len0, offset, len, max_missing, filters);
         return ret;
     }
 }
@@ -365,23 +338,14 @@ export class RrsCursor {
         wasm.__wbg_rrscursor_free(ptr, 0);
     }
     /**
-     * Returns the search-filtered facet counts as a JSON string in the form
-     * `[{"field":"<name>","cats":[{"name":"<name>","count":<n>},...]},...]` —
-     * how many of this query's results fall in each category. `"[]"` when no
-     * facet sidecar is open.
-     * @returns {string}
+     * The search-filtered facet counts as a JS array of `{ field, cats: [{ name, count }] }` —
+     * how many of this query's results fall in each category; an empty array when no facet
+     * sidecar is open.
+     * @returns {any}
      */
-    facetCountsJson() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.rrscursor_facetCountsJson(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
+    facetCounts() {
+        const ret = wasm.rrscursor_facetCounts(this.__wbg_ptr);
+        return ret;
     }
     /**
      * Number of head (popular) results — available immediately, no tail fetch.
@@ -462,43 +426,32 @@ export class RrsIndex {
         wasm.__wbg_rrsindex_free(ptr, 0);
     }
     /**
-     * Returns the facet fields and their categories as a JSON string in the form
-     * `[{"field":"<name>","cats":[{"name":"<name>","count":<u32>},...]},...]`.
-     * Yields `"[]"` when no sidecar is open. Counts are full-corpus and free
-     * (served from the in-memory meta region).
-     * @returns {string}
+     * Returns the facet fields and their categories as a JS array of
+     * `{ field, cats: [{ name, count }] }`. An empty array when no sidecar is open. Counts are
+     * full-corpus and free (served from the in-memory meta region).
+     * @returns {any}
      */
-    facetsJson() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.rrsindex_facetsJson(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
+    facets() {
+        const ret = wasm.rrsindex_facets(this.__wbg_ptr);
+        return ret;
     }
     /**
      * Filters a ranked doc-ID list (e.g. semantic/vector hits) by the selected
      * facets, preserving the input order, and returns the survivors plus
      * search-filtered facet counts over them. Because `vector_id == doc_id`, the
      * vector path reuses the same `RRSF` sidecar the trigram path uses — no
-     * remapping. Each `filters` entry is `"field\tcategory"` (within a field
-     * categories OR, across fields they AND). With no sidecar open or no
-     * filters, the IDs pass through unchanged (counts still computed when a
-     * sidecar is open). Resolves to a `FilteredIds`.
+     * remapping. `filters` is an array of `[field, category]` pairs (within a field categories
+     * OR, across fields they AND); a malformed entry throws. With no sidecar open or no filters,
+     * the IDs pass through unchanged (counts still computed when a sidecar is open). Resolves to a
+     * `FilteredIds`.
      * @param {Uint32Array} ids
-     * @param {string[]} filters
+     * @param {Array<any>} filters
      * @returns {Promise<FilteredIds>}
      */
     filterIds(ids, filters) {
         const ptr0 = passArray32ToWasm0(ids, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArrayJsValueToWasm0(filters, wasm.__wbindgen_malloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.rrsindex_filterIds(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        const ret = wasm.rrsindex_filterIds(this.__wbg_ptr, ptr0, len0, filters);
         return ret;
     }
     /**
@@ -562,21 +515,18 @@ export class RrsIndex {
     }
     /**
      * Like [`RrsIndex::search_cursor`] but ANDs the selected facets into the
-     * result. Each `filters` entry is `"field\tcategory"` (tab-separated);
-     * within a field categories OR, across fields they AND. The filter is
-     * applied only when a sidecar is open and `filters` is non-empty. Resolves
-     * to an `RrsCursor`.
+     * result. `filters` is an array of `[field, category]` pairs (within a field categories OR,
+     * across fields they AND); a malformed entry throws. The filter is applied only when a
+     * sidecar is open and `filters` is non-empty. Resolves to an `RrsCursor`.
      * @param {string} query
      * @param {number} max_missing
-     * @param {string[]} filters
+     * @param {Array<any>} filters
      * @returns {Promise<RrsCursor>}
      */
     searchCursorFiltered(query, max_missing, filters) {
         const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArrayJsValueToWasm0(filters, wasm.__wbindgen_malloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.rrsindex_searchCursorFiltered(this.__wbg_ptr, ptr0, len0, max_missing, ptr1, len1);
+        const ret = wasm.rrsindex_searchCursorFiltered(this.__wbg_ptr, ptr0, len0, max_missing, filters);
         return ret;
     }
 }
@@ -783,22 +733,14 @@ export class RrsSecondaryCursor {
         wasm.__wbg_rrssecondarycursor_free(ptr, 0);
     }
     /**
-     * The search-filtered facet counts as a JSON string (same shape as
-     * `facetsJson`, counts restricted to this query's result); `"[]"` when no
-     * secondary sidecar is open.
-     * @returns {string}
+     * The search-filtered facet counts as a JS array of `{ field, cats: [{ name, count }] }`
+     * (same shape as `facets()`, counts restricted to this query's result); an empty array when
+     * no secondary sidecar is open.
+     * @returns {any}
      */
-    facetCountsJson() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.rrssecondarycursor_facetCountsJson(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
+    facetCounts() {
+        const ret = wasm.rrssecondarycursor_facetCounts(this.__wbg_ptr);
+        return ret;
     }
     /**
      * Number of head results — available with no tail fetch.
@@ -824,6 +766,16 @@ export class RrsSecondaryCursor {
     loaded() {
         const ret = wasm.rrssecondarycursor_loaded(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * The next `n` primary doc IDs in secondary rank order, advancing an internal position —
+     * the sequential counterpart of [`page`](Self::page), matching `RrsCursor.next`.
+     * @param {number} n
+     * @returns {Promise<Uint32Array>}
+     */
+    next(n) {
+        const ret = wasm.rrssecondarycursor_next(this.__wbg_ptr, n);
+        return ret;
     }
     /**
      * The page of primary doc IDs for the secondary-ordered results
@@ -874,21 +826,13 @@ export class RrsSecondaryIndex {
         wasm.__wbg_rrssecondaryindex_free(ptr, 0);
     }
     /**
-     * The facet fields with full-corpus counts as a JSON string (same shape as
-     * [`RrsIndex::facets_json`]); `"[]"` when no sidecar is open.
-     * @returns {string}
+     * The facet fields with full-corpus counts as a JS array of `{ field, cats: [{ name, count }]
+     * }` (same shape as [`RrsIndex::facets`]); an empty array when no sidecar is open.
+     * @returns {any}
      */
-    facetsJson() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.rrssecondaryindex_facetsJson(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
+    facets() {
+        const ret = wasm.rrssecondaryindex_facets(this.__wbg_ptr);
+        return ret;
     }
     /**
      * Boots the secondary index over the text index at `rrs_url` and the
@@ -932,20 +876,18 @@ export class RrsSecondaryIndex {
     }
     /**
      * Like [`RrsSecondaryIndex::search_cursor`] but ANDs the selected facets into
-     * the result. Each `filters` entry is `"field\tcategory"` (tab-separated);
-     * within a field categories OR, across fields they AND. Applied only when a
-     * secondary sidecar is open and `filters` is non-empty.
+     * the result. `filters` is an array of `[field, category]` pairs (within a field categories
+     * OR, across fields they AND); a malformed entry throws. Applied only when a secondary
+     * sidecar is open and `filters` is non-empty.
      * @param {string} query
      * @param {number} max_missing
-     * @param {string[]} filters
+     * @param {Array<any>} filters
      * @returns {Promise<RrsSecondaryCursor>}
      */
     searchCursorFiltered(query, max_missing, filters) {
         const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArrayJsValueToWasm0(filters, wasm.__wbindgen_malloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.rrssecondaryindex_searchCursorFiltered(this.__wbg_ptr, ptr0, len0, max_missing, ptr1, len1);
+        const ret = wasm.rrssecondaryindex_searchCursorFiltered(this.__wbg_ptr, ptr0, len0, max_missing, filters);
         return ret;
     }
 }
@@ -988,19 +930,11 @@ export class RrsSortCols {
     /**
      * A JS array of the columns' `{ name, type }` (`type` is one of
      * `"u16"`/`"u32"`/`"i32"`/`"f32"`), in stored order.
-     * @returns {string}
+     * @returns {any}
      */
-    columnsJson() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.rrssortcols_columnsJson(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
+    columns() {
+        const ret = wasm.rrssortcols_columns(this.__wbg_ptr);
+        return ret;
     }
     /**
      * Boots the store at `url`: reads the header + column meta (a few KB; the dense
@@ -1065,6 +999,100 @@ export class RrsSortCols {
     }
 }
 if (Symbol.dispose) RrsSortCols.prototype[Symbol.dispose] = RrsSortCols.prototype.free;
+
+/**
+ * A range-fetchable `RRSS` split set exposed to JavaScript. Boots the manifest in two ranged
+ * reads; each query opens (and prunes) the splits it needs, resolved as `base_url/<name>`.
+ */
+export class RrssIndex {
+    static __wrap(ptr) {
+        const obj = Object.create(RrssIndex.prototype);
+        obj.__wbg_ptr = ptr;
+        RrssIndexFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RrssIndexFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_rrssindex_free(ptr, 0);
+    }
+    /**
+     * Number of delta splits flushed since the base (0 for a base-only set).
+     * @returns {number}
+     */
+    deltaCount() {
+        const ret = wasm.rrssindex_deltaCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Boots the split-set manifest at `manifest_url`; per-split files (and the sort-column
+     * store, if any) are fetched from `base_url/<name>`. Returns a `Promise<RrssIndex>`.
+     * @param {string} manifest_url
+     * @param {string} base_url
+     * @returns {Promise<RrssIndex>}
+     */
+    static open(manifest_url, base_url) {
+        const ptr0 = passStringToWasm0(manifest_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(base_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssindex_open(ptr0, len0, ptr1, len1);
+        return ret;
+    }
+    /**
+     * Returns up to `limit` matching global doc IDs, ranked by policy (tiered short-circuit or
+     * stable-key sort, with delta supersession). Resolves to a `Uint32Array`.
+     * @param {string} query
+     * @param {number} limit
+     * @returns {Promise<Uint32Array>}
+     */
+    search(query, limit) {
+        const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssindex_search(this.__wbg_ptr, ptr0, len0, limit);
+        return ret;
+    }
+    /**
+     * Like [`search`](Self::search) but ANDs a facet filter in. Args are `(query, limit,
+     * filters)` — `limit` adjacent to `query`, options trailing, matching
+     * `RrsIndex.searchCursorFiltered`. `filters` is an array of `[field, category]` pairs (within
+     * a field categories OR, across fields AND; a malformed entry throws); each surviving split's
+     * own `‹split›.rrf` sidecar resolves it, and a split lacking a selected field's categories is
+     * pruned without a fetch. An empty `filters` is exactly [`search`](Self::search).
+     * @param {string} query
+     * @param {number} limit
+     * @param {Array<any>} filters
+     * @returns {Promise<Uint32Array>}
+     */
+    searchFiltered(query, limit, filters) {
+        const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssindex_searchFiltered(this.__wbg_ptr, ptr0, len0, limit, filters);
+        return ret;
+    }
+    /**
+     * Number of splits named by the manifest (base + delta).
+     * @returns {number}
+     */
+    splitCount() {
+        const ret = wasm.rrssindex_splitCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Total on-S3 size of every split in bytes (the split set's footprint).
+     * @returns {bigint}
+     */
+    totalBytes() {
+        const ret = wasm.rrssindex_totalBytes(this.__wbg_ptr);
+        return BigInt.asUintN(64, ret);
+    }
+}
+if (Symbol.dispose) RrssIndex.prototype[Symbol.dispose] = RrssIndex.prototype.free;
 
 /**
  * A range-fetchable `RRTI` term-level inverted index exposed to JavaScript. Boot
@@ -1567,6 +1595,10 @@ function __wbg_get_imports() {
             const ret = new Object();
             return ret;
         },
+        __wbg_new_d90091b82fdf5b91: function() {
+            const ret = new Array();
+            return ret;
+        },
         __wbg_new_e436d06bc8e77460: function() { return handleError(function () {
             const ret = new Headers();
             return ret;
@@ -1609,10 +1641,6 @@ function __wbg_get_imports() {
             const ret = arg0.ok;
             return ret;
         },
-        __wbg_parse_03863847d06c4e89: function() { return handleError(function (arg0, arg1) {
-            const ret = JSON.parse(getStringFromWasm0(arg0, arg1));
-            return ret;
-        }, arguments); },
         __wbg_prototypesetcall_3249fc62a0fafa30: function(arg0, arg1, arg2) {
             Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), arg2);
         },
@@ -1657,6 +1685,10 @@ function __wbg_get_imports() {
         },
         __wbg_rrssecondaryindex_new: function(arg0) {
             const ret = RrsSecondaryIndex.__wrap(arg0);
+            return ret;
+        },
+        __wbg_rrssindex_new: function(arg0) {
+            const ret = RrssIndex.__wrap(arg0);
             return ret;
         },
         __wbg_rrssortcols_new: function(arg0) {
@@ -1727,7 +1759,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 454, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 480, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h604311912c671172);
             return ret;
         },
@@ -1817,6 +1849,9 @@ const RrsSecondaryIndexFinalization = (typeof FinalizationRegistry === 'undefine
 const RrsSortColsFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rrssortcols_free(ptr, 1));
+const RrssIndexFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_rrssindex_free(ptr, 1));
 const RrtIndexFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rrtindex_free(ptr, 1));
@@ -1980,16 +2015,6 @@ function passArrayF32ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 4, 4) >>> 0;
     getFloat32ArrayMemory0().set(arg, ptr / 4);
     WASM_VECTOR_LEN = arg.length;
-    return ptr;
-}
-
-function passArrayJsValueToWasm0(array, malloc) {
-    const ptr = malloc(array.length * 4, 4) >>> 0;
-    for (let i = 0; i < array.length; i++) {
-        const add = addToExternrefTable0(array[i]);
-        getDataViewMemory0().setUint32(ptr + 4 * i, add, true);
-    }
-    WASM_VECTOR_LEN = array.length;
     return ptr;
 }
 

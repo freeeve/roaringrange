@@ -17,9 +17,9 @@ const srcMagic = "FTSR"
 
 var (
 	// ErrSrcMagic is returned when the source is not a roaringsearch (FTSR) index.
-	ErrSrcMagic = errors.New("roaringrange: source is not a roaringsearch (FTSR) index")
+	ErrSrcMagic = errors.New("source is not a roaringsearch (FTSR) index")
 	// ErrMagic is returned when an index does not start with the RRS magic.
-	ErrMagic = errors.New("roaringrange: bad RRS magic")
+	ErrMagic = errors.New("bad RRS magic")
 	// ErrTruncated is returned when an index ends before its declared structure.
-	ErrTruncated = errors.New("roaringrange: truncated index")
+	ErrTruncated = errors.New("truncated index")
 )

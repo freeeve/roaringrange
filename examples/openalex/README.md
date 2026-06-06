@@ -1,6 +1,6 @@
 # OpenAlex search demo dataset
 
-Build a static, range-fetchable [roaringrange](../../roaringrange) search index
+Build a static, range-fetchable [roaringrange](../..) search index
 over the [OpenAlex](https://openalex.org) Works corpus, then serve it as a
 no-backend demo (same shape as the DeepLibby rebuild).
 

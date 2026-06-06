@@ -30,7 +30,7 @@ fn main() {
     println!(
         "index: {} ngrams (gram_size {}); records: {}",
         idx.ngram_count(),
-        idx.gram_size,
+        idx.gram_size(),
         store.len()
     );
 

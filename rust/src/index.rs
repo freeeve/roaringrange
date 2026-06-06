@@ -43,6 +43,10 @@ pub enum IndexError {
     /// dimensionality does not match the index's). Distinct from [`Malformed`],
     /// which describes a corrupt file rather than a bad caller argument.
     BadQuery(&'static str),
+    /// The operation is well-formed but not supported for this index kind (e.g.
+    /// facet-filtered search over a term-bodied split). A capability gap, not a
+    /// corrupt file ([`Malformed`]) or a bad argument ([`BadQuery`]).
+    Unsupported(&'static str),
 }
 
 impl fmt::Display for IndexError {
@@ -54,6 +58,7 @@ impl fmt::Display for IndexError {
             IndexError::Roaring(e) => write!(f, "roaring deserialize: {e}"),
             IndexError::Malformed(m) => write!(f, "malformed index: {m}"),
             IndexError::BadQuery(m) => write!(f, "bad query: {m}"),
+            IndexError::Unsupported(m) => write!(f, "unsupported operation: {m}"),
         }
     }
 }
@@ -107,7 +112,7 @@ pub(crate) fn read_u64(buf: &[u8], off: usize) -> u64 {
 pub struct Index<F: RangeFetch> {
     fetch: F,
     /// N-gram window size the index was built with.
-    pub gram_size: u16,
+    gram_size: u16,
     /// Number of dictionary entries.
     ngrams: u32,
     /// Sparse-index stride.
@@ -157,6 +162,64 @@ impl<F: RangeFetch> Index<F> {
             dict_start,
             sparse_keys,
         })
+    }
+
+    /// Boots from a **resident** boot region instead of fetching it — the header (20 B) plus
+    /// the sparse index, i.e. the bytes `[0, dictStart)`. This is the zero-round-trip open a
+    /// boot accelerator (an `RRHC` bundle, or a split set's inlined tier-0 boots) uses: the
+    /// caller already holds those bytes, so only the per-query dict/posting reads go through
+    /// `fetch`. Equivalent to [`open`](Self::open) but with no boot fetch. Errors if `boot` is
+    /// shorter than the header + sparse index it declares.
+    pub fn from_boot(boot: &[u8], fetch: F) -> Result<Self, IndexError> {
+        if boot.len() < HEADER_SIZE {
+            return Err(IndexError::Malformed("short RRS boot region"));
+        }
+        if &boot[0..4] != MAGIC {
+            let mut m = [0u8; 4];
+            m.copy_from_slice(&boot[0..4]);
+            return Err(IndexError::BadMagic(m));
+        }
+        let version = read_u16(boot, 4);
+        if version != 2 {
+            return Err(IndexError::BadVersion(version));
+        }
+        let gram_size = read_u16(boot, 6);
+        let ngrams = read_u32(boot, 8);
+        let stride = read_u32(boot, 12);
+        let head_boundary = read_u32(boot, 16);
+
+        let sparse_count = sparse_count(ngrams, stride);
+        let dict_start = HEADER_SIZE + sparse_count * 8;
+        if boot.len() < dict_start {
+            return Err(IndexError::Malformed(
+                "RRS boot region missing sparse index",
+            ));
+        }
+        let mut sparse_keys = Vec::with_capacity(sparse_count);
+        for i in 0..sparse_count {
+            sparse_keys.push(read_u64(boot, HEADER_SIZE + i * 8));
+        }
+        Ok(Index {
+            fetch,
+            gram_size,
+            ngrams,
+            stride,
+            head_boundary,
+            dict_start: dict_start as u64,
+            sparse_keys,
+        })
+    }
+
+    /// The byte length of this index's boot region (`[0, dictStart)`) — the header plus the
+    /// sparse index. A bundle builder copies exactly these bytes so a reader can
+    /// [`from_boot`](Self::from_boot) the index with no fetch.
+    pub fn boot_len(&self) -> u64 {
+        self.dict_start
+    }
+
+    /// N-gram window size the index was built with (e.g. `3` for trigrams).
+    pub fn gram_size(&self) -> u16 {
+        self.gram_size
     }
 
     /// Number of n-grams in the dictionary.

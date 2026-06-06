@@ -77,12 +77,55 @@ ordering and facets.
 | path | what |
 |---|---|
 | `go/` | core Go module (`github.com/freeeve/roaringrange`): `Transcode` (FTSR→RRS), `Open`/`Index` reference reader, `WriteFacets`, `NgramKeys` |
-| `FORMAT.md`, `FACETS.md`, `RECORDS.md`, `VECTORS.md` | the frozen on-disk specs (`RRSI` index, `RRSF` facet sidecar, `RRSR` record store, `RRVI` vector index) |
+| `*.md` (root) | the frozen on-disk format specs — see the [On-disk formats](#on-disk-formats) table below |
 | `rust/` | Rust crate `roaringrange`: reader (`Catalog` over `Index`/`FacetIndex`/`RecordStore`) + native `build` writers; both exposed to WASM (`wasm-pack`). Optional `vector` feature adds the `RRVI` similarity-search reader + IVFPQ trainer |
+| `rust/examples/` | runnable examples, each with a `//!` header stating its purpose and exact `cargo run … --example … [--features …]` command |
 | `python/` | PyO3 bindings (`pip install roaringrange`): `Builder` (text index) + `VectorBuilder` (similarity index) over the core build writers |
 | `go/conformance/` | cross-library test: roaringsearch build ⇄ roaringrange(go) read must agree |
 | `examples/openalex/` | the OpenAlex demo: Go loader, parallel Rust `builder/`, `download.sh`, static web UI |
 | `docs/` | architecture diagrams (SVG) |
+
+## On-disk formats
+
+roaringrange is an à-la-carte family of composable index files over **one shared rank-ordered
+doc-ID space**. Each has a 4-char magic; **the magic and the file extension are intentionally
+not always identical** (records and the re-rank sidecar use app-facing names). Every format's
+reader and builder are listed below.
+
+| Magic | Ext | Spec | Reader | Builder | What |
+|---|---|---|---|---|---|
+| `RRSI` | `.rrs` | [FORMAT.md](FORMAT.md) | `Index` / `RrsIndex` | Rust `write_index`, Go `Transcode` | trigram text index |
+| `RRSF` | `.rrf` | [FACETS.md](FACETS.md) | `FacetIndex` / `RrfFacets` | Rust `write_facets`, Go `WriteFacets` | facet sidecar |
+| `RRSR` | `.idx`+`.bin`(+`.dict`) | [RECORDS.md](RECORDS.md) | `RecordStore` / `RrsRecords` | Rust `write_records`, Go `WriteRecords` | record store (paired files; optional zstd dict) |
+| `RRIL` | `.rril` | [LOOKUP.md](LOOKUP.md) | `Lookup` / `RrsLookup` | Rust `write_lookup` | identifier exact-match index |
+| `RRSC` | `.rrsc` | [SORTCOLS.md](SORTCOLS.md) | `SortCols` / `RrsSortCols` | Rust `write_sortcols` | static sort/rank columns |
+| `RRTI` | `.rrt` | [TERMS.md](TERMS.md) | `TermIndex` / `RrtIndex` | Rust `write_term_index`, Python | term/FST index |
+| `RRVI` | `.rrvi` | [VECTORS.md](VECTORS.md) | `VectorIndex` / `RrviIndex` | Rust `build_ivfpq`, Python | IVFPQ vector index |
+| `RRVR` | `.rrvi.rerank` | [VECTORS.md](VECTORS.md#re-rank-sidecar-rrvr-optional) | `RerankStore` | Rust `write_rerank` | bf16 re-rank sidecar |
+| `RRM2` | `.rrm2` | [VECTORS.md](VECTORS.md#model2vec-embedder-rrm2) | `Model2vec` / `Model2vecEmbedder` | `python/scripts/model2vec_export.py` | in-browser query embedder |
+| `RRHC` | `.rrhc` | [HOTCACHE.md](HOTCACHE.md) | `Hotcache` | Rust `write_hotcache` | boot bundle (manifest + inlined members) |
+| `RRSS` | `.rrss` | [SPLITSET.md](SPLITSET.md) | `SplitSet` / `RrssIndex` | Rust `SplitSetBuilder`, Go, Python | split-set manifest (splits are `.rrs`/`.rrt`) |
+
+### Which builder/reader exists in which language
+
+Readers ship as wasm/JS (the browser is the only reader runtime); builders run server-side in
+Rust, Go, or Python. Rust is the reference — Go and Python expose deliberate subsets.
+
+| Capability (format) | Rust | Go | Python | JS (read) |
+|---|---|---|---|---|
+| Trigram index `RRSI` | build + read | build | build | read |
+| Facets `RRSF` | build + read | build | build | read |
+| Records `RRSR` | build + read | build | build | read |
+| Lookup `RRIL` | build + read | — | — | read |
+| Sort columns `RRSC` | build + read | — | — | read |
+| Terms `RRTI` | build + read | — | build | read |
+| Vectors `RRVI` | build + read | — | build | read |
+| Model2vec `RRM2` | read | — | export¹ | read |
+| Hotcache `RRHC` | build + read | — | — | —² |
+| Split set `RRSS` (trigram) | build + read | build³ | build | read |
+| Split set `RRSS` (term/FST) | build + read | — | build | read |
+
+¹ via `python/scripts/model2vec_export.py`. &nbsp;² no JS reader yet (server-side only). &nbsp;³ trigram bodies only (Go builds the split set + per-split facet sidecars, but not RRTI term bodies).
 
 The core Go module has **no dependency on roaringsearch** — it parses the `FTSR`
 byte format directly. The n-gram key derivation is reproduced independently in Go

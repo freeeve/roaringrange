@@ -62,7 +62,7 @@ fn main() {
     };
 
     let idx = block_on(Index::open(CurlFetch { url })).expect("open index");
-    let n = idx.gram_size as usize;
+    let n = idx.gram_size() as usize;
 
     for q in &queries {
         let keys = ngram_keys(q, n);

@@ -62,6 +62,9 @@ pub enum MemberTag {
     Rril,
     /// In-browser model2vec embedder (`RRM2`).
     Rrm2,
+    /// Split-set manifest (`RRSS`). A boot bundle inlines the manifest plus the top tier's
+    /// split boots, so a split set boots in 1–2 round trips.
+    Rrss,
 }
 
 impl MemberTag {
@@ -77,6 +80,7 @@ impl MemberTag {
             7 => Some(MemberTag::RrsrDict),
             8 => Some(MemberTag::Rril),
             9 => Some(MemberTag::Rrm2),
+            10 => Some(MemberTag::Rrss),
             _ => None,
         }
     }
@@ -93,6 +97,7 @@ impl MemberTag {
             MemberTag::RrsrDict => 7,
             MemberTag::Rril => 8,
             MemberTag::Rrm2 => 9,
+            MemberTag::Rrss => 10,
         }
     }
 }
@@ -239,6 +244,15 @@ impl Hotcache {
         let start = m.inline_off as usize;
         let end = start + m.inline_len as usize;
         Some(&self.inline_blob[start..end])
+    }
+
+    /// The resident boot bytes for the member whose `data_file` is `name`, or `None` when no
+    /// such member exists or it was referenced (not inlined). This is the one-liner a split
+    /// set's `SplitFetcher::boot` uses to hand a tier-0 split its inlined boot, turning N cold
+    /// split opens into the single GET that fetched this `.rrhc`.
+    pub fn inlined_by_name(&self, name: &str) -> Option<&[u8]> {
+        let m = self.members.iter().find(|m| m.data_file == name)?;
+        self.inlined(m)
     }
 }
 
@@ -387,11 +401,12 @@ mod tests {
             MemberTag::RrsrDict,
             MemberTag::Rril,
             MemberTag::Rrm2,
+            MemberTag::Rrss,
         ] {
             assert_eq!(MemberTag::from_u16(tag.to_u16()), Some(tag));
         }
         assert_eq!(MemberTag::from_u16(0), None);
-        assert_eq!(MemberTag::from_u16(10), None);
+        assert_eq!(MemberTag::from_u16(11), None);
     }
 
     #[test]

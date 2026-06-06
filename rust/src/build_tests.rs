@@ -126,7 +126,7 @@ fn search_intersects_heads_ascending() {
     ];
     let buf = build_rrs(3, 2, &entries);
     let idx = block_on(Index::open(MemoryFetch::new(buf))).unwrap();
-    assert_eq!(idx.gram_size, 3);
+    assert_eq!(idx.gram_size(), 3);
     assert_eq!(idx.ngram_count(), 3);
 
     // Single trigram query returns docs ascending (= popularity rank).

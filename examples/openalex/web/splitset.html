@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpenAlex — monolith vs split set</title>
+<style>
+  :root { color-scheme: light dark; --bg:#0f1117; --fg:#e6e8ee; --mut:#9aa3b2; --acc:#6ea8fe; --card:#171a23; --line:#262b38; --good:#3fb950; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:16px 22px; border-bottom:1px solid var(--line); }
+  h1 { margin:0; font-size:18px; } h1 small { color:var(--mut); font-weight:400; }
+  main { max-width:980px; margin:0 auto; padding:20px; }
+  input[type=search] { width:100%; padding:11px 13px; font-size:15px; background:var(--card);
+    border:1px solid var(--line); border-radius:8px; color:var(--fg); }
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px; }
+  @media (max-width:720px){ .cols { grid-template-columns:1fr; } }
+  .col { border:1px solid var(--line); border-radius:10px; background:var(--card); padding:14px; }
+  .col h2 { margin:0 0 4px; font-size:15px; } .col h2 .sub { color:var(--mut); font-weight:400; font-size:12px; }
+  .metrics { display:flex; gap:14px; flex-wrap:wrap; margin:8px 0 10px; }
+  .metric { font-size:13px; color:var(--mut); } .metric b { color:var(--fg); font-size:15px; }
+  ol { margin:6px 0 0; padding-left:20px; } li { margin-bottom:4px; }
+  .agree { margin-top:14px; font-size:14px; } .agree b { color:var(--good); }
+  .cfg { color:var(--mut); font-size:12px; margin-top:18px; } code { background:#202636; padding:1px 5px; border-radius:4px; }
+  .err { color:#f85149; }
+  .facets { margin-top:12px; display:flex; flex-direction:column; gap:7px; }
+  .facets:empty { display:none; }
+  .frow { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+  .frow .flabel { color:var(--mut); font-size:12px; min-width:62px; text-transform:capitalize; }
+  .chip { font-size:12px; padding:3px 9px; border:1px solid var(--line); border-radius:999px;
+    background:var(--card); color:var(--fg); cursor:pointer; user-select:none; }
+  .chip:hover { border-color:var(--acc); }
+  .chip.on { background:var(--acc); border-color:var(--acc); color:#0b1020; font-weight:600; }
+  .chip .ct { color:var(--mut); margin-left:5px; font-size:11px; }
+  .chip.on .ct { color:#0b1020; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OpenAlex · <small>monolithic <code>RRS</code> vs <code>RRSS</code> split set — same corpus, same query, side by side</small></h1>
+</header>
+<main>
+  <input id="q" type="search" placeholder="search OpenAlex titles…  (e.g. quantum entanglement, crispr)" autocomplete="off" />
+  <div class="facets" id="facets"></div>
+  <div class="cols">
+    <div class="col" id="mono">
+      <h2>Monolith <span class="sub">one <code>.rrs</code></span></h2>
+      <div class="metrics" id="mono-m"></div>
+      <ol id="mono-r"></ol>
+    </div>
+    <div class="col" id="split">
+      <h2>Split set <span class="sub">tiered, Bloom-pruned</span></h2>
+      <div class="metrics" id="split-m"></div>
+      <ol id="split-r"></ol>
+    </div>
+  </div>
+  <div class="agree" id="agree"></div>
+  <div class="cfg" id="cfg"></div>
+</main>
+
+<script type="module">
+import init, { RrsIndex, RrssIndex, RrsRecords } from "./roaringrange.js";
+
+// Deploy targets — set these to where you uploaded the artifacts. For an apples-to-apples
+// comparison both sides must be the SAME corpus: the monolith builder and `-split-set` both rank
+// by cited_by_count desc via the same rank_rows, so over the full 484M corpus their doc IDs are
+// IDENTICAL — which is why one record store can serve both (the "accuracy: identical" check is
+// then meaningful). Each reader still opens its own store handle, so the page also stays correct
+// if you ever point them at different corpora.
+const MONO_RRS   = "openalex-full.rrs";   // the full 484M monolith text index
+const MONO_RRF   = "openalex-full.rrf";   // its facet sidecar (for facet chips + filtered search)
+const SPLIT_RRSS = "openalex-split/openalex.rrss"; // the split-set manifest
+const SPLIT_BASE = "openalex-split";               // base URL for the per-split .rrs/.rrf files
+// Records: the split set emits its own `openalex-records.{idx,bin}`. Since the full monolith and
+// the split set share the corpus + ranking, their doc IDs match, so both sides read the SAME
+// store here. (If you built a separate monolith record store, point MONO_REC_* at it instead.)
+const MONO_REC_IDX  = "openalex-split/openalex-records.idx";
+const MONO_REC_BIN  = "openalex-split/openalex-records.bin";
+const SPLIT_REC_IDX = "openalex-split/openalex-records.idx";
+const SPLIT_REC_BIN = "openalex-split/openalex-records.bin";
+const K = 12;
+
+const $ = (id) => document.getElementById(id);
+
+// Wrap fetch to count the Range bytes + requests served during a measured block — the headline
+// metric (the split set's tiered/Bloom pruning means fewer per-query bytes).
+let _bytes = 0, _reqs = 0, _count = false;
+const _fetch = window.fetch.bind(window);
+window.fetch = async (...a) => {
+  const r = await _fetch(...a);
+  if (_count) {
+    _reqs++;
+    const len = r.headers.get("content-length");
+    if (len) _bytes += parseInt(len, 10);
+  }
+  return r;
+};
+function measure() { _bytes = 0; _reqs = 0; _count = true; }
+function stop() { _count = false; return { bytes: _bytes, reqs: _reqs }; }
+
+let mono = null, rrss = null, monoRecs = null, splitRecs = null;
+
+const fmtKB = (b) => (b/1024).toFixed(b < 1024*1024 ? 0 : 1) + (b < 1024*1024 ? " KB" : "");
+function metrics(el, ms, m) {
+  el.innerHTML = `<span class="metric"><b>${ms.toFixed(1)}</b> ms</span>
+    <span class="metric"><b>${fmtKB(m.bytes)}</b></span>
+    <span class="metric"><b>${m.reqs}</b> reqs</span>`;
+}
+async function titles(store, ids) {
+  if (!ids.length) return [];
+  const recs = await store.getMany(Uint32Array.from(ids));
+  return recs.map(b => { try { return JSON.parse(new TextDecoder().decode(b)).t || ""; } catch { return ""; } });
+}
+function list(el, ids, ts) {
+  el.innerHTML = ids.map((id, i) => `<li>${(ts[i]||"").replace(/&/g,"&amp;").replace(/</g,"&lt;")}</li>`).join("");
+}
+
+// Facet filtering — a curated subset of fields shown as toggle chips. Selecting chips ANDs the
+// facet filter into BOTH paths: the monolith via searchCursorFiltered (one RRSF sidecar) and the
+// split set via searchFiltered (each surviving split's own .rrf, with facet-presence pruning of
+// splits that lack a selected category). Categories come from the monolith's full-corpus counts.
+const FACET_FIELDS_SHOWN = ["type", "oa", "year"];
+const FACET_CAP = 8;
+const selected = new Set();          // entries: "field\tcategory"
+// The wasm readers take an array of [field, category] pairs; the Set keeps the tab-joined key.
+const selectedFilters = () => [...selected].map((k) => k.split("\t"));
+const esc = (s) => (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+
+function renderFacets(fields) {
+  fields = Array.isArray(fields) ? fields : [];
+  const byName = Object.fromEntries(fields.map(f => [f.field, f]));
+  const rows = [];
+  for (const fld of FACET_FIELDS_SHOWN) {
+    const f = byName[fld];
+    if (!f || !f.cats || !f.cats.length) continue;
+    const cats = [...f.cats].sort((a, b) => b.count - a.count).slice(0, FACET_CAP);
+    const chips = cats.map(c => {
+      const key = `${f.field}\t${c.name}`;
+      return `<span class="chip${selected.has(key) ? " on" : ""}" data-key="${esc(key)}">${esc(c.name)}` +
+        `<span class="ct">${(c.count || 0).toLocaleString()}</span></span>`;
+    }).join("");
+    rows.push(`<div class="frow"><span class="flabel">${esc(f.field)}</span>${chips}</div>`);
+  }
+  const el = $("facets");
+  el.innerHTML = rows.join("");
+  el.querySelectorAll(".chip").forEach(ch => ch.addEventListener("click", () => {
+    const key = ch.getAttribute("data-key");
+    if (selected.has(key)) { selected.delete(key); ch.classList.remove("on"); }
+    else { selected.add(key); ch.classList.add("on"); }
+    run();
+  }));
+}
+
+async function run() {
+  if (!mono || !rrss) return;
+  const q = $("q").value.trim();
+  if (!q) { $("mono-r").innerHTML = $("split-r").innerHTML = ""; $("mono-m").innerHTML = $("split-m").innerHTML = ""; $("agree").innerHTML = ""; return; }
+
+  const filters = selectedFilters();
+
+  measure(); let t = performance.now();
+  let mIds;
+  if (filters.length) { const cur = await mono.searchCursorFiltered(q, 0, filters); mIds = await cur.page(0, K); }
+  else mIds = await mono.search(q, K);
+  metrics($("mono-m"), performance.now() - t, stop());
+
+  measure(); t = performance.now();
+  const sIds = filters.length ? await rrss.searchFiltered(q, K, filters) : await rrss.search(q, K);
+  metrics($("split-m"), performance.now() - t, stop());
+
+  list($("mono-r"), mIds, await titles(monoRecs, mIds));
+  list($("split-r"), sIds, await titles(splitRecs, sIds));
+
+  const same = mIds.length === sIds.length && mIds.every((x, i) => x === sIds[i]);
+  $("agree").innerHTML = same
+    ? `accuracy: <b>identical top-${Math.min(K, mIds.length)}</b> — same corpus, same ranking.`
+    : `<span class="err">top-${K} differ (${mIds.length} vs ${sIds.length}) — expected only if the split set was built from a different corpus/ranking.</span>`;
+}
+
+(async () => {
+  try {
+    await init();
+    [mono, rrss, monoRecs, splitRecs] = await Promise.all([
+      RrsIndex.open(MONO_RRS),
+      RrssIndex.open(SPLIT_RRSS, SPLIT_BASE),
+      RrsRecords.open(MONO_REC_IDX, MONO_REC_BIN),
+      RrsRecords.open(SPLIT_REC_IDX, SPLIT_REC_BIN),
+    ]);
+    $("cfg").innerHTML = `split set: <b>${rrss.splitCount()}</b> splits, ${fmtKB(Number(rrss.totalBytes()))} on S3 · ` +
+      `set the artifact URLs at the top of this file.`;
+    // Facet chips are optional: render them only if the monolith's RRSF sidecar is deployed.
+    try { await mono.openFacets(MONO_RRF); renderFacets(mono.facets()); } catch (_) { /* no facet sidecar — search still works */ }
+    $("q").addEventListener("input", () => { clearTimeout(window._t); window._t = setTimeout(run, 150); });
+  } catch (e) {
+    $("cfg").innerHTML = `<span class="err">failed to open the artifacts: ${e}. Deploy ${SPLIT_RRSS} + its splits and the monolith ${MONO_RRS}, then set the URLs at the top of splitset.html.</span>`;
+  }
+})();
+</script>
+</body>
+</html>

@@ -51,7 +51,7 @@ impl<F: RangeFetch + Clone> SecondaryIndex<F> {
     pub async fn open(rrs: F, perm: F) -> Result<Self, IndexError> {
         let index = Index::open(rrs).await?;
         let perm = SortCols::open(perm).await?;
-        let perm_col = perm.column_index(PERM_COLUMN).ok_or(IndexError::Malformed(
+        let perm_col = perm.column_index(PERM_COLUMN).ok_or(IndexError::BadQuery(
             "secondary perm store missing the 'primary' column",
         ))?;
         Ok(Self {
@@ -149,6 +149,15 @@ pub struct SecondaryCursor<F: RangeFetch + Clone> {
 }
 
 impl<F: RangeFetch + Clone> SecondaryCursor<F> {
+    /// The next `n` **primary** doc IDs in secondary rank order, advancing the inner cursor's
+    /// position — the sequential counterpart of [`page`](Self::page), mirroring
+    /// [`crate::index::Cursor::next`]. Resolves the secondary IDs (no fetch until the tail is
+    /// needed), then gathers their primary IDs from the permutation in one coalesced wave.
+    pub async fn next(&mut self, n: usize) -> Result<Vec<u32>, IndexError> {
+        let secondary = self.inner.next(n).await?;
+        self.perm.values_u32(self.perm_col, &secondary).await
+    }
+
     /// The page of **primary** doc IDs for the secondary-ordered results
     /// `[offset, offset+limit)`. Resolves the secondary IDs from the inner cursor
     /// (no fetch until the tail is needed), then gathers their primary IDs from the
@@ -383,7 +392,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             block_on(SecondaryIndex::open(index, MemoryFetch::new(bad))),
-            Err(IndexError::Malformed(_))
+            Err(IndexError::BadQuery(_))
         ));
     }
 }

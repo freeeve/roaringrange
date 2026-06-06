@@ -629,6 +629,12 @@
               </svg>
               How it works
             </a>
+            <a class="howlink" href="splitset.html">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <rect x="3" y="4" width="7" height="16" rx="1" /><rect x="14" y="4" width="7" height="4" rx="1" /><rect x="14" y="10" width="7" height="4" rx="1" /><rect x="14" y="16" width="7" height="4" rx="1" />
+              </svg>
+              Split set
+            </a>
           </nav>
         </div>
 
@@ -1102,8 +1108,7 @@
          descending and only the top FACET_CAP are rendered. Each rendered count <span>
          is registered in countSpans so a later facetCountsJson() can update it in place. */
       function renderFacets() {
-        let groups = [];
-        try { groups = JSON.parse(facetSrc ? facetSrc.facetsJson() : "[]") || []; } catch (_) { groups = []; }
+        const groups = (facetSrc ? facetSrc.facets() : []) || [];
         const byField = new Map(groups.map((g) => [g.field, g]));
         els.facetgroups.innerHTML = "";
         countSpans.clear();
@@ -1189,11 +1194,10 @@
       /* Update rendered category counts to reflect the current query's results.
          Categories not present in the filtered facet data show 0; checked boxes stay
          checked regardless. Pass null to restore the full (unfiltered) index counts. */
-      function applyFacetCounts(json) {
-        let groups = null;
-        const src = json != null ? json : (facetSrc ? facetSrc.facetsJson() : null);
+      function applyFacetCounts(data) {
+        const src = data != null ? data : (facetSrc ? facetSrc.facets() : null);
         if (src == null) return;
-        try { groups = JSON.parse(src) || []; } catch (_) { return; }
+        const groups = Array.isArray(src) ? src : [];
 
         const counts = new Map();
         for (const g of groups) {
@@ -1619,8 +1623,8 @@
         if (!facetSrc) { applyFacetCounts(null); return { ids, ms: 0, reqs: 0, bytes: 0 }; }
         const r0 = reqs, b0 = bytes, t0 = performance.now();
         try {
-          const fr = await facetSrc.filterIds(Uint32Array.from(ids), filters);
-          applyFacetCounts(fr.countsJson());
+          const fr = await facetSrc.filterIds(Uint32Array.from(ids), filters.map((k) => k.split("\t")));
+          applyFacetCounts(fr.facetCounts());
           return { ids: Array.from(fr.ids), ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 };
         } catch (_) {
           applyFacetCounts(null);
@@ -1767,7 +1771,7 @@
         const mm = Number.parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
         const filters = Array.from(activeFilters);
         const t0 = performance.now();
-        try { cur = await idx.searchCursorFiltered(q, mm, filters); }
+        try { cur = await idx.searchCursorFiltered(q, mm, filters.map((k) => k.split("\t"))); }
         catch (e) { els.mSummary.textContent = `error: ${e}`; return; }
         if (mySeq !== searchSeq) return;   // a newer keystroke superseded this search
         const openMs = performance.now() - t0;
@@ -1776,7 +1780,7 @@
         // Time the in-wasm facet count over the result set (compute only — no fetch).
         try {
           const fcT0 = performance.now();
-          const fc = cur.facetCountsJson();
+          const fc = cur.facetCounts();
           setPerf({ facetcount: { ms: performance.now() - fcT0, reqs: 0, bytes: 0 } });
           applyFacetCounts(fc);
         } catch (_) {}

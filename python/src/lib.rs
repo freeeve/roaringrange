@@ -20,6 +20,7 @@
 
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use roaring::RoaringBitmap;
 use roaringrange_core::build::{
     split_posting, write_facets, write_index, write_records, FacetCategory, FacetField,
@@ -28,9 +29,15 @@ use roaringrange_core::build::{
 use roaringrange_core::ngram_keys;
 use roaringrange_core::vector::{METRIC_IP, METRIC_L2};
 use roaringrange_core::write_term_index as core_write_term_index;
-use roaringrange_core::{Language, TermIndexBuilder, TermIndexConfig};
 use roaringrange_core::{
     build_ivfpq, build_ivfpq_from_parts, IvfpqParams, IvfpqParts, VectorBuildError,
+};
+use roaringrange_core::{Language, TermIndexBuilder, TermIndexConfig};
+use roaringrange_core::{
+    Policy as CorePolicy, SortColSpec as CoreSortColSpec, SplitBuildConfig,
+    SplitSet as CoreSplitSet, SplitSetBuilder as CoreSplitSetBuilder,
+    SplitSetWriter as CoreSplitSetWriter, TermSplitBuildConfig,
+    TermSplitSetBuilder as CoreTermSplitSetBuilder, WriterConfig,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -112,6 +119,25 @@ impl Builder {
             record,
             facets: facets.map(|m| m.into_iter().collect()).unwrap_or_default(),
         });
+    }
+
+    /// Stages a batch of records in one call — each `rows` entry is
+    /// `(rank, text, record, facets)` with the same meaning as [`add`](Self::add) (the trailing
+    /// `facets` is optional). Cuts the per-row Python↔Rust call overhead for large corpora.
+    #[allow(clippy::type_complexity)]
+    fn add_many(
+        &mut self,
+        rows: Vec<(i64, String, Vec<u8>, Option<HashMap<String, Vec<String>>>)>,
+    ) {
+        self.docs.reserve(rows.len());
+        for (rank, text, record, facets) in rows {
+            self.docs.push(Doc {
+                rank,
+                text,
+                record,
+                facets: facets.map(|m| m.into_iter().collect()).unwrap_or_default(),
+            });
+        }
     }
 
     /// Number of staged records.
@@ -576,6 +602,432 @@ fn io_err(e: std::io::Error) -> PyErr {
     PyIOError::new_err(e.to_string())
 }
 
+/// Maps a policy name to the core's [`CorePolicy`].
+fn parse_policy(s: &str) -> PyResult<CorePolicy> {
+    match s.to_ascii_lowercase().as_str() {
+        "tiered" | "rank" | "rank_tiered" => Ok(CorePolicy::Tiered),
+        "stable" | "stable_key" | "stablekey" | "ingest" => Ok(CorePolicy::StableKey),
+        other => Err(PyValueError::new_err(format!(
+            "unknown policy {other:?}; use 'tiered' or 'stable_key'"
+        ))),
+    }
+}
+
+/// Builds a [`CoreSortColSpec`] from a `(name, column, descending)` tuple.
+fn sortcol_spec(t: Option<(String, u16, bool)>) -> Option<CoreSortColSpec> {
+    t.map(|(name, column, descending)| CoreSortColSpec {
+        name,
+        column,
+        descending,
+    })
+}
+
+/// Summary of a completed split-set build, returned by [`SplitSetBuilder::build`].
+#[pyclass]
+struct SplitSetBuildStats {
+    /// Number of splits written.
+    #[pyo3(get)]
+    splits: usize,
+    /// Number of documents indexed.
+    #[pyo3(get)]
+    docs: usize,
+    /// Total bytes across every split file.
+    #[pyo3(get)]
+    total_bytes: u64,
+}
+
+#[pymethods]
+impl SplitSetBuildStats {
+    fn __repr__(&self) -> String {
+        format!(
+            "SplitSetBuildStats(splits={}, docs={}, total_bytes={})",
+            self.splits, self.docs, self.total_bytes
+        )
+    }
+}
+
+/// A byte-capped `RRSS` split-set builder — the batch greedy seal. Feed documents with
+/// [`add`](Self::add) (rank order for the tiered policy, ingest order for stable-key); each is
+/// tokenized into n-gram keys and accumulated into the open split, which is sealed into an
+/// immutable `RRS` when an upper-bound size estimate nears `byte_cap`. [`build`](Self::build)
+/// writes the manifest and every split file to a directory.
+///
+/// ```python
+/// import roaringrange as rr
+/// b = rr.SplitSetBuilder(policy="tiered", byte_cap=32 << 20, gram_size=3, name_prefix="corpus")
+/// for text in texts_in_rank_order:
+///     b.add(text)
+/// stats = b.build("out/")   # writes out/index.rrss + out/corpus-s00000.rrs, ...
+/// ```
+#[pyclass]
+struct SplitSetBuilder {
+    inner: Option<CoreSplitSetBuilder>,
+}
+
+#[pymethods]
+impl SplitSetBuilder {
+    /// Creates a builder. `policy` is `"tiered"` (rank order) or `"stable_key"` (ingest order
+    /// + a query-time rank `RRSC`); `byte_cap` is the per-split seal target; `name_prefix`
+    /// names the split files (`‹prefix›-s00000.rrs`, …). `head_boundary`/`stride` of `0` take
+    /// the `RRS` defaults. `sortcol` is an optional `(rrsc_name, column, descending)` recorded
+    /// for the stable-key rank. `bloom_bits_per_key` sizes the per-split term Bloom filters
+    /// (`0` disables; `~10` ≈ 1% false positives) — the biggest fan-out reducer for term queries.
+    #[new]
+    #[pyo3(signature = (policy="tiered", byte_cap=33_554_432, gram_size=3, head_boundary=0, stride=0, name_prefix="split", sortcol=None, bloom_bits_per_key=10))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        policy: &str,
+        byte_cap: u64,
+        gram_size: u16,
+        head_boundary: u32,
+        stride: u32,
+        name_prefix: &str,
+        sortcol: Option<(String, u16, bool)>,
+        bloom_bits_per_key: u32,
+    ) -> PyResult<Self> {
+        let config = SplitBuildConfig {
+            policy: parse_policy(policy)?,
+            byte_cap,
+            gram_size: gram_size.max(1),
+            head_boundary,
+            stride,
+            name_prefix: name_prefix.to_string(),
+            sortcol: sortcol_spec(sortcol),
+            bloom_bits_per_key,
+        };
+        Ok(SplitSetBuilder {
+            inner: Some(CoreSplitSetBuilder::new(config)),
+        })
+    }
+
+    /// Stages one document (tokenized into n-gram keys) and returns its global doc id.
+    fn add(&mut self, text: &str) -> PyResult<u32> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("SplitSetBuilder already built"))?
+            .add_text(text)
+            .map_err(io_err)
+    }
+
+    /// Stages one faceted document and returns its global doc id. `facets` maps each field to the
+    /// categories this document belongs to (e.g. `{"year": ["2020"], "type": ["article"]}`), the
+    /// same shape as `Builder.add`. Each split then gets its own `RRSF` facet sidecar (written by
+    /// `build`) plus a facet-presence summary, so a facet-filtered query can skip splits lacking a
+    /// selected category.
+    fn add_faceted(&mut self, text: &str, facets: HashMap<String, Vec<String>>) -> PyResult<u32> {
+        let pairs: Vec<(String, String)> = facets
+            .into_iter()
+            .flat_map(|(field, cats)| cats.into_iter().map(move |cat| (field.clone(), cat)))
+            .collect();
+        self.inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("SplitSetBuilder already built"))?
+            .add_faceted(text, &pairs)
+            .map_err(io_err)
+    }
+
+    /// Total documents added so far.
+    fn doc_count(&self) -> u32 {
+        self.inner
+            .as_ref()
+            .map_or(0, CoreSplitSetBuilder::doc_count)
+    }
+
+    fn __len__(&self) -> usize {
+        self.doc_count() as usize
+    }
+
+    /// Seals the final split and writes the dataset into `out_dir`: the manifest
+    /// `‹manifest_name›.rrss` plus every split `RRS` file (named by the builder's prefix).
+    /// Parent directories are created. Consumes the builder. Raises `IOError` on a degenerate
+    /// corpus (a single document whose postings exceed the byte cap) or a write failure.
+    #[pyo3(signature = (out_dir, manifest_name="index"))]
+    fn build(&mut self, out_dir: &str, manifest_name: &str) -> PyResult<SplitSetBuildStats> {
+        let b = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("SplitSetBuilder already built"))?;
+        let docs = b.doc_count() as usize;
+        let built = b.finish().map_err(io_err)?;
+        let dir = Path::new(out_dir);
+        std::fs::create_dir_all(dir).map_err(io_err)?;
+        let mut total_bytes = 0u64;
+        for (name, bytes) in &built.splits {
+            std::fs::write(dir.join(name), bytes).map_err(io_err)?;
+            total_bytes += bytes.len() as u64;
+        }
+        // Per-split `RRSF` facet sidecars (one per split that carried any faceted document).
+        for (name, bytes) in &built.facets {
+            std::fs::write(dir.join(name), bytes).map_err(io_err)?;
+            total_bytes += bytes.len() as u64;
+        }
+        std::fs::write(dir.join(format!("{manifest_name}.rrss")), &built.manifest)
+            .map_err(io_err)?;
+        Ok(SplitSetBuildStats {
+            splits: built.splits.len(),
+            docs,
+            total_bytes,
+        })
+    }
+}
+
+/// The term/FST (`RRTI`) analogue of [`SplitSetBuilder`]: each sealed split is a term index
+/// rather than a trigram `RRS`, for a head-to-head comparison over the same corpus. `language`
+/// enables Snowball stemming (`"english"`); `stopwords` drops stop words. There is no
+/// `gram_size`/`bloom_bits_per_key` — the body tokenizes whole terms and term-Bloom pruning is
+/// deferred. Splits are named `‹prefix›-s00000.rrt`.
+#[pyclass]
+struct TermSplitSetBuilder {
+    inner: Option<CoreTermSplitSetBuilder>,
+}
+
+#[pymethods]
+impl TermSplitSetBuilder {
+    #[new]
+    #[pyo3(signature = (policy="tiered", byte_cap=33_554_432, head_boundary=0, name_prefix="split", sortcol=None, language=None, stopwords=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        policy: &str,
+        byte_cap: u64,
+        head_boundary: u32,
+        name_prefix: &str,
+        sortcol: Option<(String, u16, bool)>,
+        language: Option<String>,
+        stopwords: bool,
+    ) -> PyResult<Self> {
+        let language = match language.as_deref() {
+            None => None,
+            Some("english") | Some("en") => Some(Language::English),
+            Some(other) => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown stemmer language {other:?} (supported: \"english\")"
+                )))
+            }
+        };
+        let config = TermSplitBuildConfig {
+            policy: parse_policy(policy)?,
+            byte_cap,
+            head_boundary,
+            name_prefix: name_prefix.to_string(),
+            sortcol: sortcol_spec(sortcol),
+            language,
+            stopwords,
+        };
+        Ok(TermSplitSetBuilder {
+            inner: Some(CoreTermSplitSetBuilder::new(config)),
+        })
+    }
+
+    /// Stages one document (tokenized into whole terms) and returns its global doc id.
+    fn add(&mut self, text: &str) -> PyResult<u32> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TermSplitSetBuilder already built"))?
+            .add_text(text)
+            .map_err(io_err)
+    }
+
+    /// Stages one faceted document — `facets` maps each field to its categories, as in
+    /// [`SplitSetBuilder.add_faceted`]. Returns the global id.
+    fn add_faceted(&mut self, text: &str, facets: HashMap<String, Vec<String>>) -> PyResult<u32> {
+        let pairs: Vec<(String, String)> = facets
+            .into_iter()
+            .flat_map(|(field, cats)| cats.into_iter().map(move |cat| (field.clone(), cat)))
+            .collect();
+        self.inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TermSplitSetBuilder already built"))?
+            .add_faceted(text, &pairs)
+            .map_err(io_err)
+    }
+
+    /// Total documents added so far.
+    fn doc_count(&self) -> u32 {
+        self.inner
+            .as_ref()
+            .map_or(0, CoreTermSplitSetBuilder::doc_count)
+    }
+
+    fn __len__(&self) -> usize {
+        self.doc_count() as usize
+    }
+
+    /// Seals and writes the term split set into `out_dir`: `‹manifest_name›.rrss` plus every split
+    /// `‹prefix›-s*.rrt` and any per-split `.rrf` facet sidecar. Consumes the builder.
+    #[pyo3(signature = (out_dir, manifest_name="index"))]
+    fn build(&mut self, out_dir: &str, manifest_name: &str) -> PyResult<SplitSetBuildStats> {
+        let b = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("TermSplitSetBuilder already built"))?;
+        let docs = b.doc_count() as usize;
+        let built = b.finish().map_err(io_err)?;
+        let dir = Path::new(out_dir);
+        std::fs::create_dir_all(dir).map_err(io_err)?;
+        let mut total_bytes = 0u64;
+        for (name, bytes) in built.splits.iter().chain(built.facets.iter()) {
+            std::fs::write(dir.join(name), bytes).map_err(io_err)?;
+            total_bytes += bytes.len() as u64;
+        }
+        std::fs::write(dir.join(format!("{manifest_name}.rrss")), &built.manifest)
+            .map_err(io_err)?;
+        Ok(SplitSetBuildStats {
+            splits: built.splits.len(),
+            docs,
+            total_bytes,
+        })
+    }
+}
+
+/// A pure `RRSS` ingestion writer — the streaming base+delta lifecycle. `add`/`delete` into an
+/// in-RAM memtable; [`flush`](Self::flush) seals it into one immutable delta split plus a new
+/// manifest, **returned as bytes** so the caller owns transport and durability (PUT the split,
+/// then the manifest = atomic cutover). [`compact`](Self::compact) merges delta splits into one.
+///
+/// ```python
+/// w = rr.SplitSetWriter.resume(prev_manifest_bytes, gram_size=3, name_prefix="corpus")
+/// for text in new_docs:
+///     w.add(text)
+/// if w.memtable_bytes() > CAP:
+///     name, split, manifest = w.flush()         # bytes in, bytes out
+///     put(name, split); put("index.rrss", manifest)   # the client does the I/O
+/// ```
+#[pyclass]
+struct SplitSetWriter {
+    inner: CoreSplitSetWriter,
+}
+
+#[pymethods]
+impl SplitSetWriter {
+    /// Creates a fresh writer (no prior splits — the first flush writes the first delta).
+    /// `policy`/`tier_count`/`sortcol` are recorded in the manifest header for when a base is
+    /// later compacted in; `head_boundary`/`stride` of `0` take the `RRS` defaults.
+    #[new]
+    #[pyo3(signature = (gram_size=3, byte_cap=33_554_432, name_prefix="split", policy="stable_key", head_boundary=0, stride=0, tier_count=0, sortcol=None, bloom_bits_per_key=10))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        gram_size: u16,
+        byte_cap: u64,
+        name_prefix: &str,
+        policy: &str,
+        head_boundary: u32,
+        stride: u32,
+        tier_count: u16,
+        sortcol: Option<(String, u16, bool)>,
+        bloom_bits_per_key: u32,
+    ) -> PyResult<Self> {
+        let config = WriterConfig {
+            gram_size: gram_size.max(1),
+            head_boundary,
+            stride,
+            byte_cap,
+            name_prefix: name_prefix.to_string(),
+            policy: parse_policy(policy)?,
+            tier_count,
+            sortcol: sortcol_spec(sortcol),
+            bloom_bits_per_key,
+        };
+        Ok(SplitSetWriter {
+            inner: CoreSplitSetWriter::new(config),
+        })
+    }
+
+    /// Resumes over an existing split set given its manifest `bytes`: carries forward every
+    /// split, continues the global id space, and advances the epoch. `gram_size`/
+    /// `head_boundary`/`stride`/`bloom_bits_per_key` must match the base (they are not fully
+    /// recorded per split in the manifest). Raises `ValueError` if the manifest is malformed.
+    #[staticmethod]
+    #[pyo3(signature = (manifest, gram_size=3, head_boundary=0, stride=0, name_prefix="split", bloom_bits_per_key=10))]
+    fn resume(
+        manifest: Vec<u8>,
+        gram_size: u16,
+        head_boundary: u32,
+        stride: u32,
+        name_prefix: &str,
+        bloom_bits_per_key: u32,
+    ) -> PyResult<Self> {
+        let prev = CoreSplitSet::from_bytes(&manifest)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(SplitSetWriter {
+            inner: CoreSplitSetWriter::resume(
+                &prev,
+                gram_size.max(1),
+                head_boundary,
+                stride,
+                name_prefix.to_string(),
+                bloom_bits_per_key,
+            ),
+        })
+    }
+
+    /// Appends one document (tokenized into n-gram keys) to the memtable; returns its global id.
+    fn add(&mut self, text: &str) -> u32 {
+        self.inner.add_text(text)
+    }
+
+    /// Records a tombstone for a previously-indexed global doc id; the next flush carries it.
+    fn delete(&mut self, doc_id: u32) {
+        self.inner.delete(doc_id);
+    }
+
+    /// An estimate of the open memtable's serialized size — the flush size trigger.
+    fn memtable_bytes(&self) -> u64 {
+        self.inner.memtable_bytes()
+    }
+
+    /// Documents buffered in the open memtable (not yet flushed).
+    fn memtable_doc_count(&self) -> u32 {
+        self.inner.memtable_doc_count()
+    }
+
+    /// Total documents ever added.
+    fn doc_count(&self) -> u32 {
+        self.inner.doc_count()
+    }
+
+    /// Seals the memtable (and any pending deletes) into one delta split + a new manifest.
+    /// Returns `(split_name, split_bytes, manifest_bytes)`, or `None` when there is nothing to
+    /// flush. The caller PUTs the split then the manifest (the atomic cutover).
+    #[allow(clippy::type_complexity)]
+    fn flush<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Option<(String, Bound<'py, PyBytes>, Bound<'py, PyBytes>)>> {
+        match self.inner.flush().map_err(io_err)? {
+            None => Ok(None),
+            Some(f) => Ok(Some((
+                f.split_name,
+                PyBytes::new_bound(py, &f.split_bytes),
+                PyBytes::new_bound(py, &f.manifest),
+            ))),
+        }
+    }
+
+    /// Merges the named delta `inputs` (`[(name, rrs_bytes), ...]`) into one absolute-id split,
+    /// dropping tombstoned docs. Returns `(split_name, split_bytes, manifest_bytes, removed)`,
+    /// where `removed` is the input names the caller may delete after the cutover. Raises
+    /// `IOError` if an input is not a current delta split (re-tiering the base is a rebuild).
+    #[allow(clippy::type_complexity)]
+    fn compact<'py>(
+        &mut self,
+        py: Python<'py>,
+        inputs: Vec<(String, Vec<u8>)>,
+    ) -> PyResult<(
+        String,
+        Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
+        Vec<String>,
+    )> {
+        let c = self.inner.compact(&inputs).map_err(io_err)?;
+        Ok((
+            c.split_name,
+            PyBytes::new_bound(py, &c.split_bytes),
+            PyBytes::new_bound(py, &c.manifest),
+            c.removed,
+        ))
+    }
+}
+
 #[pymodule]
 fn roaringrange(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Builder>()?;
@@ -586,5 +1038,9 @@ fn roaringrange(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(write_rrvi_from_faiss, m)?)?;
     m.add_function(wrap_pyfunction!(write_term_index, m)?)?;
     m.add_class::<TermBuilder>()?;
+    m.add_class::<SplitSetBuilder>()?;
+    m.add_class::<TermSplitSetBuilder>()?;
+    m.add_class::<SplitSetBuildStats>()?;
+    m.add_class::<SplitSetWriter>()?;
     Ok(())
 }

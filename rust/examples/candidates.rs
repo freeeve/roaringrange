@@ -67,7 +67,7 @@ fn main() {
         c: Arc::clone(&c),
     }))
     .expect("open index");
-    let n = idx.gram_size as usize;
+    let n = idx.gram_size() as usize;
 
     let mb = |b: u64| b as f64 / 1024.0 / 1024.0;
     let reset = || {

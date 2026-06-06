@@ -35,6 +35,19 @@ def test_text_builder_writes_dataset(tmp_path):
     assert (tmp_path / "records.bin").exists()
 
 
+def test_text_builder_add_many(tmp_path):
+    # add_many stages a batch; result is identical to per-row add().
+    b = rr.Builder(gram_size=3)
+    b.add_many([
+        (10, "hello world", b'{"t":"hello"}', {"year": ["2020"]}),
+        (5, "goodbye world", b'{"t":"bye"}', None),
+    ])
+    assert len(b) == 2
+    stats = b.build(str(tmp_path))
+    assert stats.docs == 2
+    assert (tmp_path / "index.rrs").read_bytes()[:4] == b"RRSI"
+
+
 def test_write_term_index_writes_rrti(tmp_path):
     out = tmp_path / "terms.rrti"
     rr.write_term_index(
@@ -164,3 +177,107 @@ def test_write_rrvi_from_faiss_validates_lengths(tmp_path):
             bytes([0, 0, 0]),  # codes length 3, should be n*m = 4
             nbits=2, metric="l2",
         )
+
+
+def test_splitset_builder_writes_manifest_and_splits(tmp_path):
+    # A small byte cap forces several splits; every doc contains "abc".
+    b = rr.SplitSetBuilder(policy="tiered", byte_cap=4096, gram_size=3, name_prefix="corpus")
+    for i in range(200):
+        b.add(f"abc tok{i:04}")
+    assert len(b) == 200
+
+    stats = b.build(str(tmp_path), manifest_name="index")
+    assert stats.docs == 200
+    assert stats.splits > 1
+    assert stats.total_bytes > 0
+
+    manifest = (tmp_path / "index.rrss").read_bytes()
+    assert manifest[:4] == b"RRSS"
+    version, _flags = struct.unpack_from("<HH", manifest, 4)
+    split_count, base_count = struct.unpack_from("<II", manifest, 12)
+    assert version == 1
+    assert split_count == stats.splits
+    assert base_count == stats.splits  # all base for a batch build
+    # Every named split file was written.
+    assert (tmp_path / "corpus-s00000.rrs").read_bytes()[:4] == b"RRSI"
+
+
+def test_splitset_builder_rejects_unknown_policy():
+    with pytest.raises(ValueError):
+        rr.SplitSetBuilder(policy="bogus")
+
+
+def test_splitset_builder_add_faceted_writes_sidecars(tmp_path):
+    # Faceted docs across two splits -> per-split .rrf sidecars + the FACET header flag.
+    b = rr.SplitSetBuilder(policy="tiered", byte_cap=4096, gram_size=3, name_prefix="corpus")
+    for i in range(200):
+        b.add_faceted(f"abc tok{i:04}", {"year": [str(2000 + i % 5)], "type": ["article"]})
+    stats = b.build(str(tmp_path), manifest_name="index")
+    assert stats.splits > 1
+
+    manifest = (tmp_path / "index.rrss").read_bytes()
+    assert manifest[:4] == b"RRSS"
+    (flags,) = struct.unpack_from("<H", manifest, 6)
+    assert flags & 0b10  # FLAG_FACET (bit 1) set
+    # Each split that carried a faceted doc has an RRSF sidecar.
+    assert (tmp_path / "corpus-s00000.rrf").read_bytes()[:4] == b"RRSF"
+
+
+def test_term_splitset_builder_writes_rrti_splits(tmp_path):
+    # The FST/term-bodied split set: .rrt split files and body_kind=1 in the manifest.
+    b = rr.TermSplitSetBuilder(policy="tiered", byte_cap=600, name_prefix="corpus", language="english")
+    for i in range(60):
+        b.add(f"abc tok{i:04}")
+    assert len(b) == 60
+    stats = b.build(str(tmp_path), manifest_name="index")
+    assert stats.splits > 1
+
+    manifest = (tmp_path / "index.rrss").read_bytes()
+    assert manifest[:4] == b"RRSS"
+    assert manifest[9] == 1  # bodyKind = term (RRTI)
+    # Split data files use the .rrt extension and carry the RRTI magic.
+    assert (tmp_path / "corpus-s00000.rrt").read_bytes()[:4] == b"RRTI"
+
+
+def test_splitset_writer_flush_and_resume(tmp_path):
+    # Fresh writer: add two docs, flush -> (name, split bytes, manifest bytes).
+    w = rr.SplitSetWriter(gram_size=3, name_prefix="corpus", policy="stable_key")
+    assert w.add("abc hello") == 0
+    assert w.add("abc world") == 1
+    assert w.doc_count() == 2
+    assert w.memtable_bytes() > 0
+    assert w.flush() is not None
+
+    name, split_bytes, manifest = None, None, None
+    # Re-flush yields None (nothing pending); so capture from the first flush instead.
+    w2 = rr.SplitSetWriter(gram_size=3, name_prefix="corpus", policy="stable_key")
+    w2.add("abc hello")
+    name, split_bytes, manifest = w2.flush()
+    assert isinstance(name, str) and name.endswith(".rrs")
+    assert isinstance(split_bytes, bytes) and split_bytes[:4] == b"RRSI"
+    assert isinstance(manifest, bytes) and manifest[:4] == b"RRSS"
+    assert w2.flush() is None  # memtable now empty
+
+    # Resume over the manifest: ids continue, a new flush appends a delta.
+    w3 = rr.SplitSetWriter.resume(manifest, gram_size=3, name_prefix="corpus")
+    assert w3.add("abc again") == 1  # global id continues past the resumed split
+    _name2, _split2, manifest2 = w3.flush()
+    split_count, base_count = struct.unpack_from("<II", manifest2, 12)
+    assert split_count == 2  # original delta + the new one
+
+
+def test_splitset_writer_delete_then_compact(tmp_path):
+    w = rr.SplitSetWriter(gram_size=3, name_prefix="corpus", policy="stable_key")
+    w.add("abc one")
+    w.add("abc two")
+    name0, split0, _m0 = w.flush()
+    w.delete(0)
+    name1, split1, _m1 = w.flush()  # deletes-only flush carries a tombstone
+
+    # Compact the two delta splits into one absolute-id split.
+    cname, csplit, cmanifest, removed = w.compact([(name0, split0), (name1, split1)])
+    assert csplit[:4] == b"RRSI"
+    assert cmanifest[:4] == b"RRSS"
+    assert set(removed) == {name0, name1}
+    split_count, _base = struct.unpack_from("<II", cmanifest, 12)
+    assert split_count == 1  # two deltas merged into one

@@ -101,3 +101,24 @@ by `roaringrange::write_rerank`.
 list and an `RRS` (trigram) result list into one ranking with no score
 normalization — a doc near the top of either list ranks high. Exposed to the
 browser as `reciprocalRankFusion(vectorIds, trigramIds, kParam)`.
+
+## Model2vec embedder (RRM2)
+
+To embed a query **in the browser with no backend**, the `<name>.rrm2` artifact carries a
+static model2vec embedder: a WordPiece vocab + an int8-quantized token-embedding matrix + the
+BERT normalizer flags. `Model2vec::from_bytes` (wasm: `Model2vecEmbedder`) reads the whole file
+once and `embed(query)` does tokenize → gather static token rows → mean-pool → L2-normalize,
+byte-compatible with the Python model2vec; the result feeds `VectorIndex::search`. Emitted by
+`python/scripts/model2vec_export.py`.
+
+All integers little-endian.
+
+| section | bytes | contents |
+|---|---|---|
+| header | 32 | magic `"RRM2"`; version `u16`=1; `dim u32`; `vocabSize u32`; `quant u8` (0 = int8); `flags u8`; `unkId u32`; reserved to 32 B |
+| scales | `vocabSize × 4` | per-row dequant scale `f32` (`row = code × scale`) |
+| codes | `vocabSize × dim` | int8 embedding codes, row-major |
+| vocab | variable | token strings in id order, each `[len u16][UTF-8 bytes]` |
+
+`flags` bits: `1`=lowercase, `2`=strip-accents, `4`=handle-CJK, `8`=clean-text (the BertNormalizer
+settings, applied identically at query time so the in-browser tokenization matches the export).

@@ -104,16 +104,9 @@ into the tail — fetches the selected categories' tails and applies the same
 OR/AND to the tail before extending the cursor. A field with a selection that
 resolves to no docs makes the whole result empty, which is correct.
 
-## `SORTCOLS` (planned, Phase 2) — mirrors roaringsearch `SortColumn[T]`
+## Sort columns (`RRSC`)
 
-A dense, doc-ID-indexed columnar array for an alternate sort key (rating, pub-date):
-
-```
-header   magic "RRSC"; version u16; colCount u16
-columns  colCount × { nameOff u32; nameLen u16; valueType u8 (u16/u32/i32/f32); dataOff u64; count u32 }
-data     per column: dense values[docID], fixed width, length = count × width
-```
-
-A candidate doc's value sits at `dataOff + docID*width`, so the reader coalesce-fetches
-runs for a result set (like the record store) and heap-sorts top-K. The primary
-popularity order is already baked into doc-ID assignment; this is for secondary keys.
+Alternate sort keys (rating, pub-date, …) live in a separate `RRSC` sort-column store, now
+shipped and specced in **[SORTCOLS.md](SORTCOLS.md)** — see there for the layout and reader.
+The primary popularity order is already baked into doc-ID assignment; `RRSC` is for secondary
+keys, applied as a client-side top-K re-rank over a result set.

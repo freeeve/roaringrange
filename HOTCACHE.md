@@ -35,7 +35,7 @@ All integers little-endian.
 **Manifest entry — 40 B each**, `memberCount` entries at offset `32`:
 | field | type | bytes | notes |
 |---|---|---|---|
-| tag | u16 | 2 | member type (`RRS`=1, `RRTI`=2, `RRSF`=3, `RRVI`=4, `RRSR_IDX`=5, `RRSR_BIN`=6, `RRSR_DICT`=7, `RRIL`=8, `RRM2`=9) |
+| tag | u16 | 2 | member type (`RRS`=1, `RRTI`=2, `RRSF`=3, `RRVI`=4, `RRSR_IDX`=5, `RRSR_BIN`=6, `RRSR_DICT`=7, `RRIL`=8, `RRM2`=9, `RRSS`=10) |
 | flags | u16 | 2 | `bit0 = inlined-here` (else fetch-by-range) |
 | nameOff | u32 | 4 | data-file name → offset into the string blob |
 | nameLen | u16 | 2 | data-file name length in bytes |

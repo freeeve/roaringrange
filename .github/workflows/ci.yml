@@ -54,6 +54,15 @@ jobs:
       - name: Test (hotcache feature)
         working-directory: rust
         run: cargo test --features hotcache
+      - name: Test (splits feature)
+        working-directory: rust
+        run: cargo test --features splits
+      - name: Test (splits + hotcache features)
+        working-directory: rust
+        run: cargo test --features "splits hotcache"
+      - name: Test (splits + terms features)
+        working-directory: rust
+        run: cargo test --features "splits terms"
       - name: Fmt
         working-directory: rust
         run: cargo fmt --check
@@ -69,6 +78,15 @@ jobs:
       - name: Clippy (hotcache feature)
         working-directory: rust
         run: cargo clippy --all-targets --features hotcache -- -D warnings
+      - name: Clippy (splits feature)
+        working-directory: rust
+        run: cargo clippy --all-targets --features splits -- -D warnings
+      - name: Clippy (splits + hotcache features)
+        working-directory: rust
+        run: cargo clippy --all-targets --features "splits hotcache" -- -D warnings
+      - name: Clippy (splits + terms features)
+        working-directory: rust
+        run: cargo clippy --all-targets --features "splits terms" -- -D warnings
       - name: Builder fmt
         working-directory: examples/openalex/builder
         run: cargo fmt --check

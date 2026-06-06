@@ -26,9 +26,7 @@ pub(crate) const HEADER_SIZE: usize = 20;
 /// RRS format version written into the header.
 pub(crate) const FORMAT_VERSION: u16 = 2;
 
-/// FNV-1a 64-bit offset basis / prime (shared by the facet key derivation).
-const FNV_OFFSET64: u64 = 14695981039346656037;
-const FNV_PRIME64: u64 = 1099511628211;
+use crate::facet::facet_key;
 
 /// Splits `bm` into the head bitmap (docs `[0, head_boundary)`) and tail bitmap
 /// (docs `[head_boundary, ∞)`), each serialized as a portable RoaringBitmap.
@@ -47,25 +45,6 @@ pub fn split_posting(bm: &RoaringBitmap, head_boundary: u32) -> (Vec<u8>, Vec<u8
     let mut tb = Vec::with_capacity(tail.serialized_size());
     tail.serialize_into(&mut tb).expect("serialize tail bitmap");
     (hb, tb)
-}
-
-/// Derives the facet category key: FNV-1a 64-bit over `lower(field)`, a `0x1f`
-/// separator byte, then `lower(category)`. Mirrors Go `FacetKey` (see
-/// `FACETS.md`). Informational for the Phase-1 sidecar reader (which resolves by
-/// name), but written so the file matches the spec and sorts deterministically.
-pub(crate) fn facet_key(field: &str, category: &str) -> u64 {
-    let mut h = FNV_OFFSET64;
-    for b in field.to_lowercase().bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(FNV_PRIME64);
-    }
-    h ^= 0x1f;
-    h = h.wrapping_mul(FNV_PRIME64);
-    for b in category.to_lowercase().bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(FNV_PRIME64);
-    }
-    h
 }
 
 /// Default sparse-index stride (matches Go `DefaultStride`).
@@ -880,7 +859,7 @@ mod tests {
             (bcd, bm(&[3, 5, HEAD_BOUNDARY + 1])),
         ]);
         let idx = block_on(Index::open(MemoryFetch::new(buf))).unwrap();
-        assert_eq!(idx.gram_size, 3);
+        assert_eq!(idx.gram_size(), 3);
         assert_eq!(idx.ngram_count(), 2);
         // Single trigram, ascending (= rank), spanning head into tail.
         assert_eq!(

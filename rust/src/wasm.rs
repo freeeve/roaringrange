@@ -105,25 +105,6 @@ fn js_err(v: &JsValue) -> String {
         .unwrap_or_else(|| "unknown JS error".into())
 }
 
-/// Escapes `s` for embedding inside a JSON string literal: backslash and double
-/// quote are backslash-escaped, the common control characters use their short
-/// escapes, and any other control byte below `0x20` becomes a `\u00xx` escape.
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 impl RangeFetch for WasmFetch {
     async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
         if len == 0 {
@@ -191,91 +172,88 @@ impl RangeFetch for WasmFetch {
     }
 }
 
-/// Builds the search-filtered facet-count JSON for `cursor`'s head result:
-/// `[{"field":"<name>","cats":[{"name":"<name>","count":<n>},...]},...]`, or
-/// `"[]"` when no facet sidecar is open. Counts are computed in memory.
-fn facet_counts_json(facets: Option<&FacetIndex<WasmFetch>>, head: &RoaringBitmap) -> String {
-    let Some(facets) = facets else {
-        return "[]".to_string();
-    };
-    let counts = facets.counts(head);
-    let mut out = String::from("[");
-    for (fi, field) in facets.fields.iter().enumerate() {
-        if fi > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"field\":\"");
-        out.push_str(&json_escape(&field.name));
-        out.push_str("\",\"cats\":[");
+/// The single object shape behind every facet accessor: a JS `Array` of
+/// `{ field, cats: [{ name, count }, ...] }` for `fields`, with each category's `count` taken from
+/// `counts[fi][ci]`. The `*Json`-string builders were replaced by this so JS callers get structured
+/// objects, not strings they must `JSON.parse`.
+fn facets_array_js(fields: &[Field], counts: &[Vec<u64>]) -> Array {
+    let out = Array::new_with_length(fields.len() as u32);
+    for (fi, field) in fields.iter().enumerate() {
+        let cats = Array::new_with_length(field.categories.len() as u32);
         for (ci, cat) in field.categories.iter().enumerate() {
-            if ci > 0 {
-                out.push(',');
-            }
-            out.push_str("{\"name\":\"");
-            out.push_str(&json_escape(&cat.name));
-            out.push_str("\",\"count\":");
-            out.push_str(&counts[fi][ci].to_string());
-            out.push('}');
+            let obj = Object::new();
+            let _ = Reflect::set(&obj, &"name".into(), &cat.name.as_str().into());
+            let _ = Reflect::set(&obj, &"count".into(), &(counts[fi][ci] as f64).into());
+            cats.set(ci as u32, obj.into());
         }
-        out.push_str("]}");
+        let obj = Object::new();
+        let _ = Reflect::set(&obj, &"field".into(), &field.name.as_str().into());
+        let _ = Reflect::set(&obj, &"cats".into(), &cats.into());
+        out.set(fi as u32, obj.into());
     }
-    out.push(']');
     out
 }
 
-/// The facet fields/categories as JSON with full-corpus counts (served from the
-/// in-memory meta region): `[{"field":..,"cats":[{"name":..,"count":..},..]},..]`.
-/// `"[]"` when no sidecar is present. Shared by the text index and the standalone
-/// facet binding.
-fn facets_meta_json(facets: Option<&FacetIndex<WasmFetch>>) -> String {
-    let Some(facets) = facets else {
-        return "[]".to_string();
-    };
-    let mut out = String::from("[");
-    for (fi, field) in facets.fields.iter().enumerate() {
-        if fi > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"field\":\"");
-        out.push_str(&json_escape(&field.name));
-        out.push_str("\",\"cats\":[");
-        for (ci, cat) in field.categories.iter().enumerate() {
-            if ci > 0 {
-                out.push(',');
-            }
-            out.push_str("{\"name\":\"");
-            out.push_str(&json_escape(&cat.name));
-            out.push_str("\",\"count\":");
-            out.push_str(&cat.count.to_string());
-            out.push('}');
-        }
-        out.push_str("]}");
+/// The search-filtered facet counts over `head` as a JS `Array` of `{ field, cats: [{ name, count
+/// }] }` (counts computed in memory); an empty array when no facet sidecar is open.
+fn facet_counts_js(facets: Option<&FacetIndex<WasmFetch>>, head: &RoaringBitmap) -> JsValue {
+    match facets {
+        Some(facets) => facets_array_js(&facets.fields, &facets.counts(head)).into(),
+        None => Array::new().into(),
     }
-    out.push(']');
-    out
 }
 
-/// Filters a ranked doc-ID list by the selected facets and returns the survivors
-/// (input order preserved) plus search-filtered counts over them. Each `filters`
-/// entry is `"field\tcategory"` (within a field categories OR, across fields they
-/// AND). Shared by the text index and the standalone facet binding.
+/// The facet `fields` with their **full-corpus** counts (from the in-memory meta region) as a JS
+/// `Array` of `{ field, cats: [{ name, count }] }`. Shared by the index accessors and `RrsCatalog`.
+fn facets_meta_array(fields: &[Field]) -> Array {
+    let counts: Vec<Vec<u64>> = fields
+        .iter()
+        .map(|f| f.categories.iter().map(|c| c.count as u64).collect())
+        .collect();
+    facets_array_js(fields, &counts)
+}
+
+/// [`facets_meta_array`] over an optional sidecar; an empty array when no sidecar is present.
+fn facets_meta_js(facets: Option<&FacetIndex<WasmFetch>>) -> JsValue {
+    match facets {
+        Some(facets) => facets_meta_array(&facets.fields).into(),
+        None => Array::new().into(),
+    }
+}
+
+/// Parses the JS facet filter — an array of `[field, category]` pairs (e.g.
+/// `[["year","2020"],["type","article"]]`; within a field categories OR, across fields AND) —
+/// into `(field, category)` tuples. Throws if any entry is not a two-string array, so a malformed
+/// filter fails loudly rather than being silently dropped. An empty array means "no filter".
+fn filter_pairs(filters: &Array) -> Result<Vec<(String, String)>, JsError> {
+    let mut pairs = Vec::with_capacity(filters.length() as usize);
+    for entry in filters.iter() {
+        let pair: Array = entry
+            .dyn_into()
+            .map_err(|_| JsError::new("each facet filter must be a [field, category] array"))?;
+        let field = pair
+            .get(0)
+            .as_string()
+            .ok_or_else(|| JsError::new("facet filter field must be a string"))?;
+        let category = pair
+            .get(1)
+            .as_string()
+            .ok_or_else(|| JsError::new("facet filter category must be a string"))?;
+        pairs.push((field, category));
+    }
+    Ok(pairs)
+}
+
+/// Filters a ranked doc-ID list by the selected facet `pairs` and returns the survivors
+/// (input order preserved) plus search-filtered counts over them. Shared by the text index and
+/// the standalone facet binding.
 async fn filtered_ids(
     facets: Option<&FacetIndex<WasmFetch>>,
     ids: Vec<u32>,
-    filters: Vec<String>,
+    pairs: Vec<(String, String)>,
 ) -> Result<FilteredIds, JsError> {
     let kept = match facets {
-        Some(facets) if !filters.is_empty() => {
-            let pairs: Vec<(String, String)> = filters
-                .iter()
-                .filter_map(|entry| {
-                    let mut parts = entry.splitn(2, '\t');
-                    match (parts.next(), parts.next()) {
-                        (Some(field), Some(cat)) => Some((field.to_string(), cat.to_string())),
-                        _ => None,
-                    }
-                })
-                .collect();
+        Some(facets) if !pairs.is_empty() => {
             let filter = facets.resolve(&pairs);
             if filter.is_empty() {
                 ids
@@ -290,11 +268,8 @@ async fn filtered_ids(
         _ => ids,
     };
     let bitmap: RoaringBitmap = kept.iter().copied().collect();
-    let counts_json = facet_counts_json(facets, &bitmap);
-    Ok(FilteredIds {
-        ids: kept,
-        counts_json,
-    })
+    let counts = facet_counts_js(facets, &bitmap);
+    Ok(FilteredIds { ids: kept, counts })
 }
 
 /// A range-fetchable RRS index exposed to JavaScript. Optionally carries an
@@ -331,13 +306,12 @@ impl RrsIndex {
         Ok(())
     }
 
-    /// Returns the facet fields and their categories as a JSON string in the form
-    /// `[{"field":"<name>","cats":[{"name":"<name>","count":<u32>},...]},...]`.
-    /// Yields `"[]"` when no sidecar is open. Counts are full-corpus and free
-    /// (served from the in-memory meta region).
-    #[wasm_bindgen(js_name = facetsJson)]
-    pub fn facets_json(&self) -> String {
-        facets_meta_json(self.facets.as_ref())
+    /// Returns the facet fields and their categories as a JS array of
+    /// `{ field, cats: [{ name, count }] }`. An empty array when no sidecar is open. Counts are
+    /// full-corpus and free (served from the in-memory meta region).
+    #[wasm_bindgen(js_name = facets)]
+    pub fn facets(&self) -> JsValue {
+        facets_meta_js(self.facets.as_ref())
     }
 
     /// Returns up to `limit` matching doc IDs, most-popular first. Resolves to a
@@ -362,36 +336,24 @@ impl RrsIndex {
             .search_cursor(query, max_missing)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let counts_json = facet_counts_json(self.facets.as_ref(), inner.head_bitmap());
-        Ok(RrsCursor { inner, counts_json })
+        let counts = facet_counts_js(self.facets.as_ref(), inner.head_bitmap());
+        Ok(RrsCursor { inner, counts })
     }
 
     /// Like [`RrsIndex::search_cursor`] but ANDs the selected facets into the
-    /// result. Each `filters` entry is `"field\tcategory"` (tab-separated);
-    /// within a field categories OR, across fields they AND. The filter is
-    /// applied only when a sidecar is open and `filters` is non-empty. Resolves
-    /// to an `RrsCursor`.
+    /// result. `filters` is an array of `[field, category]` pairs (within a field categories OR,
+    /// across fields they AND); a malformed entry throws. The filter is applied only when a
+    /// sidecar is open and `filters` is non-empty. Resolves to an `RrsCursor`.
     #[wasm_bindgen(js_name = searchCursorFiltered)]
     pub async fn search_cursor_filtered(
         &self,
         query: String,
         max_missing: usize,
-        filters: Vec<String>,
+        filters: Array,
     ) -> Result<RrsCursor, JsError> {
+        let pairs = filter_pairs(&filters)?;
         let filter = match &self.facets {
-            Some(facets) if !filters.is_empty() => {
-                let pairs: Vec<(String, String)> = filters
-                    .iter()
-                    .filter_map(|entry| {
-                        let mut parts = entry.splitn(2, '\t');
-                        match (parts.next(), parts.next()) {
-                            (Some(field), Some(cat)) => Some((field.to_string(), cat.to_string())),
-                            _ => None,
-                        }
-                    })
-                    .collect();
-                Some(facets.resolve(&pairs))
-            }
+            Some(facets) if !pairs.is_empty() => Some(facets.resolve(&pairs)),
             _ => None,
         };
         let inner = self
@@ -399,25 +361,21 @@ impl RrsIndex {
             .search_cursor_filtered(&query, max_missing, filter)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let counts_json = facet_counts_json(self.facets.as_ref(), inner.head_bitmap());
-        Ok(RrsCursor { inner, counts_json })
+        let counts = facet_counts_js(self.facets.as_ref(), inner.head_bitmap());
+        Ok(RrsCursor { inner, counts })
     }
 
     /// Filters a ranked doc-ID list (e.g. semantic/vector hits) by the selected
     /// facets, preserving the input order, and returns the survivors plus
     /// search-filtered facet counts over them. Because `vector_id == doc_id`, the
     /// vector path reuses the same `RRSF` sidecar the trigram path uses — no
-    /// remapping. Each `filters` entry is `"field\tcategory"` (within a field
-    /// categories OR, across fields they AND). With no sidecar open or no
-    /// filters, the IDs pass through unchanged (counts still computed when a
-    /// sidecar is open). Resolves to a `FilteredIds`.
+    /// remapping. `filters` is an array of `[field, category]` pairs (within a field categories
+    /// OR, across fields they AND); a malformed entry throws. With no sidecar open or no filters,
+    /// the IDs pass through unchanged (counts still computed when a sidecar is open). Resolves to a
+    /// `FilteredIds`.
     #[wasm_bindgen(js_name = filterIds)]
-    pub async fn filter_ids(
-        &self,
-        ids: Vec<u32>,
-        filters: Vec<String>,
-    ) -> Result<FilteredIds, JsError> {
-        filtered_ids(self.facets.as_ref(), ids, filters).await
+    pub async fn filter_ids(&self, ids: Vec<u32>, filters: Array) -> Result<FilteredIds, JsError> {
+        filtered_ids(self.facets.as_ref(), ids, filter_pairs(&filters)?).await
     }
 
     /// Number of n-grams in the index dictionary.
@@ -432,7 +390,7 @@ impl RrsIndex {
 #[wasm_bindgen]
 pub struct FilteredIds {
     ids: Vec<u32>,
-    counts_json: String,
+    counts: JsValue,
 }
 
 #[wasm_bindgen]
@@ -443,11 +401,12 @@ impl FilteredIds {
         self.ids.clone()
     }
 
-    /// Search-filtered facet counts over the survivors, as a JSON string (same
-    /// shape as `facetsJson`). `"[]"` when no facet sidecar is open.
-    #[wasm_bindgen(js_name = countsJson)]
-    pub fn counts_json(&self) -> String {
-        self.counts_json.clone()
+    /// Search-filtered facet counts over the survivors, as a JS array of
+    /// `{ field, cats: [{ name, count }] }` (same shape as `facets()`); an empty array when no
+    /// facet sidecar is open.
+    #[wasm_bindgen(js_name = facetCounts)]
+    pub fn facet_counts(&self) -> JsValue {
+        self.counts.clone()
     }
 }
 
@@ -471,22 +430,18 @@ impl RrfFacets {
         Ok(RrfFacets { inner })
     }
 
-    /// Facet fields and categories with full-corpus counts, as a JSON string
-    /// (same shape as `RrsIndex.facetsJson`).
-    #[wasm_bindgen(js_name = facetsJson)]
-    pub fn facets_json(&self) -> String {
-        facets_meta_json(Some(&self.inner))
+    /// Facet fields and categories with full-corpus counts, as a JS array of
+    /// `{ field, cats: [{ name, count }] }` (same shape as `RrsIndex.facets()`).
+    #[wasm_bindgen(js_name = facets)]
+    pub fn facets(&self) -> JsValue {
+        facets_meta_js(Some(&self.inner))
     }
 
     /// Filters a ranked doc-ID list by the selected facets (same contract as
     /// `RrsIndex.filterIds`). Resolves to a `FilteredIds`.
     #[wasm_bindgen(js_name = filterIds)]
-    pub async fn filter_ids(
-        &self,
-        ids: Vec<u32>,
-        filters: Vec<String>,
-    ) -> Result<FilteredIds, JsError> {
-        filtered_ids(Some(&self.inner), ids, filters).await
+    pub async fn filter_ids(&self, ids: Vec<u32>, filters: Array) -> Result<FilteredIds, JsError> {
+        filtered_ids(Some(&self.inner), ids, filter_pairs(&filters)?).await
     }
 }
 
@@ -494,20 +449,19 @@ impl RrfFacets {
 #[wasm_bindgen]
 pub struct RrsCursor {
     inner: Cursor<WasmFetch>,
-    /// Search-filtered facet counts for this query, as a JSON string (same shape
-    /// as `facetsJson` but counts are restricted to this query's head result).
-    counts_json: String,
+    /// Search-filtered facet counts for this query (counts restricted to this query's head
+    /// result), prebuilt as a JS value at open time.
+    counts: JsValue,
 }
 
 #[wasm_bindgen]
 impl RrsCursor {
-    /// Returns the search-filtered facet counts as a JSON string in the form
-    /// `[{"field":"<name>","cats":[{"name":"<name>","count":<n>},...]},...]` —
-    /// how many of this query's results fall in each category. `"[]"` when no
-    /// facet sidecar is open.
-    #[wasm_bindgen(js_name = facetCountsJson)]
-    pub fn facet_counts_json(&self) -> String {
-        self.counts_json.clone()
+    /// The search-filtered facet counts as a JS array of `{ field, cats: [{ name, count }] }` —
+    /// how many of this query's results fall in each category; an empty array when no facet
+    /// sidecar is open.
+    #[wasm_bindgen(js_name = facetCounts)]
+    pub fn facet_counts(&self) -> JsValue {
+        self.counts.clone()
     }
 
     /// Returns the next `n` doc IDs as a `Uint32Array`. Pages within the head
@@ -663,24 +617,10 @@ impl RrsRecords {
 /// per-category `count`s come from `counts` (search-filtered). Returns `null`
 /// when no facet sidecar is attached (`counts` is `None`).
 fn facet_counts_to_js(fields: &[Field], counts: &Option<Vec<Vec<u64>>>) -> JsValue {
-    let Some(counts) = counts else {
-        return JsValue::NULL;
-    };
-    let out = Array::new_with_length(fields.len() as u32);
-    for (fi, field) in fields.iter().enumerate() {
-        let cats = Array::new_with_length(field.categories.len() as u32);
-        for (ci, cat) in field.categories.iter().enumerate() {
-            let obj = Object::new();
-            let _ = Reflect::set(&obj, &"name".into(), &cat.name.as_str().into());
-            let _ = Reflect::set(&obj, &"count".into(), &(counts[fi][ci] as f64).into());
-            cats.set(ci as u32, obj.into());
-        }
-        let obj = Object::new();
-        let _ = Reflect::set(&obj, &"field".into(), &field.name.as_str().into());
-        let _ = Reflect::set(&obj, &"cats".into(), &cats.into());
-        out.set(fi as u32, obj.into());
+    match counts {
+        Some(counts) => facets_array_js(fields, counts).into(),
+        None => JsValue::NULL,
     }
-    out.into()
 }
 
 /// A range-fetchable [`Catalog`] exposed to JavaScript: one object bundling the
@@ -791,9 +731,9 @@ impl RrsCatalog {
     /// `{ ids: Uint32Array, records: Array<Uint8Array|null> | null,
     /// facetCounts: Array<{field, cats:[{name, count}]}> | null }`.
     ///
-    /// `filters_json` is a JSON array of `[field, category]` pairs (e.g.
-    /// `[["format","ebook"],["language","en"]]`); `null`, `""`, or `"[]"` means
-    /// no filter. Within a field categories OR, across fields they AND. The page
+    /// `filters` is an array of `[field, category]` pairs (e.g.
+    /// `[["format","ebook"],["language","en"]]`); an empty array `[]` means no filter, and a
+    /// malformed entry throws. Within a field categories OR, across fields they AND. The page
     /// covers ranked doc IDs `[offset, offset+len)`; `max_missing` is the fuzzy
     /// tolerance (0 = strict). `records`/`facetCounts` are `null` unless the
     /// matching sidecar is attached.
@@ -803,9 +743,9 @@ impl RrsCatalog {
         offset: usize,
         len: usize,
         max_missing: usize,
-        filters_json: Option<String>,
+        filters: Array,
     ) -> Result<JsValue, JsError> {
-        let filter = parse_filters_json(filters_json.as_deref());
+        let filter = filter_pairs(&filters)?;
         let page = self
             .cat()
             .search(&query, offset, len, max_missing, &filter)
@@ -837,34 +777,12 @@ impl RrsCatalog {
         Ok(out.into())
     }
 
-    /// Returns the facet fields and their full-corpus category counts as a JSON
-    /// string `[{"field":"<name>","cats":[{"name":"<name>","count":<u32>},...]},...]`,
-    /// or `"[]"` when no facet sidecar is attached. Mirrors [`RrsIndex::facets_json`].
-    #[wasm_bindgen(js_name = facetsJson)]
-    pub fn facets_json(&self) -> String {
-        let fields = self.cat().fields();
-        let mut out = String::from("[");
-        for (fi, field) in fields.iter().enumerate() {
-            if fi > 0 {
-                out.push(',');
-            }
-            out.push_str("{\"field\":\"");
-            out.push_str(&json_escape(&field.name));
-            out.push_str("\",\"cats\":[");
-            for (ci, cat) in field.categories.iter().enumerate() {
-                if ci > 0 {
-                    out.push(',');
-                }
-                out.push_str("{\"name\":\"");
-                out.push_str(&json_escape(&cat.name));
-                out.push_str("\",\"count\":");
-                out.push_str(&cat.count.to_string());
-                out.push('}');
-            }
-            out.push_str("]}");
-        }
-        out.push(']');
-        out
+    /// Returns the facet fields and their full-corpus category counts as a JS array of
+    /// `{ field, cats: [{ name, count }] }`, or an empty array when no facet sidecar is attached.
+    /// Mirrors [`RrsIndex::facets`].
+    #[wasm_bindgen(js_name = facets)]
+    pub fn facets(&self) -> JsValue {
+        facets_meta_array(self.cat().fields()).into()
     }
 
     /// Number of n-grams in the index dictionary.
@@ -975,35 +893,6 @@ impl RrsLookup {
     }
 }
 
-/// Parses a JSON array of `[field, category]` string pairs into resolve input.
-/// Tolerant: a `None`, empty, or unparseable input yields no selections, and
-/// malformed entries are skipped. Avoids pulling in a JSON dependency by walking
-/// the value with `js_sys::JSON`.
-fn parse_filters_json(json: Option<&str>) -> Vec<(String, String)> {
-    let Some(json) = json else {
-        return Vec::new();
-    };
-    let trimmed = json.trim();
-    if trimmed.is_empty() || trimmed == "[]" {
-        return Vec::new();
-    }
-    let Ok(value) = js_sys::JSON::parse(trimmed) else {
-        return Vec::new();
-    };
-    let Ok(arr) = value.dyn_into::<Array>() else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(arr.length() as usize);
-    for entry in arr.iter() {
-        if let Ok(pair) = entry.dyn_into::<Array>() {
-            if let (Some(field), Some(cat)) = (pair.get(0).as_string(), pair.get(1).as_string()) {
-                out.push((field, cat));
-            }
-        }
-    }
-    out
-}
-
 /// A range-fetchable [`SortCols`] store exposed to JavaScript: dense columns
 /// indexed by doc ID, used to re-rank a materialized candidate set client-side
 /// (sort by rating / date / any secondary metric) and to map a secondary index's
@@ -1040,27 +929,23 @@ impl RrsSortCols {
 
     /// A JS array of the columns' `{ name, type }` (`type` is one of
     /// `"u16"`/`"u32"`/`"i32"`/`"f32"`), in stored order.
-    #[wasm_bindgen(js_name = columnsJson)]
-    pub fn columns_json(&self) -> String {
-        let parts: Vec<String> = self
-            .inner
-            .columns()
-            .iter()
-            .map(|c| {
-                let t = match c.value_type {
-                    crate::sortcols::ValueType::U16 => "u16",
-                    crate::sortcols::ValueType::U32 => "u32",
-                    crate::sortcols::ValueType::I32 => "i32",
-                    crate::sortcols::ValueType::F32 => "f32",
-                };
-                format!(
-                    "{{\"name\":\"{}\",\"type\":\"{}\"}}",
-                    json_escape(&c.name),
-                    t
-                )
-            })
-            .collect();
-        format!("[{}]", parts.join(","))
+    #[wasm_bindgen(js_name = columns)]
+    pub fn columns(&self) -> JsValue {
+        let cols = self.inner.columns();
+        let out = Array::new_with_length(cols.len() as u32);
+        for (i, c) in cols.iter().enumerate() {
+            let t = match c.value_type {
+                crate::sortcols::ValueType::U16 => "u16",
+                crate::sortcols::ValueType::U32 => "u32",
+                crate::sortcols::ValueType::I32 => "i32",
+                crate::sortcols::ValueType::F32 => "f32",
+            };
+            let obj = Object::new();
+            let _ = Reflect::set(&obj, &"name".into(), &c.name.as_str().into());
+            let _ = Reflect::set(&obj, &"type".into(), &t.into());
+            out.set(i as u32, obj.into());
+        }
+        out.into()
     }
 
     /// Values for `ids` in column `col`, as a `Float64Array` aligned with `ids`
@@ -1099,48 +984,6 @@ impl RrsSortCols {
             .await
             .map_err(|e| JsError::new(&e.to_string()))
     }
-}
-
-/// Serializes facet `fields` with their **full-corpus** counts to the
-/// `facetsJson` shape `[{"field":..,"cats":[{"name":..,"count":<u32>},..]},..]`.
-fn fields_json(fields: &[Field]) -> String {
-    let mut out = String::from("[");
-    for (fi, field) in fields.iter().enumerate() {
-        if fi > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"field\":\"");
-        out.push_str(&json_escape(&field.name));
-        out.push_str("\",\"cats\":[");
-        for (ci, cat) in field.categories.iter().enumerate() {
-            if ci > 0 {
-                out.push(',');
-            }
-            out.push_str("{\"name\":\"");
-            out.push_str(&json_escape(&cat.name));
-            out.push_str("\",\"count\":");
-            out.push_str(&cat.count.to_string());
-            out.push('}');
-        }
-        out.push_str("]}");
-    }
-    out.push(']');
-    out
-}
-
-/// Parses `"field\tcategory"` filter entries into `(field, category)` pairs,
-/// skipping malformed entries. Shared by the secondary filtered search.
-fn parse_tab_filters(filters: &[String]) -> Vec<(String, String)> {
-    filters
-        .iter()
-        .filter_map(|entry| {
-            let mut parts = entry.splitn(2, '\t');
-            match (parts.next(), parts.next()) {
-                (Some(field), Some(cat)) => Some((field.to_string(), cat.to_string())),
-                _ => None,
-            }
-        })
-        .collect()
 }
 
 /// A secondary full index exposed to JavaScript: a second `RRS` reindexed in an
@@ -1183,13 +1026,13 @@ impl RrsSecondaryIndex {
         Ok(())
     }
 
-    /// The facet fields with full-corpus counts as a JSON string (same shape as
-    /// [`RrsIndex::facets_json`]); `"[]"` when no sidecar is open.
-    #[wasm_bindgen(js_name = facetsJson)]
-    pub fn facets_json(&self) -> String {
+    /// The facet fields with full-corpus counts as a JS array of `{ field, cats: [{ name, count }]
+    /// }` (same shape as [`RrsIndex::facets`]); an empty array when no sidecar is open.
+    #[wasm_bindgen(js_name = facets)]
+    pub fn facets(&self) -> JsValue {
         match self.inner.as_ref() {
-            Some(sec) => fields_json(sec.fields()),
-            None => "[]".to_string(),
+            Some(sec) => facets_meta_array(sec.fields()).into(),
+            None => Array::new().into(),
         }
     }
 
@@ -1201,32 +1044,32 @@ impl RrsSecondaryIndex {
         query: String,
         max_missing: usize,
     ) -> Result<RrsSecondaryCursor, JsError> {
-        self.search_cursor_filtered(query, max_missing, Vec::new())
+        self.search_cursor_filtered(query, max_missing, Array::new())
             .await
     }
 
     /// Like [`RrsSecondaryIndex::search_cursor`] but ANDs the selected facets into
-    /// the result. Each `filters` entry is `"field\tcategory"` (tab-separated);
-    /// within a field categories OR, across fields they AND. Applied only when a
-    /// secondary sidecar is open and `filters` is non-empty.
+    /// the result. `filters` is an array of `[field, category]` pairs (within a field categories
+    /// OR, across fields they AND); a malformed entry throws. Applied only when a secondary
+    /// sidecar is open and `filters` is non-empty.
     #[wasm_bindgen(js_name = searchCursorFiltered)]
     pub async fn search_cursor_filtered(
         &self,
         query: String,
         max_missing: usize,
-        filters: Vec<String>,
+        filters: Array,
     ) -> Result<RrsSecondaryCursor, JsError> {
         let sec = self
             .inner
             .as_ref()
             .ok_or_else(|| JsError::new("secondary index unavailable"))?;
-        let pairs = parse_tab_filters(&filters);
+        let pairs = filter_pairs(&filters)?;
         let inner = sec
             .search_cursor_filtered(&query, max_missing, &pairs)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let counts_json = facet_counts_json(sec.facets(), inner.head_bitmap());
-        Ok(RrsSecondaryCursor { inner, counts_json })
+        let counts = facet_counts_js(sec.facets(), inner.head_bitmap());
+        Ok(RrsSecondaryCursor { inner, counts })
     }
 }
 
@@ -1236,19 +1079,28 @@ impl RrsSecondaryIndex {
 #[wasm_bindgen]
 pub struct RrsSecondaryCursor {
     inner: SecondaryCursor<WasmFetch>,
-    /// Search-filtered facet counts for this query (secondary-space head result,
-    /// identical to the primary order's counts), as a JSON string.
-    counts_json: String,
+    /// Search-filtered facet counts for this query (secondary-space head result, identical to the
+    /// primary order's counts), prebuilt as a JS value at open time.
+    counts: JsValue,
 }
 
 #[wasm_bindgen]
 impl RrsSecondaryCursor {
-    /// The search-filtered facet counts as a JSON string (same shape as
-    /// `facetsJson`, counts restricted to this query's result); `"[]"` when no
-    /// secondary sidecar is open.
-    #[wasm_bindgen(js_name = facetCountsJson)]
-    pub fn facet_counts_json(&self) -> String {
-        self.counts_json.clone()
+    /// The search-filtered facet counts as a JS array of `{ field, cats: [{ name, count }] }`
+    /// (same shape as `facets()`, counts restricted to this query's result); an empty array when
+    /// no secondary sidecar is open.
+    #[wasm_bindgen(js_name = facetCounts)]
+    pub fn facet_counts(&self) -> JsValue {
+        self.counts.clone()
+    }
+
+    /// The next `n` primary doc IDs in secondary rank order, advancing an internal position —
+    /// the sequential counterpart of [`page`](Self::page), matching `RrsCursor.next`.
+    pub async fn next(&mut self, n: usize) -> Result<Vec<u32>, JsError> {
+        self.inner
+            .next(n)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The page of primary doc IDs for the secondary-ordered results
@@ -1555,5 +1407,98 @@ impl RrtIndex {
     #[wasm_bindgen(js_name = isEmpty)]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
+    }
+}
+
+/// A [`SplitFetcher`] for the browser: resolves each split's `data_file` name (and the
+/// stable-key sort-column name) to a [`WasmFetch`] over `base_url/<name>`.
+#[cfg(feature = "splits")]
+struct WasmSplitResolver {
+    base: String,
+}
+
+#[cfg(feature = "splits")]
+impl crate::splitset::SplitFetcher for WasmSplitResolver {
+    type Fetch = WasmFetch;
+    fn fetch_named(&self, name: &str) -> WasmFetch {
+        WasmFetch::new(format!("{}/{}", self.base.trim_end_matches('/'), name))
+    }
+}
+
+/// A range-fetchable `RRSS` split set exposed to JavaScript. Boots the manifest in two ranged
+/// reads; each query opens (and prunes) the splits it needs, resolved as `base_url/<name>`.
+#[cfg(feature = "splits")]
+#[wasm_bindgen]
+pub struct RrssIndex {
+    inner: crate::splitset::SplitSet,
+    base: String,
+}
+
+#[cfg(feature = "splits")]
+#[wasm_bindgen]
+impl RrssIndex {
+    /// Boots the split-set manifest at `manifest_url`; per-split files (and the sort-column
+    /// store, if any) are fetched from `base_url/<name>`. Returns a `Promise<RrssIndex>`.
+    pub async fn open(manifest_url: String, base_url: String) -> Result<RrssIndex, JsError> {
+        let inner = crate::splitset::SplitSet::open(WasmFetch::new(manifest_url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrssIndex {
+            inner,
+            base: base_url,
+        })
+    }
+
+    /// Returns up to `limit` matching global doc IDs, ranked by policy (tiered short-circuit or
+    /// stable-key sort, with delta supersession). Resolves to a `Uint32Array`.
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<u32>, JsError> {
+        let resolver = WasmSplitResolver {
+            base: self.base.clone(),
+        };
+        self.inner
+            .search(&resolver, query, limit)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Like [`search`](Self::search) but ANDs a facet filter in. Args are `(query, limit,
+    /// filters)` — `limit` adjacent to `query`, options trailing, matching
+    /// `RrsIndex.searchCursorFiltered`. `filters` is an array of `[field, category]` pairs (within
+    /// a field categories OR, across fields AND; a malformed entry throws); each surviving split's
+    /// own `‹split›.rrf` sidecar resolves it, and a split lacking a selected field's categories is
+    /// pruned without a fetch. An empty `filters` is exactly [`search`](Self::search).
+    #[wasm_bindgen(js_name = searchFiltered)]
+    pub async fn search_filtered(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: Array,
+    ) -> Result<Vec<u32>, JsError> {
+        let pairs = filter_pairs(&filters)?;
+        let resolver = WasmSplitResolver {
+            base: self.base.clone(),
+        };
+        self.inner
+            .search_filtered(&resolver, query, &pairs, limit)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Number of splits named by the manifest (base + delta).
+    #[wasm_bindgen(js_name = splitCount)]
+    pub fn split_count(&self) -> usize {
+        self.inner.splits().len()
+    }
+
+    /// Number of delta splits flushed since the base (0 for a base-only set).
+    #[wasm_bindgen(js_name = deltaCount)]
+    pub fn delta_count(&self) -> usize {
+        self.inner.delta_splits().len()
+    }
+
+    /// Total on-S3 size of every split in bytes (the split set's footprint).
+    #[wasm_bindgen(js_name = totalBytes)]
+    pub fn total_bytes(&self) -> u64 {
+        self.inner.total_byte_size()
     }
 }

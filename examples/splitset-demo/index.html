@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>roaringrange — split-set demo</title>
+<style>
+  :root { color-scheme: light dark; --bg:#0f1117; --fg:#e6e8ee; --mut:#9aa3b2; --acc:#6ea8fe; --card:#171a23; --line:#262b38; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:18px 22px; border-bottom:1px solid var(--line); }
+  h1 { margin:0; font-size:18px; } h1 small { color:var(--mut); font-weight:400; }
+  main { max-width:860px; margin:0 auto; padding:22px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  input[type=search] { flex:1 1 320px; padding:10px 12px; font-size:15px; background:var(--card);
+    border:1px solid var(--line); border-radius:8px; color:var(--fg); }
+  .facets { margin:14px 0; display:flex; gap:18px; flex-wrap:wrap; }
+  .facet b { color:var(--mut); font-weight:600; margin-right:8px; }
+  label { margin-right:10px; white-space:nowrap; }
+  .stat { color:var(--mut); font-size:13px; margin:10px 0; }
+  .stat b { color:var(--fg); }
+  ul { list-style:none; padding:0; margin:14px 0; }
+  li { padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--card); margin-bottom:8px; }
+  li .t { font-weight:600; } li .m { color:var(--mut); font-size:13px; }
+  .pill { display:inline-block; background:#202636; color:var(--acc); border-radius:999px; padding:1px 9px; font-size:12px; margin-left:6px; }
+  code { background:#202636; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>roaringrange · <small>split-set (<code>RRSS</code>) demo — tiered pruning + term Bloom + facet filter, no backend</small></h1>
+</header>
+<main>
+  <div class="row">
+    <input id="q" type="search" placeholder="search titles (e.g. neural, quantum, blackhole)…" autocomplete="off" />
+  </div>
+  <div class="facets" id="facets"></div>
+  <div class="stat" id="stat">loading the split set…</div>
+  <ul id="results"></ul>
+</main>
+
+<script type="module">
+import init, { RrssIndex, RrsRecords } from "./roaringrange.js";
+
+const $ = (id) => document.getElementById(id);
+const DATA = "./data";          // where the split set + records live
+const K = 20;                   // page size
+
+let rrss = null, records = null;
+
+// The facet fields shown — must match what the builder wrote (see splitset_demo_data.rs).
+const FACETS = {
+  field: ["physics", "biology", "cs", "medicine", "astronomy"],
+  year:  ["2019", "2020", "2021", "2022", "2023"],
+};
+
+function renderFacetControls() {
+  $("facets").innerHTML = Object.entries(FACETS).map(([field, cats]) =>
+    `<div class="facet"><b>${field}</b>` +
+    cats.map(c => `<label><input type="checkbox" data-field="${field}" value="${c}"> ${c}</label>`).join("") +
+    `</div>`).join("");
+  $("facets").querySelectorAll("input").forEach(el => el.addEventListener("change", run));
+}
+
+// Selected facets as the wasm binding's [field, category] pairs.
+function selectedFilters() {
+  return [...$("facets").querySelectorAll("input:checked")].map(el => [el.dataset.field, el.value]);
+}
+
+async function run() {
+  if (!rrss) return;
+  const q = $("q").value.trim();
+  const filters = selectedFilters();
+  const t0 = performance.now();
+  const ids = q
+    ? await rrss.searchFiltered(q, K, filters)
+    : (filters.length ? await rrss.searchFiltered("", K, filters) : []);
+  const dt = (performance.now() - t0).toFixed(1);
+
+  // Fetch the records for the page (doc id == record id).
+  const recs = ids.length ? await records.getMany(Uint32Array.from(ids)) : [];
+  $("results").innerHTML = recs.map((bytes, i) => {
+    let r = {}; try { r = JSON.parse(new TextDecoder().decode(bytes)); } catch {}
+    return `<li><span class="t">${(r.title||"").replace(/&/g,"&amp;").replace(/</g,"&lt;")}</span>
+      <span class="pill">#${ids[i]}</span>
+      <div class="m">${r.field||""} · ${r.year||""}</div></li>`;
+  }).join("");
+  $("stat").innerHTML = `${ids.length} hit(s) in <b>${dt} ms</b> over <b>${rrss.splitCount()}</b> splits` +
+    (filters.length ? ` · facets ${filters.length}` : "") +
+    (q ? "" : (filters.length ? " · facet-only" : " · type a query or pick a facet"));
+}
+
+(async () => {
+  await init();
+  rrss = await RrssIndex.open(`${DATA}/index.rrss`, DATA);
+  records = await RrsRecords.open(`${DATA}/records.idx`, `${DATA}/records.bin`);
+  renderFacetControls();
+  $("q").addEventListener("input", () => { clearTimeout(window._t); window._t = setTimeout(run, 120); });
+  $("stat").innerHTML = `ready · <b>${rrss.splitCount()}</b> splits, ${(Number(rrss.totalBytes())/1024).toFixed(0)} KB on "S3" · type to search`;
+})().catch(e => { $("stat").textContent = "error: " + e; });
+</script>
+</body>
+</html>
