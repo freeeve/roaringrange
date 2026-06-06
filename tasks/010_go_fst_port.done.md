@@ -1,6 +1,58 @@
 # Task 010 — Byte-exact Go port of the `fst` crate (BurntSushi)
 
-**Status:** pending (scoping)
+**Status:** done 2026-06-06 (FST port + reader + fuzz + cross-language conformance).
+Integration into roaringrange's `go/` + the full RRTI `.rrt` Go writer remain (see Outcome).
+
+## Outcome (2026-06-06)
+
+A standalone pure-Go module at **`~/fst-go`** (module path `github.com/freeeve/fst`,
+package `fst`) builds and reads FSTs **byte-identical** to the Rust `fst` crate, pinned to
+**v0.4.7** (the version in `rust/Cargo.lock`). `Builder.Finish()` reproduces
+`fst::MapBuilder` bytes exactly — header, online-minimized nodes, footer, and trailing
+masked CRC32C. **Zero third-party Go deps** (only stdlib `hash/crc32` for the Castagnoli
+checksum).
+
+**What shipped (builder + reader + fuzz + conformance, the scope chosen):**
+- **Builder** (`builder.go`, `unfinished.go`, `node.go`, `registry.go`, `bytes.go`,
+  `common_inputs.go`, `crc32.go`): faithful port of `raw::Builder` — streaming Daciuk
+  minimization, the **bounded** LRU register (`10000×2`, FNV-1a) that decides dedup (not
+  perfect minimization), the three node encodings (OneTransNext / OneTrans / AnyTrans), the
+  common-inputs table, per-node pack sizes, reverse-order trans/output/input layout, the
+  256-byte index past 32 transitions, and `prefix=min`/`cat=add`/`sub=sub` output math.
+- **Reader** (`reader.go`): `New` (header/footer parse + checksum verify), `Get`, `Iter`
+  (in-order), and `Ge` (the router's `range().ge(term)` successor query). No automaton/fuzzy
+  path (RRTI sends fuzzy to the trigram `RRS`).
+- **Conformance** (`conformance_test.go` + `rustgen/`): corpora authored once in
+  `conformanceCorpora()` → `testdata/corpora.txt`; the Rust generator (`fst = "=0.4.7"`)
+  builds them → `testdata/fst_golden.txt`; the Go builder must match every golden byte. 13
+  corpora pass, incl. a 5000-key corpus (heavy dedup), `many_trans` (256-index), all
+  output pack-size boundaries, high bytes, UTF-8, and the real `router_like` RRTI shape.
+- **Fuzz** (`fuzz_test.go`): 400+ seeded round-trips, a native `FuzzRoundtrip` target (ran
+  clean, 27k+ execs), and `TestCrossLangFuzz` — **300 random corpora matched the Rust crate
+  byte-for-byte**. `go test ./...` green; gofmt + `cargo fmt --check` clean.
+
+**Resolved open questions:** worth the port? — yes, and done. builder-only vs reader? —
+builder **+** `get`/`range` reader. version pin? — **0.4.7** (track via `rust/Cargo.lock`;
+the golden is regenerated from the pinned crate).
+
+**Perf pass (allocation reduction + pprof, all output-byte-preserving — conformance still
+green):** `bench_test.go` benchmarks build + read with `ReportAllocs`. Builder allocs/op cut
+~97% (terms_20k 189124 → 4599) via an inline pending transition (was a heap `*lastTransition`
+per suffix byte), a transition-slice free list, and a pre-warmed minimization-register arena;
+`Get` is now **0 allocs/op** (reused stack scratch). Added `Builder.Reset()` for reuse (the
+fixed ~1 MB register is allocated once, not per build) → reused terms_20k build is **35
+allocs / 15.8 KB**, ~30% faster. The ~1 MB register floor on a fresh build is inherent (the
+`hash % 10000` bucketing fixes the table size). Profile via `-memprofile`/`-cpuprofile` +
+`go tool pprof` (see README Performance).
+
+**Remaining (NOT this pass — the "Full RRTI `.rrt` writer" option):** move/vendor `~/fst-go`
+into roaringrange's `go/` (e.g. `go/fst/`) and wire the cross-language test into
+`go/conformance/`; then port the `terms_dict` front-coded block codec + RRTI v2 header +
+roaring postings so Go emits a complete `.rrt`. The tokenizer/stemmer is task **011**.
+
+---
+
+### Original scoping notes (for reference)
 
 A Go package that builds (and reads) finite-state transducers **byte-identical** to the
 Rust `fst` crate (BurntSushi, v0.4.x — the term-dictionary layer behind `terms.rs`/RRTI).
