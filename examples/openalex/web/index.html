@@ -677,10 +677,7 @@
         <div class="metarow">
           <div class="stats">
             <span class="stat"><b id="ds-works">…</b> works</span>
-            <span class="stat"><b id="ds-index">…</b> text index</span>
-            <span class="stat"><b id="ds-records">…</b> records</span>
-            <span class="stat" id="ds-vectors-pill" hidden><b id="ds-vectors">…</b> vector index</span>
-            <span class="stat" id="ds-model-pill" hidden><b id="ds-model">…</b> embed model</span>
+            <span id="active-files" style="display:contents"></span>
             <span class="stat ghost">all static on S3 · range-fetched</span>
           </div>
         </div>
@@ -781,7 +778,7 @@
       // browser embeds the query with (no backend). doc IDs are shared with the
       // text index + record store, so results render through the same path.
       const DATASETS = {
-        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-1m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-1m-stem.rrt", rrviGemma: null },
+        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-1m-stem.rrt", rrviGemma: null },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
       };
@@ -820,7 +817,7 @@
       let rterm = null;             // RrtIndex — the FST term-index reader (whole-word/stemmed)
       let trigramAvailable = true;  // the text .rrs opened (false while the full index is still uploading)
       let facetSrc = null;          // facet source: the text index, or a standalone .rrf when the .rrs isn't up yet
-      const SEM_NPROBE = 32, SEM_K = 250, RRF_K = 60;  // vector probes, ranked depth (≈10 pages), RRF constant
+      const SEM_NPROBE = 8, SEM_K = 250, RRF_K = 60;  // vector probes (~1 MB/cluster over the 484M nlist=16384 index), ranked depth (≈10 pages), RRF constant
       // The ranked depth is the page-through ceiling, not a per-page cap: the nprobe
       // clusters are already range-fetched, so returning a deeper top-K is essentially
       // free (a larger heap over the same ADC scores — no extra network).
@@ -850,35 +847,67 @@
         facets: $("facets"), menutoggle: $("menutoggle"),
         perfbar: $("perfbar"), perftoggle: $("perftoggle"),
         perfrows: $("perfrows"), mBarNote: $("m-barnote"), mTotal: $("m-total"), mSummary: $("m-summary"),
-        dsWorks: $("ds-works"), dsIndex: $("ds-index"), dsRecords: $("ds-records"),
-        dsVectors: $("ds-vectors"), dsVectorsPill: $("ds-vectors-pill"),
-        dsModel: $("ds-model"), dsModelPill: $("ds-model-pill"),
+        dsWorks: $("ds-works"), activeFiles: $("active-files"),
         servermode: $("servermode"),
         lambdasem: $("lambdasem"), lambdasemWrap: $("lambdasem-wrap"),
       };
 
-      /* Fill the header dataset line: one HEAD per static file → Content-Length.
-         Same-origin so no CORS, and bodyless so it costs nothing; uses realFetch to
-         stay out of the per-query byte/request counters. The record offset index is
-         8 bytes/doc, so its length also yields the exact work count. Index = postings
-         (.rrs) + facets (.rrf); records = offsets (.idx) + blob (.bin). */
+      // Static file → URL, keyed for the per-mode size readout. A dataset may not
+      // ship every file (e.g. no vector/term index), in which case its URL is null.
+      const FILE_URLS = { rrs: RRS_URL, rrf: RRF_URL, idx: IDX_URL, bin: BIN_URL, rril: LOOKUP_URL, dict: DICT_URL, rrvi: RRVI_URL, rrm2: RRM2_URL, rrt: RRT_URL };
+      const fileSizes = {};   // file key → byte length (0 = unknown / not reachable)
+
+      /* True object size via a 1-byte ranged GET's Content-Range ("bytes 0-0/<total>").
+         HEAD is unreliable for this bucket (the largest objects answer 400 to HEAD),
+         and a bodyless ranged GET reads only the header. realFetch keeps the probe out
+         of the per-query byte/request meters. */
+      async function probeSize(url) {
+        if (!url) return 0;
+        try {
+          const r = await realFetch(url, { headers: { Range: "bytes=0-0" } });
+          const cr = r.headers.get("Content-Range");
+          const m = cr && cr.match(/\/(\d+)\s*$/);
+          if (m) return +m[1];
+          return +r.headers.get("content-length") || 0;
+        } catch (_) { return 0; }
+      }
+
+      /* Probe every static file once (in parallel), fill the works count from the
+         record offset index (8 bytes/doc), and render the per-mode files line. */
       async function loadDatasetStats() {
-        const head = async (url) => {
-          try { const r = await realFetch(url, { method: "HEAD" }); return +r.headers.get("content-length") || 0; }
-          catch (_) { return 0; }
-        };
-        const [rrs, rrf, idx, bin, rrvi, rrm2] = await Promise.all([
-          head(RRS_URL), head(RRF_URL), head(IDX_URL), head(BIN_URL),
-          RRVI_URL ? head(RRVI_URL) : 0, RRM2_URL ? head(RRM2_URL) : 0,
-        ]);
-        const docs = idx > 0 ? Math.round(idx / 8) - 1 : 0;
+        const keys = Object.keys(FILE_URLS).filter((k) => FILE_URLS[k]);
+        const sizes = await Promise.all(keys.map((k) => probeSize(FILE_URLS[k])));
+        keys.forEach((k, i) => { fileSizes[k] = sizes[i]; });
+        const docs = fileSizes.idx > 0 ? Math.round(fileSizes.idx / 8) - 1 : 0;
         if (docs > 0) els.dsWorks.textContent = fmtCount(docs);
-        // "text index" = postings + facet sidecar; while the full .rrs is still
-        // uploading only the facet sidecar reports, which is honest enough here.
-        if (rrs + rrf > 0) els.dsIndex.textContent = fmtBytes(rrs + rrf);
-        if (idx + bin > 0) els.dsRecords.textContent = fmtBytes(idx + bin);
-        if (rrvi > 0) { els.dsVectors.textContent = fmtBytes(rrvi); els.dsVectorsPill.hidden = false; }
-        if (rrm2 > 0) { els.dsModel.textContent = fmtBytes(rrm2); els.dsModelPill.hidden = false; }
+        renderActiveFiles();
+      }
+
+      /* The static files the selected search mode range-reads, with sizes and a total.
+         The record store (offsets + blob), the zstd dictionary, and the DOI lookup are
+         shared by every mode; the index file(s) differ by mode — .rrs/.rrf (trigram),
+         .rrt (term), .rrvi/.rrm2 (vector), or both for hybrid. Re-rendered on each
+         toggle. A file that didn't probe (e.g. a private/missing .rrt) shows "n/a". */
+      function renderActiveFiles() {
+        if (!els.activeFiles) return;
+        const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
+        const parts = [];
+        const add = (label, bytes) => parts.push({ label, bytes });
+        if (mode === "trigram" || mode === "hybrid") { add(".rrs", fileSizes.rrs); add(".rrf", fileSizes.rrf); }
+        if (mode === "term") add(".rrt", fileSizes.rrt);
+        if (mode === "semantic" || mode === "hybrid") { add(".rrvi", fileSizes.rrvi); add(".rrm2", fileSizes.rrm2); }
+        const records = (fileSizes.idx || 0) + (fileSizes.bin || 0);
+        if (records) add("records", records);
+        if (fileSizes.dict) add(".dict", fileSizes.dict);
+        if (fileSizes.rril) add(".rril", fileSizes.rril);
+        const total = parts.reduce((s, p) => s + (p.bytes || 0), 0);
+        const pill = (label, bytes) => bytes > 0
+          ? `<span class="stat"><b>${fmtBytes(bytes)}</b> ${label}</span>`
+          : `<span class="stat ghost">${label} n/a</span>`;
+        els.activeFiles.innerHTML =
+          `<span class="stat ghost">${mode} reads</span>` +
+          parts.map((p) => pill(p.label, p.bytes)).join("") +
+          (total > 0 ? `<span class="stat"><b>Σ ${fmtBytes(total)}</b></span>` : "");
       }
 
       /* facet field display names + which groups get a scroll box + text filter */
@@ -1318,13 +1347,14 @@
         if (!total && !tailPending) { els.resultcount.textContent = ""; return; }
         if (tailPending) {
           const lead = total
-            ? `<b>${fmt(total)}</b> popular result${total === 1 ? "" : "s"}`
+            ? `<b>${fmt(total)}</b>+ result${total === 1 ? "" : "s"}`
             : `Searching the full corpus`;
-          // Sparse head: the rest is auto-pulling. Rich head (a full page): offer
-          // it on demand rather than auto-fetching a possibly-huge tail.
-          const tailUI = total >= PAGE
-            ? ` · <button type="button" id="loadall" style="margin-left:2px;padding:2px 9px;border:1px solid #c7d2fe;border-radius:6px;background:#eef2ff;color:#3b5bdb;cursor:pointer;font:inherit;font-size:12px">load full results</button>`
-            : ` <span style="color:var(--ink-faint)">· loading the rest…</span>`;
+          // Paging fetches the tail incrementally (only the buckets each page spans),
+          // so Next is cheap. "Load all matches" is the explicit full scan that yields
+          // the exact total — over the 484M corpus that can be hundreds of MB.
+          const tailUI =
+            ` · <button type="button" id="loadall" style="margin-left:2px;padding:2px 9px;border:1px solid #c7d2fe;border-radius:6px;background:#eef2ff;color:#3b5bdb;cursor:pointer;font:inherit;font-size:12px">load all matches</button>` +
+            ` <span style="color:var(--ink-faint);font-size:12px">paging fetches more on demand; this scans every match (100s of MB)</span>`;
           els.resultcount.innerHTML = `${lead}${tailUI}`;
         } else {
           els.resultcount.innerHTML = `<b>${fmt(total)}</b> result${total === 1 ? "" : "s"}`;
@@ -1333,7 +1363,7 @@
 
       function updatePager() {
         const hasPrev = offset > 0;
-        const hasNext = offset + lastPage.length < lastTotal;
+        const hasNext = offset + lastPage.length < lastTotal || tailPending;
         els.prev.disabled = !hasPrev;
         els.next.disabled = !hasNext;
         if (!lastTotal) { els.pager.hidden = true; return; }
@@ -1350,25 +1380,19 @@
         if (!c) return;
         const seq = searchSeq;
         offset = Math.max(0, o);
-        // Lazy tail: page only the popular head until the full set is wanted (the
-        // auto-pull once a query settles, or a deep offset past the head). The
-        // tail load is timed on its own so it reports as a separate "tail" stat
-        // rather than clobbering the head's search numbers.
-        if (!tailLoaded && offset >= c.headCount() && c.pendingTail()) tailLoaded = true;
-        const willLoadTail = tailLoaded && c.pendingTail();
-        // Keep the already-rendered popular results on screen while the (possibly
-        // multi-second) tail loads in the background; only skeleton when fetching
-        // genuinely new page content.
-        if (!willLoadTail) skeletons(Math.min(PAGE, 8));
+        // Incremental tail: page() materializes only the container buckets (each a
+        // 64K-doc range, in citation-rank order) needed to fill this page, so a deep
+        // page fetches a few MB — not the whole (possibly hundreds-of-MB) tail. The
+        // exact total stays unknown until "load all matches" scans to the end, so
+        // loaded() is shown with a "+". A page that reaches past the popular head
+        // reports under "the rest"; head-only pages under "popular".
+        const intoTail = offset + PAGE > c.headCount();
+        skeletons(Math.min(PAGE, 8));
         const pgReq0 = reqs, pgByte0 = bytes, t0 = performance.now();
         let ids;
-        try {
-          if (willLoadTail) await c.loadTail();
-          const limit = tailLoaded ? PAGE : Math.min(PAGE, Math.max(0, c.headCount() - offset));
-          ids = await c.page(offset, limit);
-        }
+        try { ids = await c.page(offset, PAGE); }
         catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
-        const idxMs = extraMs + (performance.now() - t0);   // index work this call: head search, or the tail load
+        const idxMs = extraMs + (performance.now() - t0);   // index work this call: head search, or this page's tail buckets
         const idxReqs = openReqs + (reqs - pgReq0);
         const idxBytes = openBytes + (bytes - pgByte0);
         const page = Array.from(ids);
@@ -1380,8 +1404,8 @@
         if (seq !== searchSeq) return;   // a newer query superseded this page — drop the stale render
         for (const [id, rec] of map) recCache.set(id, rec);
         lastPage = page;
-        lastTotal = tailLoaded ? c.loaded() : c.headCount();
-        tailPending = !tailLoaded && c.pendingTail();
+        lastTotal = c.loaded();          // results materialized so far (a lower bound while pendingTail)
+        tailPending = c.pendingTail();
 
         renderCards(recCache);
         updateResultsHead();
@@ -1390,12 +1414,11 @@
         const summary = (lastTotal || tailPending)
           ? `${fmt(lastTotal)}${tailPending ? "+" : ""} result${lastTotal === 1 && !tailPending ? "" : "s"} in ${(idxMs + recMs).toFixed(0)} ms`
           : "no results";
-        if (willLoadTail) {
-          // This call fetched the lazy tail — report it on its own; the head's
-          // search and results stats from the first render stay put.
+        if (intoTail) {
           setPerf({
             tail: { ms: idxMs, reqs: idxReqs, bytes: idxBytes },
             tailresults: { ms: recMs, reqs: recReqs, bytes: recBytes },
+            headN: c.headCount(),
             summary,
           });
         } else {
@@ -1403,6 +1426,7 @@
             search: { ms: idxMs, reqs: idxReqs, bytes: idxBytes },
             results: { ms: recMs, reqs: recReqs, bytes: recBytes },
             headN: c.headCount(),
+            tail: null, tailresults: null,
             summary,
           });
         }
@@ -1502,15 +1526,23 @@
 
       const pageTo = (o) => (rankedIds ? goPageRanked(o) : serverMode ? goPageServer(o) : goPage(o));
 
-      /* -------- pull the full result set (the lazy tail); fired automatically once a query settles -------- */
+      /* -------- explicit full scan: materialize the entire tail intersection so the
+         exact total is known and every page is reachable. The expensive opt-in (the
+         whole tail can be hundreds of MB over the 484M corpus); normal paging never
+         calls this — page() loads the tail incrementally. -------- */
       async function loadAll() {
-        if (!cur || tailLoaded) return;
-        tailLoaded = true;   // goPage pulls the tail once, then pages over the full set
-        // Immediate feedback: the tail fetch can take seconds. Keep the popular
-        // results on screen and show that the full set is loading.
+        if (!cur || !cur.pendingTail()) return;
+        const seq = searchSeq;
         els.resultcount.innerHTML =
-          `<b>${fmt(lastTotal)}</b> popular result${lastTotal === 1 ? "" : "s"} <span style="color:var(--ink-faint)">· loading the rest…</span>`;
-        await goPage(0);
+          `<b>${fmt(lastTotal)}</b>+ result${lastTotal === 1 ? "" : "s"} <span style="color:var(--ink-faint)">· scanning every match…</span>`;
+        const r0 = reqs, b0 = bytes, t0 = performance.now();
+        try { await cur.loadTail(); }
+        catch (e) { els.mSummary.textContent = `error: ${e}`; return; }
+        if (seq !== searchSeq) return;
+        const tailMs = performance.now() - t0, tailReqs = reqs - r0, tailBytes = bytes - b0;
+        await goPage(offset);   // re-render the current page; total is now exact and the pager spans the full set
+        if (seq !== searchSeq) return;
+        setPerf({ tail: { ms: tailMs, reqs: tailReqs, bytes: tailBytes } });
       }
 
       let searchSeq = 0;   // bumped per query so a stale, slower earlier search can bail before rendering
@@ -1821,14 +1853,10 @@
         } catch (_) {}
         setPerf({ tail: null, tailresults: null });   // new query: clear any prior tail-load stat
         await goPage(resetPaging ? 0 : offset, openMs, openReqs, openBytes);
-        // Auto-pull only when the head can't even fill a page — there the user
-        // clearly wants more, and it's the "show the few, then pull the rest"
-        // case. A rich head (a full page of popular hits) stays put and offers an
-        // explicit "load full results" rather than auto-fetching a possibly-huge
-        // tail (a common query's tail can be tens of MB).
-        if (mySeq === searchSeq && cur && !tailLoaded && cur.pendingTail() && cur.headCount() < PAGE) {
-          autoPullTimer = setTimeout(() => { if (mySeq === searchSeq) loadAll(); }, AUTO_PULL_MS);
-        }
+        // The tail (full intersection of the remaining postings) is never auto-pulled:
+        // over the 484M corpus a common term's tail can be hundreds of MB, so it loads
+        // only via the explicit, cost-flagged "load all matches" affordance — even when
+        // the popular head is sparse.
       }
 
       /* -------- boot -------- */
@@ -1931,6 +1959,7 @@
           const triOnly = mode === "trigram";
           $("fuzzmode").style.display = triOnly ? "" : "none";
           const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = triOnly ? "" : "none";
+          renderActiveFiles();   // show the files this mode range-reads
           runSearch(true);
         }));
       els.resultcount.addEventListener("click", (e) => {
