@@ -1,62 +1,63 @@
-# RRS — roaring range search index (`RRSI`, version 2)
+# RRS — roaring range search index (`RRSI`, version 3)
 
 Range-fetchable layout for a [roaringsearch](https://github.com/freeeve/roaringsearch)
 trigram index. Designed so a browser queries a multi-million-doc index over HTTP Range
 requests with no backend: ~tens of KB one-time boot, then a few small ranged reads per
-query — independent of corpus size. Measured on a 9.6M-doc corpus: 51 KB boot, <200 KB
-worst query, 2–14 µs compute.
+query — independent of corpus size.
 
 All integers little-endian. Postings are standard **portable** RoaringBitmaps
 (Go `bm.ToBytes()` ⇄ Rust `RoaringBitmap::deserialize_from` — same spec, zero glue).
 
+**v3 vs v2.** v3 collapses each term's separate `[head][tail]` blobs into **one posting per
+term** and drops the header's `headBoundary`, shrinking the dict entry 24 → 20 B. The head was a
+build-time `[0, headBoundary)` prefix stored separately and directly addressed for the instant
+first page; v3 derives that prefix from the single posting's container directory instead (the
+reader's *eager prefix*), since container-level ranged reads (`TailScan`) already page any bucket.
+Doc IDs are still assigned in **descending rank (popularity)**, so a posting's leading container
+buckets are the most-popular docs.
+
 ## Layout
-**Header — 20 B**
+**Header — 16 B**
 | field | type | bytes | notes |
 |---|---|---|---|
 | magic | char[4] | 4 | `"RRSI"` |
-| version | u16 | 2 | `2` |
+| version | u16 | 2 | `3` |
 | gramSize | u16 | 2 | `3` |
 | ngrams | u32 | 4 | dictionary entry count |
 | stride | u32 | 4 | sparse-index stride (e.g. 512) |
-| headBoundary | u32 | 4 | doc-ID head/tail split — multiple of 65536, default 65536 |
 
-**Sparse index** — `sparseCount = ceil(ngrams/stride)` entries × 8 B, at offset `20`:
+**Sparse index** — `sparseCount = ceil(ngrams/stride)` entries × 8 B, at offset `16`:
 each entry is `key u64` = `dict[i*stride].key`. Downloaded once (tens of KB) and cached.
 
-**Dictionary** — `ngrams` × 24 B, **sorted by key asc**, at `dictStart = 20 + sparseCount*8`:
-| field | type | bytes |
-|---|---|---|
-| key | u64 | 8 |
-| headOffset | u64 | 8 | absolute file offset of the head posting |
-| headSize | u32 | 4 |
-| tailSize | u32 | 4 |
+**Dictionary** — `ngrams` × 20 B, **sorted by key asc**, at `dictStart = 16 + sparseCount*8`:
+| field | type | bytes | notes |
+|---|---|---|---|
+| key | u64 | 8 | |
+| offset | u64 | 8 | absolute file offset of the posting |
+| size | u32 | 4 | posting length in bytes |
 
-Tail is at `headOffset+headSize`, length `tailSize`. `fullSize = headSize + tailSize`.
-
-**Postings** — at `postingsStart = dictStart + ngrams*24`; per entry in dict order:
-`[ head bytes ][ tail bytes ]`, where
-- `head` = the posting restricted to docs `[0, headBoundary)`
-- `tail` = the posting restricted to docs `[headBoundary, ∞)`
-
-Both are independently-deserializable portable RoaringBitmaps. `headBoundary` (from the
-header) is a multiple of 65536 — a whole number of roaring containers; it defaults to
-65536 (one container) and may be raised for larger corpora. Doc IDs are assigned at build
-time in **descending rank (popularity)**, so the head holds the `headBoundary` most-popular
-docs — the top-K for any ranked query lives in the head.
+**Postings** — at `postingsStart = dictStart + ngrams*20`; per entry in dict order: one
+independently-deserializable portable RoaringBitmap of the term's docs at `[offset, offset+size)`.
+A portable bitmap is a sorted directory of containers keyed by `doc >> 16` (a 64K-doc "bucket")
+with an offset table, so a reader can range-read individual buckets without the whole posting.
 
 ## Reader
-- **boot:** read header (20 B) + sparse index (`sparseCount*8` B); keep keys + headBoundary in memory.
+- **boot:** read header (16 B) + sparse index (`sparseCount*8` B); keep keys in memory.
 - **lookup(key):** `b` = largest `i` with `sparseKeys[i] <= key` (in-memory binary search) →
-  read dict block `[dictStart + b*stride*24, + min(stride, ngrams-b*stride)*24)` →
-  binary-search the block for `key` → `(headOffset, headSize, tailSize)`.
-- **head(key):** read `[headOffset, headOffset+headSize)` (top-K candidates).
-- **tail(key):** read `[headOffset+headSize, +tailSize)` (only if the head doesn't yield K).
+  read dict block `[dictStart + b*stride*20, + min(stride, ngrams-b*stride)*20)` →
+  binary-search the block for `key` → `(offset, size)`.
+- **posting(key):** read `[offset, offset+size)` and deserialize.
+- **eager prefix:** the cursor fetches the first container bucket (docs `[0, 65536)` — the
+  top-ranked candidates, matching the `RRSF` facet head boundary) of each query term for the
+  instant first page + facet counts, then pages the buckets at or above it via container-level
+  ranged reads (`TailScan`), fetching only the buckets a page spans — never the whole posting.
 
 ## Query
 1. `keys = NgramKeys(query, gramSize)`; empty → no results.
-2. per key: `lookup` → `head()` → deserialize roaring.
-3. AND heads (smallest cardinality first); iterate ascending → first K doc IDs.
-4. if fewer than K, fetch `tail()`s and continue.
+2. per key: `lookup` → fetch the eager prefix → deserialize roaring.
+3. AND the eager prefixes (smallest cardinality first); iterate ascending → first K doc IDs.
+4. if fewer than K, page the postings' higher buckets in rank order and continue (a strict AND
+   reads only the containers each page spans; a facet filter is applied per bucket).
 
 ## n-gram key — reader must match the builder byte-for-byte (from roaringsearch `ngram.go`)
 `normalize(s)`: keep Unicode letters/digits, lowercase each rune. Per `gramSize`-rune window:

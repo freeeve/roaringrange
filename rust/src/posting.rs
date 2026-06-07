@@ -128,6 +128,24 @@ async fn read_posting_subset<F: RangeFetch>(
     fetch_containers(fetch, off, &needed).await
 }
 
+/// Fetches the first `eager_buckets` container buckets (keys `0..eager_buckets`, i.e. docs
+/// `[0, eager_buckets·65536)`) of the posting at `(off, len)` — the v3 eager-prefix read that
+/// replaces the v2 directly-addressed head blob. Reuses the container-seek path; a small or
+/// non-seekable posting is read whole and then trimmed to the prefix.
+pub(crate) async fn fetch_head_prefix<F: RangeFetch>(
+    fetch: &F,
+    off: u64,
+    len: usize,
+    eager_buckets: u16,
+) -> Result<RoaringBitmap, IndexError> {
+    let keys: Vec<u16> = (0..eager_buckets).collect();
+    let mut bm = read_posting_subset(fetch, off, len, &keys).await?;
+    // read_posting_subset returns the whole posting on the small/non-seekable fallback, so trim
+    // any docs at or above the prefix to keep the head exact.
+    bm.remove_range((eager_buckets as u32 * 65_536)..);
+    Ok(bm)
+}
+
 /// Fetches a posting's `needed` containers (in ascending offset order) and
 /// reassembles them into a standalone bitmap. The containers are coalesced into a
 /// few byte spans, bridging gaps up to SPAN_GAP, so a run of consecutive keys is
@@ -395,6 +413,7 @@ impl TailScan {
         tails: &[(u64, usize)],
         facet_fetch: Option<&F>,
         facet_fields: &[Vec<(u64, usize)>],
+        min_key: u16,
     ) -> Result<Option<TailScan>, IndexError> {
         let trigrams = match open_tail_dirs(fetch, tails).await? {
             Some(d) => d,
@@ -414,6 +433,9 @@ impl TailScan {
         // selected category can survive the filtered AND — so a selective facet
         // never reads trigram containers for buckets it would empty anyway.
         let mut keys = candidate_keys(&trigrams);
+        // Skip the buckets the cursor already loaded as the eager prefix (`< min_key`); this scan
+        // pages the rest. The keys are ascending, so this drops a prefix.
+        keys.retain(|&k| k >= min_key);
         for field in &facets {
             if keys.is_empty() {
                 break;
@@ -558,7 +580,7 @@ mod tests {
         let tails = vec![(oa, sa.len()), (ob, sb.len()), (oc, sc.len())];
         let want = block_on(tail_intersect_and(&fetch, &tails)).unwrap();
         for batch in [1usize, 2, 3, 100] {
-            let mut scan = block_on(TailScan::open(&fetch, &tails, None, &[]))
+            let mut scan = block_on(TailScan::open(&fetch, &tails, None, &[], 0))
                 .unwrap()
                 .unwrap();
             let mut got = RoaringBitmap::new();
@@ -617,9 +639,15 @@ mod tests {
         let tails = vec![ra, rb];
         let facet_fields = vec![vec![r1, r2]]; // one field, categories cat1/cat2
         for batch in [1usize, 2, 7, 100] {
-            let mut scan = block_on(TailScan::open(&fetch, &tails, Some(&fetch), &facet_fields))
-                .unwrap()
-                .unwrap();
+            let mut scan = block_on(TailScan::open(
+                &fetch,
+                &tails,
+                Some(&fetch),
+                &facet_fields,
+                0,
+            ))
+            .unwrap()
+            .unwrap();
             let mut got = RoaringBitmap::new();
             while !scan.exhausted() {
                 got |= block_on(scan.next_window(&fetch, Some(&fetch), batch)).unwrap();

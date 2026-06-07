@@ -6,9 +6,10 @@
 //!
 //! Reads are issued in concurrent waves so a query costs a near-constant number
 //! of round-trip "waves" regardless of how many n-grams it contains: one wave
-//! for the dict blocks, one for the head postings, and at most one more for the
-//! tail postings. Within a wave every independent ranged read is constructed up
-//! front and the batch is awaited together via [`futures::future::join_all`].
+//! for the dict blocks, one for each term's eager prefix (the leading container
+//! bucket), and then container-level ranged reads to page the higher buckets as
+//! a deep page needs them. Within a wave every independent ranged read is
+//! constructed up front and awaited together via [`futures::future::join_all`].
 
 use crate::fetch::{FetchError, RangeFetch};
 use crate::ngram::ngram_keys;
@@ -19,11 +20,21 @@ use std::fmt;
 
 /// `RRS` magic.
 const MAGIC: &[u8; 4] = b"RRSI";
-/// Header size in bytes: magic[4] + version[2] + gram[2] + ngrams[4] + stride[4] +
-/// head_boundary[4]. Kept in sync with `build::HEADER_SIZE`.
-const HEADER_SIZE: usize = 20;
-/// Dictionary entry size in bytes: key(8) + headOffset(8) + headSize(4) + tailSize(4).
-const DICT_ENTRY: usize = 24;
+/// Header size in bytes (v3): magic[4] + version[2] + gram[2] + ngrams[4] + stride[4]. The v2
+/// `head_boundary[4]` is gone (one posting per term). Kept in sync with `build::HEADER_SIZE`.
+const HEADER_SIZE: usize = 16;
+/// Dictionary entry size in bytes (v3): key(8) + offset(8) + size(4).
+const DICT_ENTRY: usize = 20;
+/// The accepted on-disk format version.
+const FORMAT_VERSION: u16 = 3;
+/// The eager-prefix bucket count: the cursor fetches the first `EAGER_BUCKETS` container buckets
+/// (docs `[0, EAGER_BUCKETS·65536)`) of a term's posting up front for the instant first page +
+/// facet counts, then `TailScan` pages the buckets at or above it. `1` (bucket 0 = the top 64K
+/// ranked docs) matches the `RRSF` facet head boundary, so a facet-filtered query's eager set and
+/// its tail scan partition the doc space consistently with the facet head/tail split.
+const EAGER_BUCKETS: u16 = 1;
+/// The doc-ID at which the eager prefix ends (`EAGER_BUCKETS · 65536`).
+const EAGER_DOC_BOUND: u32 = EAGER_BUCKETS as u32 * 65_536;
 
 /// An error from opening or querying an index.
 #[derive(Debug)]
@@ -71,13 +82,12 @@ impl From<FetchError> for IndexError {
     }
 }
 
-/// A parsed dictionary entry locating a posting's head and tail.
+/// A parsed dictionary entry locating a term's posting `[offset, offset+size)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DictRec {
     key: u64,
-    head_offset: u64,
-    head_size: u32,
-    tail_size: u32,
+    offset: u64,
+    size: u32,
 }
 
 /// The byte range of a single dictionary block, derived purely from the
@@ -117,8 +127,6 @@ pub struct Index<F: RangeFetch> {
     ngrams: u32,
     /// Sparse-index stride.
     stride: u32,
-    /// Doc-ID boundary between head and tail: the head holds docs `[0, head_boundary)`.
-    head_boundary: u32,
     /// First byte of the dictionary block.
     dict_start: u64,
     /// In-memory sparse index: `sparse_keys[i] == dict[i*stride].key`.
@@ -137,13 +145,12 @@ impl<F: RangeFetch> Index<F> {
             return Err(IndexError::BadMagic(m));
         }
         let version = read_u16(&header, 4);
-        if version != 2 {
+        if version != FORMAT_VERSION {
             return Err(IndexError::BadVersion(version));
         }
         let gram_size = read_u16(&header, 6);
         let ngrams = read_u32(&header, 8);
         let stride = read_u32(&header, 12);
-        let head_boundary = read_u32(&header, 16);
 
         let sparse_count = sparse_count(ngrams, stride);
         let sparse_bytes = fetch.read(HEADER_SIZE as u64, sparse_count * 8).await?;
@@ -158,13 +165,12 @@ impl<F: RangeFetch> Index<F> {
             gram_size,
             ngrams,
             stride,
-            head_boundary,
             dict_start,
             sparse_keys,
         })
     }
 
-    /// Boots from a **resident** boot region instead of fetching it — the header (20 B) plus
+    /// Boots from a **resident** boot region instead of fetching it — the header (16 B) plus
     /// the sparse index, i.e. the bytes `[0, dictStart)`. This is the zero-round-trip open a
     /// boot accelerator (an `RRHC` bundle, or a split set's inlined tier-0 boots) uses: the
     /// caller already holds those bytes, so only the per-query dict/posting reads go through
@@ -180,13 +186,12 @@ impl<F: RangeFetch> Index<F> {
             return Err(IndexError::BadMagic(m));
         }
         let version = read_u16(boot, 4);
-        if version != 2 {
+        if version != FORMAT_VERSION {
             return Err(IndexError::BadVersion(version));
         }
         let gram_size = read_u16(boot, 6);
         let ngrams = read_u32(boot, 8);
         let stride = read_u32(boot, 12);
-        let head_boundary = read_u32(boot, 16);
 
         let sparse_count = sparse_count(ngrams, stride);
         let dict_start = HEADER_SIZE + sparse_count * 8;
@@ -204,7 +209,6 @@ impl<F: RangeFetch> Index<F> {
             gram_size,
             ngrams,
             stride,
-            head_boundary,
             dict_start: dict_start as u64,
             sparse_keys,
         })
@@ -225,12 +229,6 @@ impl<F: RangeFetch> Index<F> {
     /// Number of n-grams in the dictionary.
     pub fn ngram_count(&self) -> u32 {
         self.ngrams
-    }
-
-    /// Doc-ID boundary between head and tail postings: the head holds docs
-    /// `[0, head_boundary)`. Recorded in the header at build time.
-    pub fn head_boundary(&self) -> u32 {
-        self.head_boundary
     }
 
     /// Computes the dictionary block that would contain `key`, purely from the
@@ -270,9 +268,8 @@ impl<F: RangeFetch> Index<F> {
                     let base = mid * DICT_ENTRY;
                     return Some(DictRec {
                         key,
-                        head_offset: read_u64(block, base + 8),
-                        head_size: read_u32(block, base + 16),
-                        tail_size: read_u32(block, base + 20),
+                        offset: read_u64(block, base + 8),
+                        size: read_u32(block, base + 16),
                     });
                 }
             }
@@ -299,53 +296,38 @@ impl<F: RangeFetch> Index<F> {
         }
     }
 
-    /// Returns the head posting (docs `[0, 65536)`) for `key`, or `Ok(None)` if
-    /// the key is absent. One ranged dict-block read plus one ranged posting
-    /// read.
-    pub async fn head(&self, key: u64) -> Result<Option<RoaringBitmap>, IndexError> {
+    /// Returns the full posting (all docs) for `key`, or `Ok(None)` if the key is absent. One
+    /// ranged dict-block read plus one ranged posting read.
+    pub async fn posting(&self, key: u64) -> Result<Option<RoaringBitmap>, IndexError> {
         match self.lookup(key).await? {
             None => Ok(None),
             Some(rec) => {
-                let bytes = self
-                    .fetch
-                    .read(rec.head_offset, rec.head_size as usize)
-                    .await?;
+                let bytes = self.fetch.read(rec.offset, rec.size as usize).await?;
                 Ok(Some(deserialize(&bytes)?))
             }
         }
     }
 
-    /// Returns the tail posting (docs `[65536, ∞)`) for `key`, or `Ok(None)` if
-    /// the key is absent. One ranged dict-block read plus one ranged posting
-    /// read.
-    pub async fn tail(&self, key: u64) -> Result<Option<RoaringBitmap>, IndexError> {
-        match self.lookup(key).await? {
-            None => Ok(None),
-            Some(rec) => {
-                let off = rec.head_offset.saturating_add(rec.head_size as u64);
-                let bytes = self.fetch.read(off, rec.tail_size as usize).await?;
-                Ok(Some(deserialize(&bytes)?))
-            }
-        }
-    }
-
-    /// Reads the posting bytes for every key in `recs` concurrently and
-    /// deserializes each. `range_of` maps a [`DictRec`] to the `(offset, len)`
-    /// of the posting half to read (head or tail). All reads are issued before
-    /// any is awaited so they proceed as a single concurrent wave.
-    async fn fetch_postings(
+    /// Fetches each term's **eager prefix** — the first [`EAGER_BUCKETS`] container buckets of
+    /// its posting (docs `[0, EAGER_DOC_BOUND)`) — concurrently, as one wave. This is the v3
+    /// replacement for the directly-addressed head blob: the candidate set for the instant first
+    /// page (and facet counts), intersected by the caller; the rest is paged by [`TailScan`].
+    async fn fetch_head_prefixes(
         &self,
         recs: &[DictRec],
-        range_of: impl Fn(&DictRec) -> (u64, usize),
     ) -> Result<Vec<RoaringBitmap>, IndexError> {
         let reads = recs.iter().map(|rec| {
-            let (off, len) = range_of(rec);
-            self.fetch.read(off, len)
+            crate::posting::fetch_head_prefix(
+                &self.fetch,
+                rec.offset,
+                rec.size as usize,
+                EAGER_BUCKETS,
+            )
         });
         let results = join_all(reads).await;
         let mut bitmaps = Vec::with_capacity(results.len());
-        for bytes in results {
-            bitmaps.push(deserialize(&bytes?)?);
+        for r in results {
+            bitmaps.push(r?);
         }
         Ok(bitmaps)
     }
@@ -405,10 +387,9 @@ impl<F: RangeFetch> Index<F> {
             }
         }
 
-        // WAVE 2: fetch every head posting concurrently, deserialize, intersect.
-        let heads = self
-            .fetch_postings(&recs, |rec| (rec.head_offset, rec.head_size as usize))
-            .await?;
+        // WAVE 2: fetch every term's eager prefix (first EAGER_BUCKETS buckets) concurrently,
+        // intersect — the cheap top-ranked candidates for the common case.
+        let heads = self.fetch_head_prefixes(&recs).await?;
         let head_and = Self::intersect(heads).unwrap_or_default();
 
         let mut out: Vec<u32> = head_and.iter().take(limit).collect();
@@ -416,24 +397,18 @@ impl<F: RangeFetch> Index<F> {
             return Ok(out);
         }
 
-        // WAVE 3 (only if the head AND under-fills the limit): intersect the
-        // tails with container-level ranged reads — the rarest tail in full,
-        // then only the containers of the rest that overlap surviving candidates
-        // — so a rare phrase of common trigrams costs KB, not every full posting.
-        // Append docs >= 65536.
-        let tail_ranges: Vec<(u64, usize)> = recs
+        // WAVE 3 (only if the eager prefix under-fills the limit): intersect the whole postings
+        // with container-level ranged reads — the rarest posting in full, then only the
+        // containers of the rest that overlap surviving candidates — so a rare phrase of common
+        // trigrams costs KB, not every full posting. Append docs at/above the eager prefix.
+        let ranges: Vec<(u64, usize)> = recs
             .iter()
-            .map(|rec| {
-                (
-                    rec.head_offset.saturating_add(rec.head_size as u64),
-                    rec.tail_size as usize,
-                )
-            })
+            .map(|rec| (rec.offset, rec.size as usize))
             .collect();
-        let tail_and = crate::posting::tail_intersect_and(&self.fetch, &tail_ranges).await?;
-        for doc in tail_and.iter() {
-            if doc < self.head_boundary {
-                continue; // malformed tail; the head already covers sub-boundary docs
+        let full_and = crate::posting::tail_intersect_and(&self.fetch, &ranges).await?;
+        for doc in full_and.iter() {
+            if doc < EAGER_DOC_BOUND {
+                continue; // already covered by the eager prefix above
             }
             if out.len() >= limit {
                 break;
@@ -471,21 +446,12 @@ impl<F: RangeFetch> Index<F> {
             }
         }
         // Seed from the k rarest postings (smallest serialized size).
-        recs.sort_by_key(|r| r.head_size as u64 + r.tail_size as u64);
+        recs.sort_by_key(|r| r.size as u64);
         recs.truncate(k.min(recs.len()));
         let mut postings = Vec::with_capacity(recs.len());
         for rec in &recs {
-            let head = self
-                .fetch
-                .read(rec.head_offset, rec.head_size as usize)
-                .await?;
-            let mut full = deserialize(&head)?;
-            if rec.tail_size > 0 {
-                let off = rec.head_offset.saturating_add(rec.head_size as u64);
-                let tail = self.fetch.read(off, rec.tail_size as usize).await?;
-                full |= deserialize(&tail)?;
-            }
-            postings.push(full);
+            let bytes = self.fetch.read(rec.offset, rec.size as usize).await?;
+            postings.push(deserialize(&bytes)?);
         }
         Ok(Self::intersect(postings)
             .unwrap_or_default()
@@ -545,9 +511,7 @@ impl<F: RangeFetch> Index<F> {
         if recs.len() < min_match {
             return Ok(Cursor::empty(self.fetch.clone())); // threshold unreachable
         }
-        let heads = self
-            .fetch_postings(&recs, |rec| (rec.head_offset, rec.head_size as usize))
-            .await?;
+        let heads = self.fetch_head_prefixes(&recs).await?;
         let mut head_result = threshold(heads, min_match).unwrap_or_default();
 
         // Drop a no-constraint filter so the cursor never does facet tail reads.
@@ -726,12 +690,7 @@ impl<F: RangeFetch> Cursor<F> {
         let ranges: Vec<(u64, usize)> = self
             .recs
             .iter()
-            .map(|rec| {
-                (
-                    rec.head_offset.saturating_add(rec.head_size as u64),
-                    rec.tail_size as usize,
-                )
-            })
+            .map(|rec| (rec.offset, rec.size as usize))
             .collect();
 
         // Incremental path: a strict AND pages the tail in doc-ID (rank) order,
@@ -760,6 +719,7 @@ impl<F: RangeFetch> Cursor<F> {
                     &ranges,
                     facet_fetch,
                     &facet_fields,
+                    EAGER_BUCKETS,
                 )
                 .await?;
                 self.tail_scan_tried = true;
@@ -796,6 +756,8 @@ impl<F: RangeFetch> Cursor<F> {
             }
             threshold(tails, self.min_match).unwrap_or_default()
         };
+        // The ranges are whole postings now, so drop the eager prefix the head already covers.
+        tail_and.remove_range(0..EAGER_DOC_BOUND);
         if !tail_and.is_empty() {
             if let Some(f) = &self.filter {
                 tail_and &= f.tail_bitmap().await?;
@@ -852,7 +814,7 @@ impl<F: RangeFetch> Cursor<F> {
 /// 20-byte header plus the sparse index (`sparse_count(ngrams, stride) * 8`), i.e. the
 /// `[0, dictStart)` region [`Index::from_boot`] consumes. A bundle builder
 /// ([`crate::splitset_bundle`]) calls this to slice each split's boot region without
-/// materializing the whole index. `header` must hold at least the 20-byte header; errors on a
+/// materializing the whole index. `header` must hold at least the 16-byte header; errors on a
 /// short header, bad magic, or an unexpected version (the same checks as [`Index::from_boot`]).
 pub fn rrs_boot_len(header: &[u8]) -> Result<usize, IndexError> {
     if header.len() < HEADER_SIZE {
@@ -864,7 +826,7 @@ pub fn rrs_boot_len(header: &[u8]) -> Result<usize, IndexError> {
         return Err(IndexError::BadMagic(m));
     }
     let version = read_u16(header, 4);
-    if version != 2 {
+    if version != FORMAT_VERSION {
         return Err(IndexError::BadVersion(version));
     }
     let ngrams = read_u32(header, 8);
@@ -952,7 +914,7 @@ mod tests {
     /// tail no longer pending. Exercises the incremental ensure() path end to end.
     #[test]
     fn cursor_pages_match_full_tail_load() {
-        use crate::build::{split_posting, write_index};
+        use crate::build::{serialize_posting, write_index};
         use crate::ngram::ngram_keys;
         use crate::MemoryFetch;
         use futures::executor::block_on;
@@ -966,15 +928,12 @@ mod tests {
             b
         }
         fn rrs(entries: &[(u64, RoaringBitmap)]) -> MemoryFetch {
-            let posts: Vec<(u64, Vec<u8>, Vec<u8>)> = entries
+            let posts: Vec<(u64, Vec<u8>)> = entries
                 .iter()
-                .map(|(k, b)| {
-                    let (h, t) = split_posting(b, 65536);
-                    (*k, h, t)
-                })
+                .map(|(k, b)| (*k, serialize_posting(b)))
                 .collect();
             let mut out = Vec::new();
-            write_index(&mut out, 3, 2, 65536, posts).unwrap();
+            write_index(&mut out, 3, 2, posts).unwrap();
             MemoryFetch::new(out)
         }
 
@@ -991,7 +950,7 @@ mod tests {
         assert_eq!(want, vec![0, 1, 2, 70000, 70001, 140000, 200000, 5_000_000]);
 
         let mut cur = block_on(idx.search_cursor("aaab", 0)).unwrap();
-        assert_eq!(cur.head_count(), 3); // docs 0,1,2 are < 65536
+        assert_eq!(cur.head_count(), 3); // eager prefix = bucket 0 (< 65536): docs 0,1,2
         assert!(cur.pending_tail());
         let mut got = Vec::new();
         let mut off = 0;

@@ -980,6 +980,22 @@ export class RrssIndex {
         return ret >>> 0;
     }
     /**
+     * Per-(field, category) facet counts over `ids` (global doc IDs — typically a query's ranked
+     * result from `search`/`searchFiltered`), as a JS `Array<{ field, cats: [{ name, count }] }>`
+     * — the same shape the monolith's facet accessors return. Each contributing split's own
+     * `‹split›.rrf` sidecar is opened and counted; counts are summed by category name (split sets
+     * carry no global category table). Categories the result never hits are omitted (the demo
+     * renders missing keys as `0`). Resolves to that array.
+     * @param {Uint32Array} ids
+     * @returns {Promise<any>}
+     */
+    facetCounts(ids) {
+        const ptr0 = passArray32ToWasm0(ids, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssindex_facetCounts(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
      * Whether this set was booted from an `RRHC` boot bundle ([`openBundle`](Self::open_bundle)),
      * i.e. its split boots are resident and split opens skip the per-split header GET.
      * @returns {boolean}
@@ -1433,7 +1449,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 287, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 297, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h604311912c671172);
             return ret;
         },

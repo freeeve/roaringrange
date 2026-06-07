@@ -20,11 +20,13 @@ pub const DEFAULT_HEAD_BOUNDARY: u32 = 65_536;
 #[cfg(test)]
 pub(crate) const HEAD_BOUNDARY: u32 = DEFAULT_HEAD_BOUNDARY;
 
-/// RRS header size: magic[4] + version[2] + gram[2] + ngrams[4] + stride[4] +
-/// head_boundary[4]. Kept in sync with the reader's `index::HEADER_SIZE`.
-pub(crate) const HEADER_SIZE: usize = 20;
-/// RRS format version written into the header.
-pub(crate) const FORMAT_VERSION: u16 = 2;
+/// RRS header size (v3): magic[4] + version[2] + gram[2] + ngrams[4] + stride[4]. The v2
+/// `head_boundary[4]` is gone — v3 stores one posting per term (no head/tail split). Kept in
+/// sync with the reader's `index::HEADER_SIZE`.
+pub(crate) const HEADER_SIZE: usize = 16;
+/// RRS format version written into the header. v3 collapsed the head/tail postings into one
+/// bitmap per term and shrank the dict entry 24 → 20 B (see `FORMAT.md`).
+pub(crate) const FORMAT_VERSION: u16 = 3;
 
 use crate::facet::facet_key;
 
@@ -50,16 +52,24 @@ pub fn split_posting(bm: &RoaringBitmap, head_boundary: u32) -> (Vec<u8>, Vec<u8
 /// Default sparse-index stride (matches Go `DefaultStride`).
 pub const DEFAULT_STRIDE: u32 = 512;
 
-/// Writes the `RRS` index for the given postings to `w`. Each entry is
-/// `(key, head_bytes, tail_bytes)` from [`split_posting`]; entries are sorted by
-/// key here (the dictionary must be key-sorted). A `stride` of 0 becomes
+/// Serializes `bm` as one v3 `RRS` posting — a single portable RoaringBitmap (no head/tail
+/// split). The build-side companion of [`write_index`]; replaces [`split_posting`] for the
+/// trigram index (which keeps it only for the `RRSF`/`RRTI` formats).
+pub fn serialize_posting(bm: &RoaringBitmap) -> Vec<u8> {
+    let mut v = Vec::with_capacity(bm.serialized_size());
+    bm.serialize_into(&mut v).expect("serialize posting bitmap");
+    v
+}
+
+/// Writes the v3 `RRS` index for the given postings to `w`. Each entry is `(key, posting_bytes)`
+/// — one portable RoaringBitmap per term (from [`serialize_posting`]), no head/tail split.
+/// Entries are sorted by key here (the dictionary must be key-sorted). A `stride` of 0 becomes
 /// [`DEFAULT_STRIDE`]. See `FORMAT.md`.
 pub fn write_index<W: Write>(
     mut w: W,
     gram_size: u16,
     stride: u32,
-    head_boundary: u32,
-    mut entries: Vec<(u64, Vec<u8>, Vec<u8>)>,
+    mut entries: Vec<(u64, Vec<u8>)>,
 ) -> io::Result<()> {
     entries.sort_by_key(|e| e.0);
     let stride = if stride == 0 { DEFAULT_STRIDE } else { stride };
@@ -70,35 +80,32 @@ pub fn write_index<W: Write>(
         (ngrams as usize).div_ceil(stride as usize)
     };
     let dict_start = HEADER_SIZE + sparse_count * 8;
-    let postings_start = dict_start + entries.len() * 24;
+    let postings_start = dict_start + entries.len() * 20;
 
-    // Header: magic, version, gram, ngrams, stride, head_boundary.
+    // Header (v3): magic, version, gram, ngrams, stride. No head_boundary.
     w.write_all(b"RRSI")?;
     w.write_all(&FORMAT_VERSION.to_le_bytes())?;
     w.write_all(&gram_size.to_le_bytes())?;
     w.write_all(&ngrams.to_le_bytes())?;
     w.write_all(&stride.to_le_bytes())?;
-    w.write_all(&head_boundary.to_le_bytes())?;
 
     // Sparse index: dict[i*stride].key.
     for i in 0..sparse_count {
         w.write_all(&entries[i * stride as usize].0.to_le_bytes())?;
     }
 
-    // Dictionary (24 B each) with absolute posting offsets.
+    // Dictionary (20 B each): key + absolute posting offset + size.
     let mut off = postings_start as u64;
-    for (key, head, tail) in &entries {
+    for (key, posting) in &entries {
         w.write_all(&key.to_le_bytes())?;
         w.write_all(&off.to_le_bytes())?;
-        w.write_all(&(head.len() as u32).to_le_bytes())?;
-        w.write_all(&(tail.len() as u32).to_le_bytes())?;
-        off += (head.len() + tail.len()) as u64;
+        w.write_all(&(posting.len() as u32).to_le_bytes())?;
+        off += posting.len() as u64;
     }
 
-    // Postings: [head][tail] per entry, in dict order.
-    for (_, head, tail) in &entries {
-        w.write_all(head)?;
-        w.write_all(tail)?;
+    // Postings: one bitmap per entry, in dict order.
+    for (_, posting) in &entries {
+        w.write_all(posting)?;
     }
     Ok(())
 }
@@ -667,7 +674,7 @@ const COL_ENTRY_SORTCOLS: usize = 24;
 /// so peak memory is one key's postings plus a small dictionary — not the whole
 /// index — and the reader/format are unchanged.
 pub mod chunk {
-    use super::{split_posting, DEFAULT_STRIDE, FORMAT_VERSION, HEADER_SIZE};
+    use super::{serialize_posting, DEFAULT_STRIDE, FORMAT_VERSION, HEADER_SIZE};
     use roaring::RoaringBitmap;
     use std::fs::File;
     use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
@@ -750,7 +757,6 @@ pub mod chunk {
         paths: &[PathBuf],
         gram_size: u16,
         stride: u32,
-        head_boundary: u32,
         out: &mut File,
     ) -> io::Result<()> {
         let stride = if stride == 0 { DEFAULT_STRIDE } else { stride };
@@ -770,14 +776,14 @@ pub mod chunk {
             n.div_ceil(stride as usize)
         };
         let dict_start = HEADER_SIZE + sparse_count * 8;
-        let postings_start = (dict_start + n * 24) as u64;
+        let postings_start = (dict_start + n * 20) as u64;
 
-        // Pass B: k-way merge by key, writing postings; record dict entries in order.
+        // Pass B: k-way merge by key, writing one posting per key; record dict entries in order.
         let mut cursors: Vec<PartialCursor> = paths
             .iter()
             .map(PartialCursor::open)
             .collect::<io::Result<_>>()?;
-        let mut dict: Vec<(u64, u64, u32, u32)> = Vec::with_capacity(n);
+        let mut dict: Vec<(u64, u64, u32)> = Vec::with_capacity(n);
         out.seek(SeekFrom::Start(postings_start))?;
         let mut off = postings_start;
 
@@ -791,11 +797,10 @@ pub mod chunk {
                     c.advance()?;
                 }
             }
-            let (head, tail) = split_posting(&merged, head_boundary);
-            out.write_all(&head)?;
-            out.write_all(&tail)?;
-            dict.push((key, off, head.len() as u32, tail.len() as u32));
-            off += (head.len() + tail.len()) as u64;
+            let posting = serialize_posting(&merged);
+            out.write_all(&posting)?;
+            dict.push((key, off, posting.len() as u32));
+            off += posting.len() as u64;
         }
 
         // Header + sparse index + dictionary (dict is already key-sorted).
@@ -805,15 +810,13 @@ pub mod chunk {
         out.write_all(&gram_size.to_le_bytes())?;
         out.write_all(&(n as u32).to_le_bytes())?;
         out.write_all(&stride.to_le_bytes())?;
-        out.write_all(&head_boundary.to_le_bytes())?;
         for i in 0..sparse_count {
             out.write_all(&dict[i * stride as usize].0.to_le_bytes())?;
         }
-        for (key, hoff, hsize, tsize) in &dict {
+        for (key, off, size) in &dict {
             out.write_all(&key.to_le_bytes())?;
-            out.write_all(&hoff.to_le_bytes())?;
-            out.write_all(&hsize.to_le_bytes())?;
-            out.write_all(&tsize.to_le_bytes())?;
+            out.write_all(&off.to_le_bytes())?;
+            out.write_all(&size.to_le_bytes())?;
         }
         Ok(())
     }
@@ -838,15 +841,12 @@ mod tests {
     }
 
     fn rrs(entries: &[(u64, RoaringBitmap)]) -> Vec<u8> {
-        let posts: Vec<(u64, Vec<u8>, Vec<u8>)> = entries
+        let posts: Vec<(u64, Vec<u8>)> = entries
             .iter()
-            .map(|(k, b)| {
-                let (h, t) = split_posting(b, HEAD_BOUNDARY);
-                (*k, h, t)
-            })
+            .map(|(k, b)| (*k, serialize_posting(b)))
             .collect();
         let mut out = Vec::new();
-        write_index(&mut out, 3, 2, HEAD_BOUNDARY, posts).unwrap();
+        write_index(&mut out, 3, 2, posts).unwrap();
         out
     }
 
@@ -987,8 +987,7 @@ mod tests {
         .unwrap();
 
         let mut out = File::create(&op).unwrap();
-        chunk::merge_partials_to_rrs(&[p0.clone(), p1.clone()], 3, 2, HEAD_BOUNDARY, &mut out)
-            .unwrap();
+        chunk::merge_partials_to_rrs(&[p0.clone(), p1.clone()], 3, 2, &mut out).unwrap();
         drop(out);
 
         let mut buf = Vec::new();

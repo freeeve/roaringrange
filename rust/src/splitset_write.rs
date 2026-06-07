@@ -28,7 +28,7 @@
 //! docs and bounding read fan-out; re-tiering the base is a full rebuild via
 //! [`crate::splitset_build::SplitSetBuilder`].
 
-use crate::build::{split_posting, write_index, DEFAULT_HEAD_BOUNDARY, DEFAULT_STRIDE};
+use crate::build::{serialize_posting, write_index, DEFAULT_STRIDE};
 use crate::index::{deserialize, read_u32, read_u64, IndexError};
 use crate::ngram::ngram_keys;
 use crate::splitset::{
@@ -92,7 +92,6 @@ pub struct CompactOutput {
 /// A pure, resumable split-set ingestion writer. See the module docs for the lifecycle.
 pub struct SplitSetWriter {
     gram_size: u16,
-    head_boundary: u32,
     stride: u32,
     byte_cap: u64,
     name_prefix: String,
@@ -123,7 +122,6 @@ impl SplitSetWriter {
     pub fn new(config: WriterConfig) -> Self {
         SplitSetWriter {
             gram_size: config.gram_size,
-            head_boundary: nonzero_or(config.head_boundary, DEFAULT_HEAD_BOUNDARY),
             stride: nonzero_or(config.stride, DEFAULT_STRIDE),
             byte_cap: config.byte_cap,
             name_prefix: config.name_prefix,
@@ -152,7 +150,7 @@ impl SplitSetWriter {
     pub fn resume(
         prev: &SplitSet,
         gram_size: u16,
-        head_boundary: u32,
+        _head_boundary: u32, // accepted for call-site compat; v3 RRS has no head/tail split
         stride: u32,
         name_prefix: String,
         bloom_bits_per_key: u32,
@@ -181,7 +179,6 @@ impl SplitSetWriter {
         let next_epoch = prev.splits().iter().map(|s| s.epoch).max().unwrap_or(0) + 1;
         SplitSetWriter {
             gram_size,
-            head_boundary: nonzero_or(head_boundary, DEFAULT_HEAD_BOUNDARY),
             stride: nonzero_or(stride, DEFAULT_STRIDE),
             byte_cap: prev.byte_cap(),
             name_prefix,
@@ -267,22 +264,13 @@ impl SplitSetWriter {
         if self.memtable_count == 0 && self.pending_deletes.is_empty() {
             return Ok(None);
         }
-        let entries: Vec<(u64, Vec<u8>, Vec<u8>)> = self
+        let entries: Vec<(u64, Vec<u8>)> = self
             .memtable
             .iter()
-            .map(|(k, bm)| {
-                let (head, tail) = split_posting(bm, self.head_boundary);
-                (*k, head, tail)
-            })
+            .map(|(k, bm)| (*k, serialize_posting(bm)))
             .collect();
         let mut bytes = Vec::new();
-        write_index(
-            &mut bytes,
-            self.gram_size,
-            self.stride,
-            self.head_boundary,
-            entries,
-        )?;
+        write_index(&mut bytes, self.gram_size, self.stride, entries)?;
 
         let name = format!("{}-d{:05}.rrs", self.name_prefix, self.flush_seq);
         self.flush_seq += 1;
@@ -379,21 +367,12 @@ impl SplitSetWriter {
         let lo = present.min().unwrap_or(0);
         let hi = present.max().unwrap_or(0);
 
-        let entries: Vec<(u64, Vec<u8>, Vec<u8>)> = merged
+        let entries: Vec<(u64, Vec<u8>)> = merged
             .iter()
-            .map(|(k, bm)| {
-                let (head, tail) = split_posting(bm, self.head_boundary);
-                (*k, head, tail)
-            })
+            .map(|(k, bm)| (*k, serialize_posting(bm)))
             .collect();
         let mut bytes = Vec::new();
-        write_index(
-            &mut bytes,
-            self.gram_size,
-            self.stride,
-            self.head_boundary,
-            entries,
-        )?;
+        write_index(&mut bytes, self.gram_size, self.stride, entries)?;
 
         let name = format!("{}-c{:05}.rrs", self.name_prefix, self.compact_seq);
         self.compact_seq += 1;
@@ -515,7 +494,7 @@ fn parse_tombstone(summary: &[u8]) -> io::Result<Option<RoaringBitmap>> {
 /// the query reader does not expose, needed to merge splits during compaction. The blob is the
 /// writer's own immutable split, so bounds are validated defensively but not exhaustively.
 fn read_rrs_entries(bytes: &[u8]) -> io::Result<Vec<(u64, RoaringBitmap)>> {
-    if bytes.len() < 20 || &bytes[0..4] != b"RRSI" {
+    if bytes.len() < 16 || &bytes[0..4] != b"RRSI" {
         return Err(io::Error::other("compact: input is not an RRS split"));
     }
     let ngrams = read_u32(bytes, 8) as usize;
@@ -525,7 +504,7 @@ fn read_rrs_entries(bytes: &[u8]) -> io::Result<Vec<(u64, RoaringBitmap)>> {
     } else {
         ngrams.div_ceil(stride)
     };
-    let dict_start = 20 + sparse_count * 8;
+    let dict_start = 16 + sparse_count * 8;
     let read = |off: usize, len: usize| -> io::Result<RoaringBitmap> {
         let end = off
             .checked_add(len)
@@ -535,19 +514,14 @@ fn read_rrs_entries(bytes: &[u8]) -> io::Result<Vec<(u64, RoaringBitmap)>> {
     };
     let mut out = Vec::with_capacity(ngrams);
     for i in 0..ngrams {
-        let base = dict_start + i * 24;
-        if base + 24 > bytes.len() {
+        let base = dict_start + i * 20;
+        if base + 20 > bytes.len() {
             return Err(io::Error::other("compact: truncated dictionary"));
         }
         let key = read_u64(bytes, base);
-        let head_off = read_u64(bytes, base + 8) as usize;
-        let head_size = read_u32(bytes, base + 16) as usize;
-        let tail_size = read_u32(bytes, base + 20) as usize;
-        let mut bm = read(head_off, head_size)?;
-        if tail_size > 0 {
-            bm |= read(head_off + head_size, tail_size)?;
-        }
-        out.push((key, bm));
+        let offset = read_u64(bytes, base + 8) as usize;
+        let size = read_u32(bytes, base + 16) as usize;
+        out.push((key, read(offset, size)?));
     }
     Ok(out)
 }

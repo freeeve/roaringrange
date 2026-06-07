@@ -9,23 +9,28 @@ use crate::MemoryFetch;
 use futures::executor::block_on;
 use roaring::RoaringBitmap;
 
-/// Head/tail boundary, matching the format's first-container split.
-const HEAD_BOUNDARY: u32 = 65536;
+/// A 64K container-bucket boundary — used to craft test docs that span buckets.
+const BUCKET: u32 = 65_536;
 
-/// One dictionary entry to be laid out: a key and its already-split postings.
+/// One dictionary entry to be laid out: a key and its serialized posting.
 struct Posting {
     key: u64,
-    head: Vec<u8>,
-    tail: Vec<u8>,
+    posting: Vec<u8>,
 }
 
-/// Splits `bm` into the head bitmap (docs `[0, 65536)`) and tail bitmap (docs
-/// `[65536, ∞)`) and serializes each in the portable roaring format.
-fn split_posting(bm: &RoaringBitmap) -> (Vec<u8>, Vec<u8>) {
-    let mut head = RoaringBitmap::new();
-    let mut tail = RoaringBitmap::new();
+/// Serializes `bm` as one v3 portable-roaring posting (no head/tail split).
+fn serialize_posting(bm: &RoaringBitmap) -> Vec<u8> {
+    let mut v = Vec::new();
+    bm.serialize_into(&mut v).unwrap();
+    v
+}
+
+/// Splits `bm` into serialized head (`[0, 65536)`) and tail (`[65536, ∞)`) postings — the
+/// `RRSF` facet sidecar keeps the v2 head/tail layout (only the `RRS` index collapsed in v3).
+fn split_head_tail(bm: &RoaringBitmap) -> (Vec<u8>, Vec<u8>) {
+    let (mut head, mut tail) = (RoaringBitmap::new(), RoaringBitmap::new());
     for v in bm.iter() {
-        if v < HEAD_BOUNDARY {
+        if v < BUCKET {
             head.insert(v);
         } else {
             tail.insert(v);
@@ -38,19 +43,15 @@ fn split_posting(bm: &RoaringBitmap) -> (Vec<u8>, Vec<u8>) {
     (hb, tb)
 }
 
-/// Builds a complete `RRS` byte buffer from `(key, bitmap)` pairs and the given
-/// sparse stride. Entries are sorted by key (the format requires a key-sorted
-/// dictionary). Returns the serialized index.
+/// Builds a complete v3 `RRS` byte buffer from `(key, bitmap)` pairs and the given
+/// sparse stride — laid out by hand exactly per `FORMAT.md` to verify the reader against the
+/// spec. Entries are sorted by key (the format requires a key-sorted dictionary).
 fn build_rrs(gram_size: u16, stride: u32, entries: &[(u64, RoaringBitmap)]) -> Vec<u8> {
     let mut postings: Vec<Posting> = entries
         .iter()
-        .map(|(key, bm)| {
-            let (head, tail) = split_posting(bm);
-            Posting {
-                key: *key,
-                head,
-                tail,
-            }
+        .map(|(key, bm)| Posting {
+            key: *key,
+            posting: serialize_posting(bm),
         })
         .collect();
     postings.sort_by_key(|p| p.key);
@@ -63,13 +64,12 @@ fn build_rrs(gram_size: u16, stride: u32, entries: &[(u64, RoaringBitmap)]) -> V
     };
 
     let mut out = Vec::new();
-    // Header (20 B): magic, version, gram, ngrams, stride, head_boundary.
+    // Header (16 B): magic, version=3, gram, ngrams, stride.
     out.extend_from_slice(b"RRSI");
-    out.extend_from_slice(&2u16.to_le_bytes()); // version
+    out.extend_from_slice(&3u16.to_le_bytes()); // version
     out.extend_from_slice(&gram_size.to_le_bytes());
     out.extend_from_slice(&ngrams.to_le_bytes());
     out.extend_from_slice(&stride.to_le_bytes());
-    out.extend_from_slice(&HEAD_BOUNDARY.to_le_bytes());
 
     // Sparse index: dict[i*stride].key for i in 0..sparse_count.
     for i in 0..sparse_count {
@@ -77,24 +77,21 @@ fn build_rrs(gram_size: u16, stride: u32, entries: &[(u64, RoaringBitmap)]) -> V
         out.extend_from_slice(&key.to_le_bytes());
     }
 
-    // Dictionary (24 B each); compute absolute posting offsets.
-    let dict_start = 20 + sparse_count * 8;
-    let postings_start = dict_start + postings.len() * 24;
+    // Dictionary (20 B each): key + absolute posting offset + size.
+    let dict_start = 16 + sparse_count * 8;
+    let postings_start = dict_start + postings.len() * 20;
     let mut off = postings_start as u64;
     for p in &postings {
-        let head_size = p.head.len() as u32;
-        let tail_size = p.tail.len() as u32;
+        let size = p.posting.len() as u32;
         out.extend_from_slice(&p.key.to_le_bytes());
         out.extend_from_slice(&off.to_le_bytes());
-        out.extend_from_slice(&head_size.to_le_bytes());
-        out.extend_from_slice(&tail_size.to_le_bytes());
-        off += (head_size + tail_size) as u64;
+        out.extend_from_slice(&size.to_le_bytes());
+        off += size as u64;
     }
 
-    // Postings: [head][tail] per entry, in dict order.
+    // Postings: one bitmap per entry, in dict order.
     for p in &postings {
-        out.extend_from_slice(&p.head);
-        out.extend_from_slice(&p.tail);
+        out.extend_from_slice(&p.posting);
     }
 
     out
@@ -140,28 +137,22 @@ fn search_intersects_heads_ascending() {
 }
 
 #[test]
-fn head_and_tail_split_at_65536() {
-    // Values spanning the head boundary: head holds <65536, tail holds >=65536.
+fn posting_spans_buckets_and_search_pages_in_order() {
+    // Docs spanning several 64K buckets, including beyond the eager prefix (16 buckets = 1M).
     let abc = ngram_keys("abc", 3)[0];
-    let docs = [3u32, 5, HEAD_BOUNDARY, HEAD_BOUNDARY + 7, 100_000];
+    let beyond = 16 * BUCKET + 9; // past the eager prefix -> reached by tail paging
+    let docs = [3u32, 5, BUCKET, BUCKET + 7, 100_000, beyond];
     let entries = vec![(abc, bm(&docs))];
     let buf = build_rrs(3, 2, &entries);
     let idx = block_on(Index::open(MemoryFetch::new(buf))).unwrap();
 
-    let head = block_on(idx.head(abc)).unwrap().unwrap();
-    let tail = block_on(idx.tail(abc)).unwrap().unwrap();
-    assert_eq!(head.iter().collect::<Vec<_>>(), vec![3, 5]);
-    assert_eq!(
-        tail.iter().collect::<Vec<_>>(),
-        vec![HEAD_BOUNDARY, HEAD_BOUNDARY + 7, 100_000]
-    );
+    // The single posting holds every doc, in ascending order.
+    let posting = block_on(idx.posting(abc)).unwrap().unwrap();
+    assert_eq!(posting.iter().collect::<Vec<_>>(), docs);
 
-    // search continues into the tail when the head doesn't fill the limit.
-    assert_eq!(
-        block_on(idx.search("abc", 10)).unwrap(),
-        vec![3, 5, HEAD_BOUNDARY, HEAD_BOUNDARY + 7, 100_000]
-    );
-    // Limit satisfied entirely by the head: tail is not needed in the result.
+    // Search returns every match in ascending (rank) order, paging past the eager prefix.
+    assert_eq!(block_on(idx.search("abc", 10)).unwrap(), docs);
+    // A small limit is satisfied by the eager prefix alone (no deep paging).
     assert_eq!(block_on(idx.search("abc", 2)).unwrap(), vec![3, 5]);
 }
 
@@ -170,8 +161,8 @@ fn search_and_with_tail_intersection() {
     // Two keys whose intersection only appears in the tail (>=65536).
     let abc = ngram_keys("abc", 3)[0];
     let bcd = ngram_keys("bcd", 3)[0];
-    let big_a = HEAD_BOUNDARY + 10;
-    let big_b = HEAD_BOUNDARY + 20;
+    let big_a = BUCKET + 10;
+    let big_b = BUCKET + 20;
     let entries = vec![(abc, bm(&[1, big_a, big_b])), (bcd, bm(&[2, big_a, big_b]))];
     let buf = build_rrs(3, 2, &entries);
     let idx = block_on(Index::open(MemoryFetch::new(buf))).unwrap();
@@ -204,18 +195,18 @@ fn sparse_path_with_many_entries() {
 
     // Every key must resolve through the sparse + block binary search.
     for (i, k) in keys.iter().enumerate() {
-        let head = block_on(idx.head(*k)).unwrap().unwrap();
+        let posting = block_on(idx.posting(*k)).unwrap().unwrap();
         assert_eq!(
-            head.iter().collect::<Vec<_>>(),
+            posting.iter().collect::<Vec<_>>(),
             vec![i as u32, 100 + i as u32]
         );
     }
     // A key smaller than the first dictionary key is absent.
     let smallest = *keys.iter().min().unwrap();
-    assert!(block_on(idx.head(smallest - 1)).unwrap().is_none());
+    assert!(block_on(idx.posting(smallest - 1)).unwrap().is_none());
     // A key larger than all is absent.
     let largest = *keys.iter().max().unwrap();
-    assert!(block_on(idx.head(largest + 1)).unwrap().is_none());
+    assert!(block_on(idx.posting(largest + 1)).unwrap().is_none());
 }
 
 /// Builds a synthetic RRS index over `texts` (doc id = slice index), deriving
@@ -307,15 +298,7 @@ fn empty_query_returns_nothing() {
 fn cursor_paginates_head_then_tail() {
     let abc = ngram_keys("abc", 3)[0];
     // Four head docs (<65536) then three tail docs (>=65536) for one trigram.
-    let docs = [
-        1u32,
-        3,
-        5,
-        7,
-        HEAD_BOUNDARY,
-        HEAD_BOUNDARY + 2,
-        HEAD_BOUNDARY + 4,
-    ];
+    let docs = [1u32, 3, 5, 7, BUCKET, BUCKET + 2, BUCKET + 4];
     let buf = build_rrs(3, 2, &[(abc, bm(&docs))]);
     let idx = block_on(Index::open(MemoryFetch::new(buf))).unwrap();
 
@@ -324,11 +307,8 @@ fn cursor_paginates_head_then_tail() {
     assert_eq!(block_on(cur.next(2)).unwrap(), vec![1, 3]);
     assert_eq!(block_on(cur.next(2)).unwrap(), vec![5, 7]);
     // Crossing into the lazily-fetched tail, still globally ascending.
-    assert_eq!(
-        block_on(cur.next(2)).unwrap(),
-        vec![HEAD_BOUNDARY, HEAD_BOUNDARY + 2]
-    );
-    assert_eq!(block_on(cur.next(10)).unwrap(), vec![HEAD_BOUNDARY + 4]);
+    assert_eq!(block_on(cur.next(2)).unwrap(), vec![BUCKET, BUCKET + 2]);
+    assert_eq!(block_on(cur.next(10)).unwrap(), vec![BUCKET + 4]);
     assert!(block_on(cur.next(10)).unwrap().is_empty()); // exhausted
 
     // Random-access paging: forward, backward (free), and across the tail.
@@ -336,10 +316,7 @@ fn cursor_paginates_head_then_tail() {
     assert_eq!(block_on(c2.page(0, 2)).unwrap(), vec![1, 3]);
     assert_eq!(block_on(c2.page(2, 2)).unwrap(), vec![5, 7]);
     assert_eq!(block_on(c2.page(0, 2)).unwrap(), vec![1, 3]); // backward, no fetch
-    assert_eq!(
-        block_on(c2.page(4, 2)).unwrap(),
-        vec![HEAD_BOUNDARY, HEAD_BOUNDARY + 2]
-    ); // crosses into the tail
+    assert_eq!(block_on(c2.page(4, 2)).unwrap(), vec![BUCKET, BUCKET + 2]); // crosses into the tail
     assert_eq!(block_on(c2.page(1, 3)).unwrap(), vec![3, 5, 7]); // back again, all materialized
 
     // Concatenated pages equal a single full search.
@@ -406,7 +383,7 @@ fn build_rrsf(fields: &[(&str, Vec<(&str, RoaringBitmap)>)]) -> Vec<u8> {
         let mut cs = Vec::new();
         for (cname, bitmap) in cats {
             let (cno, cnl) = push_str(&mut blob, cname);
-            let (head, tail) = split_posting(bitmap);
+            let (head, tail) = split_head_tail(bitmap);
             cs.push(Cat {
                 name_off: cno,
                 name_len: cnl,
@@ -472,7 +449,7 @@ fn build_rrsf(fields: &[(&str, Vec<(&str, RoaringBitmap)>)]) -> Vec<u8> {
 #[test]
 fn facet_filtering_within_or_across_and() {
     let abc = ngram_keys("abc", 3)[0];
-    let tail_doc = HEAD_BOUNDARY + 1;
+    let tail_doc = BUCKET + 1;
     // text: "abc" matches docs 1..=5 and one tail doc.
     let idx = block_on(Index::open(MemoryFetch::new(build_rrs(
         3,

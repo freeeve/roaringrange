@@ -69,7 +69,7 @@ fn main() {
         println!("\n=== {:?}  ({} trigrams) ===", q, keys.len());
         let (mut q_posting, mut q_min) = (0u64, 0u64);
         for &key in &keys {
-            let tail = match block_on(idx.tail(key)) {
+            let tail = match block_on(idx.posting(key)) {
                 Ok(Some(bm)) => bm,
                 Ok(None) => {
                     println!("  {:016x}  absent", key);

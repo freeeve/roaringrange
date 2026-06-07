@@ -159,7 +159,8 @@ impl<F: RangeFetch + Clone> Catalog<F> {
 mod tests {
     use super::*;
     use crate::build::{
-        split_posting, write_facets, write_index, write_records, FacetCategory, FacetField,
+        serialize_posting, split_posting, write_facets, write_index, write_records, FacetCategory,
+        FacetField,
     };
     use crate::ngram::ngram_keys;
     use crate::MemoryFetch;
@@ -179,15 +180,12 @@ mod tests {
 
     /// Builds an `RRS` index `MemoryFetch` from `(key, bitmap)` entries.
     fn rrs(entries: &[(u64, RoaringBitmap)]) -> MemoryFetch {
-        let posts: Vec<(u64, Vec<u8>, Vec<u8>)> = entries
+        let posts: Vec<(u64, Vec<u8>)> = entries
             .iter()
-            .map(|(k, b)| {
-                let (h, t) = split_posting(b, HEAD_BOUNDARY);
-                (*k, h, t)
-            })
+            .map(|(k, b)| (*k, serialize_posting(b)))
             .collect();
         let mut out = Vec::new();
-        write_index(&mut out, 3, 2, HEAD_BOUNDARY, posts).unwrap();
+        write_index(&mut out, 3, 2, posts).unwrap();
         MemoryFetch::new(out)
     }
 

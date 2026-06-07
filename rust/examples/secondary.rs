@@ -9,9 +9,7 @@
 
 use futures::executor::block_on;
 use roaring::RoaringBitmap;
-use roaringrange::build::{
-    split_posting, write_index, write_perm, write_records, DEFAULT_HEAD_BOUNDARY,
-};
+use roaringrange::build::{serialize_posting, write_index, write_perm, write_records};
 use roaringrange::{ngram_keys, MemoryFetch, RecordStore, SecondaryIndex};
 use std::collections::BTreeMap;
 
@@ -32,15 +30,12 @@ fn build_secondary_index(docs: &[(u32, &str)]) -> MemoryFetch {
             postings.entry(key).or_default().insert(sec_id);
         }
     }
-    let entries: Vec<(u64, Vec<u8>, Vec<u8>)> = postings
+    let entries: Vec<(u64, Vec<u8>)> = postings
         .iter()
-        .map(|(k, bm)| {
-            let (head, tail) = split_posting(bm, DEFAULT_HEAD_BOUNDARY);
-            (*k, head, tail)
-        })
+        .map(|(k, bm)| (*k, serialize_posting(bm)))
         .collect();
     let mut out = Vec::new();
-    write_index(&mut out, 3, 0, DEFAULT_HEAD_BOUNDARY, entries).unwrap();
+    write_index(&mut out, 3, 0, entries).unwrap();
     MemoryFetch::new(out)
 }
 

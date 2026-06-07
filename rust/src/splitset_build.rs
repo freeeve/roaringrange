@@ -10,8 +10,8 @@
 //! splits produce.
 
 use crate::build::{
-    split_posting, write_facets, write_index, FacetCategory, FacetField, DEFAULT_HEAD_BOUNDARY,
-    DEFAULT_STRIDE,
+    serialize_posting, split_posting, write_facets, write_index, FacetCategory, FacetField,
+    DEFAULT_HEAD_BOUNDARY, DEFAULT_STRIDE,
 };
 use crate::facet::facet_key;
 use crate::ngram::ngram_keys;
@@ -577,21 +577,12 @@ impl SplitSetBuilder {
             return Ok(());
         }
         let open = std::mem::take(&mut self.open);
-        let entries: Vec<(u64, Vec<u8>, Vec<u8>)> = open
+        let entries: Vec<(u64, Vec<u8>)> = open
             .iter()
-            .map(|(k, bm)| {
-                let (head, tail) = split_posting(bm, self.head_boundary);
-                (*k, head, tail)
-            })
+            .map(|(k, bm)| (*k, serialize_posting(bm)))
             .collect();
         let mut bytes = Vec::new();
-        write_index(
-            &mut bytes,
-            self.gram_size,
-            self.stride,
-            self.head_boundary,
-            entries,
-        )?;
+        write_index(&mut bytes, self.gram_size, self.stride, entries)?;
 
         let idx = self.specs.len();
         let name = format!("{}-s{idx:05}.rrs", self.name_prefix);
