@@ -1,6 +1,6 @@
 # Task 007 — Split-set index (`RRSS`): byte-capped immutable splits + write delta
 
-**Status:** in progress — **steps 1–7 implemented** behind the non-default `splits` Cargo
+**Status:** **done** — all steps implemented behind the non-default `splits` Cargo
 feature: manifest reader/writer + format (`SPLITSET.md`), byte-capped `SplitSetBuilder`,
 pruning/merging `SplitSet::search` (tiered short-circuit + stable-key sort), base+delta
 cutover with tombstone supersession + minor `compact`, ingestion `SplitSetWriter` (pure
@@ -14,9 +14,13 @@ Also added the **boot bundle** (`Index::from_boot`/`boot_len` + `SplitFetcher::b
 `splits`+`hotcache`, gated in CI + pre-push) and a worked **queue-as-WAL ingestion client**
 (`examples/splitset_ingest.rs`), and the **Go split-assignment builder** (`go/splitsetbuild.go`)
 with byte-for-byte split conformance (shared golden, asserted on both sides). 19 splitset + 1
-bundle Rust test + Go builder/conformance tests. **Remaining** (see per-step notes): the
-per-split **facet-presence + time** summaries (tags 2-3, blob reserved — facet pruning also
-needs a facet-aware split-set search path), and the **demo "Split set" UI** mode.
+bundle Rust test + Go builder/conformance tests. (The old "Remaining" note here is
+superseded: per-split **facet-presence** summaries — tag 2 — and the **facet-aware
+split-set search path** shipped, and the **demo "Split set" UI** mode landed via task 015.)
+The only deferred enhancements — tag-3 **time** min/max summary, **term-Bloom** on
+RRTI-bodied splits, **facet-filtered term search**, and the **Go RRTI** term-bodied split
+builder — are explicitly deferred in step 8 / `SPLITSET.md` and tracked in **task 019**.
+Parallel per-range build is **task 013**.
 
 A *new, additive* index that sits alongside `RRS`/`RRTI`/`RRVI`/`RRIL`, so we can
 compare it **side by side** with the monolithic `RRS`. It is a Quickwit-style

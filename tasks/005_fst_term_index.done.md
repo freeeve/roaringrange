@@ -1,6 +1,13 @@
 # Task 005 — FST term-level inverted index (RRTI)
 
-**Status:** scoping (pending). Planned 2026-06-04.
+**Status:** **done** (core, 2026-06-07). The RRTI library is shipped: reader (`terms.rs`),
+blocked dictionary (task 009), builder (`terms_build.rs`/`terms_dict.rs`), wasm `RrtIndex`,
+Python binding, CI gate, stemming/stopwords, and prefix completion are all complete, with the
+demo term-mode UI wired. The remaining work — building + deploying the demo's `.rrt` artifact
+(term mode is wired but **not live**: no monolithic `-rrt` builder path, no `deploy.sh` upload
+line → the live `.rrt 403`) and the optional later phases (inline rare postings, hot-phrase
+materialization, positional postings, Catalog wiring) — is tracked in **task 020**. Go reader
+parity is **task 011**.
 
 A **new, additive** index format in the roaringrange family — a word/term-level
 inverted index with an **FST term dictionary** — sitting *alongside* the trigram

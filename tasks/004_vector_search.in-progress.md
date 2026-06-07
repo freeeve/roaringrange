@@ -13,6 +13,16 @@ The search (range reads + ADC + re-rank) is identical and lives in wasm; only th
 embedder differs. `vector_id == doc_id`, so results reuse the existing record store and
 can hybridize with the trigram search.
 
+**Status (2026-06-07, supersedes the stale 2026-06-04 progress notes below):** all 7 steps'
+library code is committed + tested. **Mode 2 (model2vec, in-browser) is LIVE and default**
+with the **full 484M** index (`openalex-484m.rrvi`, `nprobe=8`), and the trigram+vector RRF
+hybrid mode is live. The IVFPQ trainer, RRVI format/reader, wasm `RrviIndex`/`Model2vecEmbedder`,
+and FAISS export are all committed. **The only feature work remaining is Mode 1 (open-model
+Gemma):** the embed Lambda is built/deployed but unwired (`EMBED_LAMBDA_URL`/`rrviGemma` are
+`null` in `index.html`) because the 484M Gemma corpus embed needs GPU compute (the paused
+embed job). The rerank sidecar (step 7) is intentionally off (storage cost). This task stays
+open as the home for the Gemma open-model path.
+
 ## Locked decisions
 - **Mode 1 embedder:** an **open, on-device-tier** model so the corpus embeds **locally
   for $0** and the query runs the **same model+recipe**. **Start with
