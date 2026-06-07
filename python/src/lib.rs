@@ -23,8 +23,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use roaring::RoaringBitmap;
 use roaringrange_core::build::{
-    split_posting, write_facets, write_index, write_records, FacetCategory, FacetField,
-    DEFAULT_HEAD_BOUNDARY,
+    serialize_posting, split_posting, write_facets, write_index, write_records, FacetCategory,
+    FacetField, DEFAULT_HEAD_BOUNDARY,
 };
 use roaringrange_core::ngram_keys;
 use roaringrange_core::vector::{METRIC_IP, METRIC_L2};
@@ -177,20 +177,16 @@ impl Builder {
             records[doc_id] = doc.record.clone();
         }
 
-        // RRS text index.
-        let entries: Vec<(u64, Vec<u8>, Vec<u8>)> = index
+        // RRS text index (v3: one posting per term, no head/tail split).
+        let entries: Vec<(u64, Vec<u8>)> = index
             .into_iter()
-            .map(|(key, bm)| {
-                let (head, tail) = split_posting(&bm, self.head_boundary);
-                (key, head, tail)
-            })
+            .map(|(key, bm)| (key, serialize_posting(&bm)))
             .collect();
         let ngrams = entries.len();
         write_index(
             File::create(dir.join("index.rrs")).map_err(io_err)?,
             self.gram_size,
             0,
-            self.head_boundary,
             entries,
         )
         .map_err(io_err)?;
