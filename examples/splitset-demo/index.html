@@ -28,7 +28,7 @@
 </head>
 <body>
 <header>
-  <h1>roaringrange · <small>split-set (<code>RRSS</code>) demo — tiered pruning + term Bloom + facet filter, no backend</small></h1>
+  <h1>roaringrange · <small>split-set (<code>RRSS</code>) demo — tiered pruning + term Bloom + facet filter + <code>RRHC</code> boot bundle, no backend</small></h1>
 </header>
 <main>
   <div class="row">
@@ -90,13 +90,37 @@ async function run() {
     (q ? "" : (filters.length ? " · facet-only" : " · type a query or pick a facet"));
 }
 
+// Boot the split set. By default via the RRHC boot bundle (`openBundle`): the manifest and the
+// `.rrhc` are fetched in one parallel wave, and each split's boot comes resident from the bundle
+// — so opening the splits a query needs costs no per-split header GET. `?nobundle` forces the
+// plain per-split cold-open path for a side-by-side comparison.
+async function bootSplitSet() {
+  const useBundle = !new URLSearchParams(location.search).has("nobundle");
+  if (useBundle && typeof RrssIndex.openBundle === "function") {
+    try {
+      return await RrssIndex.openBundle(`${DATA}/index.rrss`, DATA, `${DATA}/index.rrhc`);
+    } catch (e) {
+      console.warn("boot bundle unavailable, falling back to per-split opens:", e);
+    }
+  }
+  return await RrssIndex.open(`${DATA}/index.rrss`, DATA);
+}
+
 (async () => {
   await init();
-  rrss = await RrssIndex.open(`${DATA}/index.rrss`, DATA);
+  const t0 = performance.now();
+  rrss = await bootSplitSet();
   records = await RrsRecords.open(`${DATA}/records.idx`, `${DATA}/records.bin`);
+  const bootMs = (performance.now() - t0).toFixed(1);
   renderFacetControls();
   $("q").addEventListener("input", () => { clearTimeout(window._t); window._t = setTimeout(run, 120); });
-  $("stat").innerHTML = `ready · <b>${rrss.splitCount()}</b> splits, ${(Number(rrss.totalBytes())/1024).toFixed(0)} KB on "S3" · type to search`;
+  const n = rrss.splitCount();
+  const kb = (Number(rrss.totalBytes()) / 1024).toFixed(0);
+  const bundled = typeof rrss.hasBundle === "function" && rrss.hasBundle();
+  const boot = bundled
+    ? `booted from <b>.rrhc bundle</b> — ${rrss.bundledBootCount()}/${n} split boots resident, ${n} per-split GETs collapsed (add <code>?nobundle</code> to compare)`
+    : `booted per-split — <b>${n}</b> cold split opens (remove <code>?nobundle</code> to boot from the bundle)`;
+  $("stat").innerHTML = `ready in <b>${bootMs} ms</b> · <b>${n}</b> splits, ${kb} KB on "S3" · ${boot}`;
 })().catch(e => { $("stat").textContent = "error: " + e; });
 </script>
 </body>

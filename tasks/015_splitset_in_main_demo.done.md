@@ -69,3 +69,44 @@ comparison on the same query, in one page. Key wiring points:
 - Works end to end once a split set is deployed (`deploy.sh --splits`), and degrades cleanly
   (toggle hidden/disabled) when the `.rrss` manifest is absent — like the demo already does for the
   uploading text index.
+
+---
+
+## Progress
+
+### 2026-06-07 — DONE: split-set folded into the main demo as a toggle; splitset.html removed
+Full integration with a **new reader method** for facet counts (the chosen path) and the split set
+booting via the **`.rrhc` boot bundle** (`openBundle`, from task 006 #1). Decisions taken:
+`RrssIndex.facetCounts()` reader change; bundle-booted; records from the split's own store.
+
+**Reader (`rust/src/splitset.rs` + `wasm.rs`):**
+- `Split::contains(global)` / `Split::to_local(global)` (inverse of `to_global`).
+- `SplitSet::facet_counts(resolver, ids) -> Vec<FieldCounts>`: groups the result IDs by split,
+  counts each split's local matches against its own `.rrf` (`FacetIndex::counts`, head postings),
+  and **sums by (field, category) name** — split sets carry no global facet table. Zero-count
+  categories omitted. New `FieldCounts` type (exported). Unit test
+  `facet_counts_aggregate_across_splits_by_name`.
+- wasm `RrssIndex.facetCounts(ids)` → `Array<{field, cats:[{name,count}]}>` (the demo's
+  `applyFacetCounts` shape), via `field_counts_to_js`.
+
+**Build (`examples/openalex/builder`):** `-split-set` now emits `‹prefix›.rrhc` (trigram only;
+term `.rrt` bodies have no from-boot path), via `write_splitset_bundle`. Builder gains the
+`hotcache` feature.
+
+**Demo (`index.html`):** import `RrssIndex`; `split` block in the `full` dataset (manifest / base /
+`.rrhc` / own records under `openalex-split/`); **"Split-set index"** toggle (`.srvtoggle`, trigram
+mode only, shown when deployed); boot via `openBundle` (graceful fallback to `open`, then to
+monolith-only); split branch in `runSearch` routes through the `rankedIds` / `goPageRanked` path
+with counts from `rrss.facetCounts`; `fetchRecords` reads the split's own store in split mode;
+`renderActiveFiles` shows `.rrss + N splits` (`totalBytes`). Mutually exclusive with server mode.
+
+**Cleanup:** deleted `splitset.html` + its nav link; `deploy.sh` drops it from the upload loop and
+the invalidation, **keeps `--splits`**, now builds the reader with `hotcache` and uploads `*.rrhc`.
+
+**Verified:** `facet_counts` unit test; the wasm `openBundle` + `facetCounts` driven over real HTTP
+Range from Node against the splitset-demo data — `field` and `year` counts each sum to exactly 400
+(one per doc), single-id → count 1; `index.html` module script passes `node --check`; gates green
+(fmt, clippy native+wasm `wasm zstd vector terms splits hotcache`, 90 lib tests, builder builds).
+**Not verified locally:** a full browser run of `index.html` in split mode — that needs a
+deployed/local **OpenAlex** split set (the §Prerequisite: `openalex-split/` is empty / 403). The
+wiring degrades cleanly until then. Live check after `deploy.sh --splits <dir>`.

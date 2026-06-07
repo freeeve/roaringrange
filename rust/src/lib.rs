@@ -71,6 +71,12 @@ pub mod splitset_build;
 #[cfg(all(feature = "splits", not(target_arch = "wasm32")))]
 pub mod splitset_write;
 
+/// Native build-side emitter for an `RRHC` boot bundle over a split set (excluded from wasm):
+/// inlines each split's boot region so a reader boots the set with the per-split header GETs
+/// collapsed into one `.rrhc` GET. Behind `splits` + `hotcache`.
+#[cfg(all(feature = "splits", feature = "hotcache", not(target_arch = "wasm32")))]
+pub mod splitset_bundle;
+
 /// Container-level ranged reads into tail postings (search-fetch reduction).
 mod posting;
 
@@ -115,7 +121,8 @@ pub use hotcache_build::{write_hotcache, MemberSpec};
 
 #[cfg(feature = "splits")]
 pub use splitset::{
-    Policy, SortColDescriptor, Split, SplitFetcher, SplitSet, BODY_KIND_TERM, BODY_KIND_TRIGRAM,
+    FieldCounts, Policy, SortColDescriptor, Split, SplitFetcher, SplitSet, BODY_KIND_TERM,
+    BODY_KIND_TRIGRAM,
 };
 #[cfg(all(feature = "splits", not(target_arch = "wasm32")))]
 pub use splitset_build::{
@@ -124,6 +131,8 @@ pub use splitset_build::{
 };
 #[cfg(all(feature = "splits", feature = "terms", not(target_arch = "wasm32")))]
 pub use splitset_build::{TermSplitBuildConfig, TermSplitSetBuilder};
+#[cfg(all(feature = "splits", feature = "hotcache", not(target_arch = "wasm32")))]
+pub use splitset_bundle::write_splitset_bundle;
 #[cfg(all(feature = "splits", not(target_arch = "wasm32")))]
 pub use splitset_write::{CompactOutput, FlushOutput, SplitSetWriter, WriterConfig};
 

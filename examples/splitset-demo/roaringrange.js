@@ -963,6 +963,15 @@ export class RrssIndex {
         wasm.__wbg_rrssindex_free(ptr, 0);
     }
     /**
+     * Number of split boots resident from the boot bundle (`0` when booted without one) — the
+     * count of per-split header GETs the bundle collapsed into its single GET.
+     * @returns {number}
+     */
+    bundledBootCount() {
+        const ret = wasm.rrssindex_bundledBootCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * Number of delta splits flushed since the base (0 for a base-only set).
      * @returns {number}
      */
@@ -971,8 +980,19 @@ export class RrssIndex {
         return ret >>> 0;
     }
     /**
+     * Whether this set was booted from an `RRHC` boot bundle ([`openBundle`](Self::open_bundle)),
+     * i.e. its split boots are resident and split opens skip the per-split header GET.
+     * @returns {boolean}
+     */
+    hasBundle() {
+        const ret = wasm.rrssindex_hasBundle(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * Boots the split-set manifest at `manifest_url`; per-split files (and the sort-column
-     * store, if any) are fetched from `base_url/<name>`. Returns a `Promise<RrssIndex>`.
+     * store, if any) are fetched from `base_url/<name>`. Each queried split cold-opens its own
+     * header; for the boot-bundle path that collapses those opens, see
+     * [`openBundle`](Self::open_bundle). Returns a `Promise<RrssIndex>`.
      * @param {string} manifest_url
      * @param {string} base_url
      * @returns {Promise<RrssIndex>}
@@ -983,6 +1003,28 @@ export class RrssIndex {
         const ptr1 = passStringToWasm0(base_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ret = wasm.rrssindex_open(ptr0, len0, ptr1, len1);
+        return ret;
+    }
+    /**
+     * Boots the split set with an `RRHC` boot bundle: the manifest at `manifest_url` and the
+     * bundle at `rrhc_url` are fetched in **one parallel wave** (two GETs, one round trip of
+     * latency), then each split the query opens takes its boot from the bundle's inlined blob —
+     * no per-split header fetch. A split the bundle didn't inline falls back to a cold open, so
+     * the path degrades gracefully. Per-split data files still resolve as `base_url/<name>`.
+     * Returns a `Promise<RrssIndex>`.
+     * @param {string} manifest_url
+     * @param {string} base_url
+     * @param {string} rrhc_url
+     * @returns {Promise<RrssIndex>}
+     */
+    static openBundle(manifest_url, base_url, rrhc_url) {
+        const ptr0 = passStringToWasm0(manifest_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(base_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(rrhc_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.rrssindex_openBundle(ptr0, len0, ptr1, len1, ptr2, len2);
         return ret;
     }
     /**
@@ -1391,7 +1433,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 278, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 287, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h604311912c671172);
             return ret;
         },

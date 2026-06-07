@@ -2,11 +2,13 @@
 //! set (with term Bloom filters + per-split `RRSF` facet sidecars) plus a matching `RRSR`
 //! record store, written into `examples/splitset-demo/data/`.
 //!
-//!   cargo run --release --features splits --example splitset_demo_data [OUT_DIR]
+//!   cargo run --release --features "splits hotcache" --example splitset_demo_data [OUT_DIR]
 //!
 //! The corpus is a deterministic set of synthetic "papers" (title words + a `year` and `field`
 //! facet), fed in rank order so global doc id == rank. A small byte cap forces several tiers so
-//! the demo can show the tiered short-circuit, Bloom pruning, and facet-presence pruning.
+//! the demo can show the tiered short-circuit, Bloom pruning, and facet-presence pruning. With
+//! the `hotcache` feature on it also emits `index.rrhc`, the boot bundle the demo opens to
+//! collapse the per-split header GETs into one (`RrssIndex.openBundle`).
 
 use roaringrange::build::write_records;
 use roaringrange::{Policy, SplitBuildConfig, SplitSetBuilder};
@@ -95,6 +97,16 @@ fn main() {
     }
     for (name, bytes) in &built.facets {
         fs::write(dir.join(name), bytes).expect("write facet sidecar");
+    }
+
+    // An RRHC boot bundle (behind `hotcache`): inlines every split's boot region so the demo
+    // boots the split set with the per-split header GETs collapsed into the single `.rrhc` GET
+    // (the 2-round-trip cold boot). Optional — with the feature off the demo cold-opens splits.
+    #[cfg(feature = "hotcache")]
+    {
+        let mut rrhc = Vec::new();
+        roaringrange::write_splitset_bundle(&mut rrhc, &built, 0, 1 << 20).expect("write bundle");
+        fs::write(dir.join("index.rrhc"), &rrhc).expect("write rrhc");
     }
 
     // The record store (raw JSON), keyed by the same global doc ids.

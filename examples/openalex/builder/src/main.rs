@@ -667,8 +667,10 @@ impl SplitBuilder {
 /// a bounded box (more chunks = less RAM, at K re-streams of the input). `-chunks 1` (default) is
 /// the single-pass path, fine for subsets / large-RAM boxes.
 ///
-/// Trigram (`-split-set`) writes `‹prefix›.rrss`, the split `‹prefix›-s*.rrs`/`.rrf`, and
-/// `‹prefix›-records.{idx,bin}`; term (`-term-splits`) writes the same with `-s*.rrt` bodies.
+/// Trigram (`-split-set`) writes `‹prefix›.rrss`, the split `‹prefix›-s*.rrs`/`.rrf`,
+/// `‹prefix›-records.{idx,bin}`, and `‹prefix›.rrhc` (the boot bundle inlining every split's boot
+/// region, for `RrssIndex.openBundle`); term (`-term-splits`) writes the same with `-s*.rrt`
+/// bodies but no `.rrhc` (term split bodies have no from-boot path yet).
 /// Flags: `-out <dir>`, `-split-prefix <p>` (default `openalex`), `-split-cap <bytes>`
 /// (default 512 MiB). Trigram-only: `-bloom-bits <n>` (default 10; 0 disables). Term-only:
 /// `-stem` (Snowball English) and `-stopwords` (drop stop words) — `-bloom-bits`/`-gram` are
@@ -876,10 +878,20 @@ fn build_split_set(
     rec_w.flush().expect("flush records");
     let built = b.finish().expect("finish split set");
     let splits = built.splits.len();
-    write_files(built.splits);
-    write_files(built.facets);
+    // RRHC boot bundle (trigram only): inline every split's boot region so the demo boots the
+    // whole set with the per-split header GETs collapsed into one `.rrhc` (RrssIndex.openBundle).
+    // Term (`.rrt`) splits have no from_boot path yet, so they get no bundle. Emit before
+    // `write_files` moves the splits Vec (the writer needs `&built`).
+    if body == SplitBody::Trigram {
+        let mut rrhc = Vec::new();
+        roaringrange::write_splitset_bundle(&mut rrhc, &built, 0, 1 << 20)
+            .expect("write rrhc bundle");
+        std::fs::write(out_dir.join(format!("{prefix}.rrhc")), &rrhc).expect("write rrhc");
+    }
     std::fs::write(out_dir.join(format!("{prefix}.rrss")), &built.manifest)
         .expect("write manifest");
+    write_files(built.splits);
+    write_files(built.facets);
 
     info!(
         docs = n,

@@ -166,6 +166,34 @@ impl Split {
             self.doc_id_lo.saturating_add(local)
         }
     }
+
+    /// Whether `global` falls in this split's doc-id range `[docIdLo, docIdHi]`.
+    pub fn contains(&self, global: u32) -> bool {
+        global >= self.doc_id_lo && global <= self.doc_id_hi
+    }
+
+    /// Inverse of [`to_global`](Self::to_global): maps a global doc ID back to this split's local
+    /// ID (`local = global - docIdLo`, or `local = global` for an
+    /// [absolute-id](Self::absolute_ids) split). The caller ensures [`contains`](Self::contains).
+    pub fn to_local(&self, global: u32) -> u32 {
+        if self.absolute_ids() {
+            global
+        } else {
+            global.saturating_sub(self.doc_id_lo)
+        }
+    }
+}
+
+/// Per-field facet counts over a result set, aggregated across splits by category name — the
+/// return shape of [`SplitSet::facet_counts`]. One entry per field that had at least one
+/// non-zero category count.
+#[derive(Debug, Clone)]
+pub struct FieldCounts {
+    /// Field name (e.g. `"year"`, `"type"`).
+    pub field: String,
+    /// `(category name, summed document count)` for the categories with a non-zero count, in
+    /// first-seen order across the contributing splits.
+    pub categories: Vec<(String, u64)>,
 }
 
 /// Resolves a split (or sort-column) data-file name to a [`RangeFetch`] for it. The manifest
@@ -595,6 +623,70 @@ impl SplitSet {
         ranked.extend(delta);
         ranked.truncate(limit);
         Ok(ranked)
+    }
+
+    /// Per-(field, category) facet counts over `ids` (global doc IDs — e.g. a query's ranked
+    /// result page), aggregated across the splits those IDs fall in. The split set has no global
+    /// facet table (each split carries its own `RRSF` sidecar), so this groups the IDs by split,
+    /// counts each split's local matches against its own `‹split›.rrf`, and **sums by field and
+    /// category name**. Fields and categories appear in first-seen order; a category with a zero
+    /// count is omitted (the caller renders missing keys as `0`). Splits a result ID never lands
+    /// in — and those lacking a facet sidecar — contribute nothing. One `.rrf` open per
+    /// contributing split (counts are over each split's head postings, like the monolith's
+    /// in-memory facet counts).
+    pub async fn facet_counts<R: SplitFetcher>(
+        &self,
+        resolver: &R,
+        ids: &[u32],
+    ) -> Result<Vec<FieldCounts>, IndexError> {
+        // Group the global result IDs by the split they belong to, as split-local IDs.
+        let mut per_split: BTreeMap<usize, RoaringBitmap> = BTreeMap::new();
+        for &gid in ids {
+            if let Some((si, split)) = self
+                .splits
+                .iter()
+                .enumerate()
+                .find(|(_, s)| s.contains(gid))
+            {
+                per_split.entry(si).or_default().insert(split.to_local(gid));
+            }
+        }
+
+        // Aggregate each contributing split's counts into name-keyed fields (first-seen order).
+        let mut fields: Vec<FieldCounts> = Vec::new();
+        let mut field_pos: BTreeMap<String, usize> = BTreeMap::new();
+        for (si, local) in per_split {
+            let split = &self.splits[si];
+            let facets =
+                match FacetIndex::open(resolver.fetch_named(&facet_file_name(&split.data_file)))
+                    .await
+                {
+                    Ok(f) => f,
+                    Err(_) => continue, // a split with no facet sidecar contributes nothing
+                };
+            let counts = facets.counts(&local); // Vec<Vec<u64>> aligned to facets.fields
+            for (fi, field) in facets.fields.iter().enumerate() {
+                let fp = *field_pos.entry(field.name.clone()).or_insert_with(|| {
+                    fields.push(FieldCounts {
+                        field: field.name.clone(),
+                        categories: Vec::new(),
+                    });
+                    fields.len() - 1
+                });
+                for (ci, cat) in field.categories.iter().enumerate() {
+                    let c = counts[fi][ci];
+                    if c == 0 {
+                        continue;
+                    }
+                    let cats = &mut fields[fp].categories;
+                    match cats.iter_mut().find(|(n, _)| *n == cat.name) {
+                        Some((_, existing)) => *existing += c,
+                        None => cats.push((cat.name.clone(), c)),
+                    }
+                }
+            }
+        }
+        Ok(fields)
     }
 
     /// Tiered top-K: the base splits are in `(tier, docIdLo)` order — i.e. rank order — and
@@ -1669,6 +1761,65 @@ mod tests {
             block_on(ss.search_filtered(&resolver(0), "abc", &[], 10)).unwrap(),
             vec![0, 1, 2, 3]
         );
+    }
+
+    #[test]
+    fn facet_counts_aggregate_across_splits_by_name() {
+        // Same fixture: two "en" docs in split 0, two "fr" docs in split 1, each with its own
+        // .rrf. facet_counts must sum each split's per-category counts into one name-keyed result.
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            policy: Policy::Tiered,
+            byte_cap: 250,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 8,
+        });
+        let f = |lang: &str| vec![("lang".to_string(), lang.to_string())];
+        b.add_faceted("abc en0", &f("en")).unwrap();
+        b.add_faceted("abc en1", &f("en")).unwrap();
+        b.add_faceted("abc fr0", &f("fr")).unwrap();
+        b.add_faceted("abc fr1", &f("fr")).unwrap();
+        let built = b.finish().unwrap();
+        assert_eq!(built.splits.len(), 2);
+
+        let files: HashMap<String, Vec<u8>> = built
+            .splits
+            .iter()
+            .chain(built.facets.iter())
+            .cloned()
+            .collect();
+        let resolver = MapResolver(files);
+        let ss = open_built(&built);
+
+        let lang_of = |counts: &[FieldCounts]| -> Vec<(String, u64)> {
+            counts
+                .iter()
+                .find(|fc| fc.field == "lang")
+                .map(|fc| fc.categories.clone())
+                .unwrap_or_default()
+        };
+
+        // Full result set spans both splits: en=2 (split 0) + fr=2 (split 1).
+        let counts = block_on(ss.facet_counts(&resolver, &[0, 1, 2, 3])).unwrap();
+        let m: HashMap<String, u64> = lang_of(&counts).into_iter().collect();
+        assert_eq!(m.get("en"), Some(&2));
+        assert_eq!(m.get("fr"), Some(&2));
+
+        // Subset in split 0 only: fr is omitted (zero counts dropped).
+        let counts = block_on(ss.facet_counts(&resolver, &[0, 1])).unwrap();
+        assert_eq!(lang_of(&counts), vec![("en".to_string(), 2)]);
+
+        // A single fr id -> fr=1.
+        let counts = block_on(ss.facet_counts(&resolver, &[2])).unwrap();
+        assert_eq!(lang_of(&counts), vec![("fr".to_string(), 1)]);
+
+        // No ids -> no fields.
+        assert!(block_on(ss.facet_counts(&resolver, &[]))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

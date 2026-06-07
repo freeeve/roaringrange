@@ -1399,10 +1399,14 @@ impl RrtIndex {
 }
 
 /// A [`SplitFetcher`] for the browser: resolves each split's `data_file` name (and the
-/// stable-key sort-column name) to a [`WasmFetch`] over `base_url/<name>`.
+/// stable-key sort-column name) to a [`WasmFetch`] over `base_url/<name>`. When the set was
+/// booted from a boot bundle (`RrssIndex.openBundle`), `boot` hands each split its inlined boot
+/// from the resident `.rrhc`, so the split opens with no per-split header fetch.
 #[cfg(feature = "splits")]
 struct WasmSplitResolver {
     base: String,
+    #[cfg(feature = "hotcache")]
+    hc: Option<std::rc::Rc<crate::hotcache::Hotcache>>,
 }
 
 #[cfg(feature = "splits")]
@@ -1411,6 +1415,36 @@ impl crate::splitset::SplitFetcher for WasmSplitResolver {
     fn fetch_named(&self, name: &str) -> WasmFetch {
         WasmFetch::new(format!("{}/{}", self.base.trim_end_matches('/'), name))
     }
+
+    #[cfg(feature = "hotcache")]
+    fn boot(&self, split: &crate::splitset::Split) -> Option<Vec<u8>> {
+        self.hc
+            .as_ref()?
+            .inlined_by_name(&split.data_file)
+            .map(<[u8]>::to_vec)
+    }
+}
+
+/// Aggregated split-set facet counts as the JS `Array<{ field, cats: [{ name, count }] }>` the
+/// demo's `applyFacetCounts` consumes — the same shape as `facets_array_js`, but from the
+/// name-keyed [`crate::splitset::FieldCounts`] (split sets have no global category table).
+#[cfg(feature = "splits")]
+fn field_counts_to_js(fields: &[crate::splitset::FieldCounts]) -> JsValue {
+    let out = Array::new_with_length(fields.len() as u32);
+    for (fi, fc) in fields.iter().enumerate() {
+        let cats = Array::new_with_length(fc.categories.len() as u32);
+        for (ci, (name, count)) in fc.categories.iter().enumerate() {
+            let obj = Object::new();
+            let _ = Reflect::set(&obj, &"name".into(), &name.as_str().into());
+            let _ = Reflect::set(&obj, &"count".into(), &(*count as f64).into());
+            cats.set(ci as u32, obj.into());
+        }
+        let obj = Object::new();
+        let _ = Reflect::set(&obj, &"field".into(), &fc.field.as_str().into());
+        let _ = Reflect::set(&obj, &"cats".into(), &cats.into());
+        out.set(fi as u32, obj.into());
+    }
+    out.into()
 }
 
 /// A range-fetchable `RRSS` split set exposed to JavaScript. Boots the manifest in two ranged
@@ -1420,13 +1454,20 @@ impl crate::splitset::SplitFetcher for WasmSplitResolver {
 pub struct RrssIndex {
     inner: crate::splitset::SplitSet,
     base: String,
+    /// The boot bundle, when booted via [`open_bundle`](Self::open_bundle); its inlined split
+    /// boots let the query path open splits with no per-split header fetch. `Rc` so the
+    /// per-search resolver clones a handle, not the resident blob.
+    #[cfg(feature = "hotcache")]
+    hc: Option<std::rc::Rc<crate::hotcache::Hotcache>>,
 }
 
 #[cfg(feature = "splits")]
 #[wasm_bindgen]
 impl RrssIndex {
     /// Boots the split-set manifest at `manifest_url`; per-split files (and the sort-column
-    /// store, if any) are fetched from `base_url/<name>`. Returns a `Promise<RrssIndex>`.
+    /// store, if any) are fetched from `base_url/<name>`. Each queried split cold-opens its own
+    /// header; for the boot-bundle path that collapses those opens, see
+    /// [`openBundle`](Self::open_bundle). Returns a `Promise<RrssIndex>`.
     pub async fn open(manifest_url: String, base_url: String) -> Result<RrssIndex, JsError> {
         let inner = crate::splitset::SplitSet::open(WasmFetch::new(manifest_url))
             .await
@@ -1434,6 +1475,35 @@ impl RrssIndex {
         Ok(RrssIndex {
             inner,
             base: base_url,
+            #[cfg(feature = "hotcache")]
+            hc: None,
+        })
+    }
+
+    /// Boots the split set with an `RRHC` boot bundle: the manifest at `manifest_url` and the
+    /// bundle at `rrhc_url` are fetched in **one parallel wave** (two GETs, one round trip of
+    /// latency), then each split the query opens takes its boot from the bundle's inlined blob —
+    /// no per-split header fetch. A split the bundle didn't inline falls back to a cold open, so
+    /// the path degrades gracefully. Per-split data files still resolve as `base_url/<name>`.
+    /// Returns a `Promise<RrssIndex>`.
+    #[cfg(feature = "hotcache")]
+    #[wasm_bindgen(js_name = openBundle)]
+    pub async fn open_bundle(
+        manifest_url: String,
+        base_url: String,
+        rrhc_url: String,
+    ) -> Result<RrssIndex, JsError> {
+        let (manifest, bundle) = futures::future::join(
+            crate::splitset::SplitSet::open(WasmFetch::new(manifest_url)),
+            crate::hotcache::Hotcache::open(WasmFetch::new(rrhc_url)),
+        )
+        .await;
+        let inner = manifest.map_err(|e| JsError::new(&e.to_string()))?;
+        let hc = bundle.map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrssIndex {
+            inner,
+            base: base_url,
+            hc: Some(std::rc::Rc::new(hc)),
         })
     }
 
@@ -1442,6 +1512,8 @@ impl RrssIndex {
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<u32>, JsError> {
         let resolver = WasmSplitResolver {
             base: self.base.clone(),
+            #[cfg(feature = "hotcache")]
+            hc: self.hc.clone(),
         };
         self.inner
             .search(&resolver, query, limit)
@@ -1465,11 +1537,34 @@ impl RrssIndex {
         let pairs = filter_pairs(&filters)?;
         let resolver = WasmSplitResolver {
             base: self.base.clone(),
+            #[cfg(feature = "hotcache")]
+            hc: self.hc.clone(),
         };
         self.inner
             .search_filtered(&resolver, query, &pairs, limit)
             .await
             .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Per-(field, category) facet counts over `ids` (global doc IDs — typically a query's ranked
+    /// result from `search`/`searchFiltered`), as a JS `Array<{ field, cats: [{ name, count }] }>`
+    /// — the same shape the monolith's facet accessors return. Each contributing split's own
+    /// `‹split›.rrf` sidecar is opened and counted; counts are summed by category name (split sets
+    /// carry no global category table). Categories the result never hits are omitted (the demo
+    /// renders missing keys as `0`). Resolves to that array.
+    #[wasm_bindgen(js_name = facetCounts)]
+    pub async fn facet_counts(&self, ids: Vec<u32>) -> Result<JsValue, JsError> {
+        let resolver = WasmSplitResolver {
+            base: self.base.clone(),
+            #[cfg(feature = "hotcache")]
+            hc: self.hc.clone(),
+        };
+        let counts = self
+            .inner
+            .facet_counts(&resolver, &ids)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(field_counts_to_js(&counts))
     }
 
     /// Number of splits named by the manifest (base + delta).
@@ -1488,5 +1583,24 @@ impl RrssIndex {
     #[wasm_bindgen(js_name = totalBytes)]
     pub fn total_bytes(&self) -> u64 {
         self.inner.total_byte_size()
+    }
+
+    /// Whether this set was booted from an `RRHC` boot bundle ([`openBundle`](Self::open_bundle)),
+    /// i.e. its split boots are resident and split opens skip the per-split header GET.
+    #[cfg(feature = "hotcache")]
+    #[wasm_bindgen(js_name = hasBundle)]
+    pub fn has_bundle(&self) -> bool {
+        self.hc.is_some()
+    }
+
+    /// Number of split boots resident from the boot bundle (`0` when booted without one) — the
+    /// count of per-split header GETs the bundle collapsed into its single GET.
+    #[cfg(feature = "hotcache")]
+    #[wasm_bindgen(js_name = bundledBootCount)]
+    pub fn bundled_boot_count(&self) -> usize {
+        self.hc
+            .as_ref()
+            .map(|hc| hc.members().iter().filter(|m| m.inlined).count())
+            .unwrap_or(0)
     }
 }

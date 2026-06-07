@@ -10,7 +10,7 @@ name = "openalex-build"
 path = "src/main.rs"
 
 [dependencies]
-roaringrange = { path = "../../../rust", features = ["zstd", "splits", "terms"] }
+roaringrange = { path = "../../../rust", features = ["zstd", "splits", "terms", "hotcache"] }
 roaring = "0.11"
 rayon = "1"
 flate2 = "1"

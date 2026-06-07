@@ -848,6 +848,30 @@ impl<F: RangeFetch> Cursor<F> {
     }
 }
 
+/// The boot-region byte length of a serialized `RRS` from its leading header bytes — the
+/// 20-byte header plus the sparse index (`sparse_count(ngrams, stride) * 8`), i.e. the
+/// `[0, dictStart)` region [`Index::from_boot`] consumes. A bundle builder
+/// ([`crate::splitset_bundle`]) calls this to slice each split's boot region without
+/// materializing the whole index. `header` must hold at least the 20-byte header; errors on a
+/// short header, bad magic, or an unexpected version (the same checks as [`Index::from_boot`]).
+pub fn rrs_boot_len(header: &[u8]) -> Result<usize, IndexError> {
+    if header.len() < HEADER_SIZE {
+        return Err(IndexError::Malformed("short RRS header"));
+    }
+    if &header[0..4] != MAGIC {
+        let mut m = [0u8; 4];
+        m.copy_from_slice(&header[0..4]);
+        return Err(IndexError::BadMagic(m));
+    }
+    let version = read_u16(header, 4);
+    if version != 2 {
+        return Err(IndexError::BadVersion(version));
+    }
+    let ngrams = read_u32(header, 8);
+    let stride = read_u32(header, 12);
+    Ok(HEADER_SIZE + sparse_count(ngrams, stride) * 8)
+}
+
 /// Number of sparse-index entries: `ceil(ngrams / stride)`.
 fn sparse_count(ngrams: u32, stride: u32) -> usize {
     if ngrams == 0 || stride == 0 {

@@ -8,22 +8,30 @@ full-size corpus.
 ## Build + serve
 
 ```sh
-# 1. Generate the sample artifacts (split set + per-split facet sidecars + record store):
+# 1. Generate the sample artifacts (split set + per-split facet sidecars + record store + the
+#    .rrhc boot bundle):
 cd ../../rust
-cargo run --release --features splits --example splitset_demo_data   # -> ../examples/splitset-demo/data/
+cargo run --release --features "splits hotcache" --example splitset_demo_data   # -> ../examples/splitset-demo/data/
 
-# 2. (Re)build the wasm reader WITH the splits feature and copy it in:
-wasm-pack build --target web --out-dir /tmp/rrwasm --features "wasm splits"
+# 2. (Re)build the wasm reader WITH the splits + hotcache features and copy it in:
+wasm-pack build --target web --out-dir /tmp/rrwasm --features "wasm splits hotcache"
 cp /tmp/rrwasm/roaringrange.js /tmp/rrwasm/roaringrange_bg.wasm ../examples/splitset-demo/
 
-# 3. Serve (any static server that supports HTTP Range — Python's does):
+# 3. Serve with a Range-aware server (the reader requires HTTP Range; Python's stock
+#    `http.server` does NOT honor it, so use the bundled serve.py):
 cd ../examples/splitset-demo
-python3 -m http.server 8080
-# open http://localhost:8080/
+python3 serve.py 8080
+# open http://localhost:8080/            (boots from the .rrhc bundle)
+# open http://localhost:8080/?nobundle   (forces per-split cold opens, for comparison)
 ```
 
 ## What it shows
 
+- **`RrssIndex.openBundle(manifestUrl, baseUrl, rrhcUrl)`** boots the `.rrss` manifest and the
+  `.rrhc` boot bundle in one parallel wave, then opens each queried split from its **inlined
+  boot** (no per-split header GET) — the N per-split opens collapse into the single bundle GET.
+  The status line reports how many split boots came resident; `?nobundle` switches to the plain
+  per-split path below for comparison.
 - **`RrssIndex.open(manifestUrl, baseUrl)`** boots the `.rrss` manifest in two ranged reads;
   per-split `.rrs`/`.rrf` files are fetched (range) from `baseUrl/<name>` on demand.
 - **`searchFiltered(query, limit, filters)`** runs the tiered short-circuit, skips splits via

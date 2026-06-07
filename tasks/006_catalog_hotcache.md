@@ -404,3 +404,38 @@ Pure-Rust, no new dependency, behind a non-default `hotcache` Cargo feature.
 - **DEFERRED** (next): `Catalog::open_hotcache` + per-format `from_boot` constructors (the
   invasive wiring that boots every member from the inlined bytes), demo wiring, and Tier-2
   `.rrsplit` (`write_split` + footer). The format + read/write substrate is in place.
+
+### 2026-06-06 — first reader-path application SHIPPED: the split-set boot bundle (2 round trips)
+The split set was the lowest-risk application of the hotcache because the Rust query path
+already had the boot hook (`SplitFetcher::boot` → `Index::from_boot`); this pass took it end to
+end through the wasm reader and the standalone demo. 2-round-trip design (the manifest keeps its
+own GET; the bundle serves only the split boots), full vertical slice.
+- **Emitter — `rust/src/splitset_bundle.rs`** (native, `splits`+`hotcache`):
+  `write_splitset_bundle(w, &BuiltSplitSet, max_splits, inline_threshold)` inlines each split's
+  boot region (`[0, boot_len)`) as an `RRS` member keyed by the split's data-file name; reuses
+  `write_hotcache`. `max_splits` caps which top tiers are inlined (`0` = all); an over-threshold
+  split is referenced and just cold-opens (graceful). New pub helper
+  `index::rrs_boot_len(header)` computes a split's boot length from its 20-byte header alone (no
+  full open). 3 unit tests (all-inlined query == cold; `max_splits` cap leaves the tail cold-
+  opening; empty set).
+- **Reader — `rust/src/wasm.rs`**: `WasmSplitResolver` now carries the `Hotcache` (`Rc`, so the
+  per-search resolver clones a handle not the blob) and implements `boot()` from
+  `inlined_by_name`; new `RrssIndex.openBundle(manifestUrl, baseUrl, rrhcUrl)` fetches manifest +
+  `.rrhc` in **one parallel wave** (`futures::future::join`); `hasBundle()` / `bundledBootCount()`
+  introspection. All hotcache bits cfg-gated so `wasm`+`splits` (no hotcache) is unchanged.
+- **Demo — `examples/splitset-demo`**: `splitset_demo_data.rs` emits `index.rrhc` (under
+  `hotcache`); `index.html` boots via the bundle with a `?nobundle` A/B lever and reports the
+  collapse in the status line. README + build commands updated to `"splits hotcache"` /
+  `"wasm splits hotcache"`.
+- **Verified end-to-end** driving the real wasm over a Range-honoring server (the 400-doc demo,
+  4 splits): bundle boot = manifest×2 + rrhc×2 in parallel; a query opening all 4 splits issued
+  **28 requests with the bundle vs 36 without** — the bundle eliminates the 2 boot reads/split
+  (header + sparse index), `0` per-split header reads vs `4` — with **identical results**.
+  (Note: Python's `http.server` does NOT honor `Range`, so local verification needs a Range-
+  capable server; the README now flags this.)
+- Gates green: fmt; clippy on `wasm32` for `wasm splits hotcache` and `wasm splits`; lib tests
+  under `splits hotcache` (90, +3 new); default build unaffected (`rrs_boot_len` is pub, no
+  dead-code warning).
+- **STILL DEFERRED**: `Catalog::open_hotcache` + the other members' `from_boot` (the OpenAlex
+  6-cold-open demo — the bigger, more visible application), true 1-RT (inline the manifest +
+  `SplitSet::from_bytes`), and Tier-2 `.rrsplit`.

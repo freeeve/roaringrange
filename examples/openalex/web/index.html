@@ -629,12 +629,6 @@
               </svg>
               How it works
             </a>
-            <a class="howlink" href="splitset.html">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <rect x="3" y="4" width="7" height="16" rx="1" /><rect x="14" y="4" width="7" height="4" rx="1" /><rect x="14" y="10" width="7" height="4" rx="1" /><rect x="14" y="16" width="7" height="4" rx="1" />
-              </svg>
-              Split set
-            </a>
           </nav>
         </div>
 
@@ -700,6 +694,15 @@
           <span class="srvnote">embeds the query with EmbeddingGemma-300M in a Lambda (mode 1), then range-searches a Gemma-embedded vector index — vs the in-browser model2vec embedder</span>
         </div>
 
+        <div class="srvtoggle" id="splitmode-wrap" hidden>
+          <label class="switch">
+            <input type="checkbox" id="splitmode" />
+            <span class="track"></span>
+            <span>Split-set index</span>
+          </label>
+          <span class="srvnote">swaps the monolithic <code>RRS</code> for the <code>RRSS</code> split set — many byte-capped immutable splits, queried with tier/Bloom/facet pruning, booted from one <code>.rrhc</code> bundle</span>
+        </div>
+
         <button class="perftoggle" id="perftoggle" type="button" aria-expanded="false" aria-controls="perfbar">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span class="perftoggle-label">Show performance &amp; request details</span>
@@ -750,7 +753,7 @@
     </main>
 
     <script type="module">
-      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex } from "./roaringrange.js";
+      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex, RrssIndex } from "./roaringrange.js";
 
       /* -------- byte/request accounting via fetch interception (from webtest) -------- */
       const realFetch = self.fetch.bind(self);
@@ -777,8 +780,12 @@
       // index (top-cited subset) and the model2vec token-embedding matrix the
       // browser embeds the query with (no backend). doc IDs are shared with the
       // text index + record store, so results render through the same path.
+      // `split` (optional): an RRSS split set built over the same corpus/ranking as the monolith,
+      // under the `openalex-split/` prefix — its manifest, the per-split base URL, the `.rrhc`
+      // boot bundle, and its own (raw) record store. Enables the "Split-set index" toggle.
       const DATASETS = {
-        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-1m-stem.rrt", rrviGemma: null },
+        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-1m-stem.rrt", rrviGemma: null,
+                  split: { rrss: "openalex-split/openalex.rrss", base: "openalex-split", rrhc: "openalex-split/openalex.rrhc", rec: "openalex-split/openalex-records" } },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
       };
@@ -794,6 +801,14 @@
       const RRM2_URL = DATASETS[DS].rrm2 ? new URL(DATASETS[DS].rrm2, location.href).href : null;
       const RRT_URL = DATASETS[DS].rrt ? new URL(DATASETS[DS].rrt, location.href).href : null;
       const RRVI_GEMMA_URL = DATASETS[DS].rrviGemma ? new URL(DATASETS[DS].rrviGemma, location.href).href : null;
+      // Split-set artifacts (null unless the dataset declares a `split`): the manifest, the
+      // per-split base URL, the `.rrhc` boot bundle, and the split set's own record store.
+      const SPLIT = DATASETS[DS].split || null;
+      const SPLIT_RRSS_URL = SPLIT ? new URL(SPLIT.rrss, location.href).href : null;
+      const SPLIT_BASE_URL = SPLIT ? new URL(SPLIT.base, location.href).href : null;
+      const SPLIT_RRHC_URL = SPLIT ? new URL(SPLIT.rrhc, location.href).href : null;
+      const SPLIT_REC_IDX_URL = SPLIT ? new URL(`${SPLIT.rec}.idx`, location.href).href : null;
+      const SPLIT_REC_BIN_URL = SPLIT ? new URL(`${SPLIT.rec}.bin`, location.href).href : null;
       const PAGE = 25;
       // Optional server-side search: the regional Lambda runs the same intersection
       // over in-region S3 reads and returns only this page's IDs + the exact total,
@@ -815,6 +830,10 @@
       let rrviGemma = null;         // RrviIndex over Gemma-embedded vectors (mode 1's search target)
       let gemmaReady = false;       // rrviGemma opened + embed endpoint configured
       let rterm = null;             // RrtIndex — the FST term-index reader (whole-word/stemmed)
+      let rrss = null;              // RrssIndex — the split-set reader (trigram backend alternative)
+      let splitRecords = null;      // the split set's own RRSR record store (raw; its own doc-ID space)
+      let splitAvailable = false;   // the split set + its records opened OK (shows the toggle)
+      let splitMode = false;        // the "Split-set index" toggle: swap the trigram backend to RrssIndex
       let trigramAvailable = true;  // the text .rrs opened (false while the full index is still uploading)
       let facetSrc = null;          // facet source: the text index, or a standalone .rrf when the .rrs isn't up yet
       const SEM_NPROBE = 8, SEM_K = 250, RRF_K = 60;  // vector probes (~1 MB/cluster over the 484M nlist=16384 index), ranked depth (≈10 pages), RRF constant
@@ -850,6 +869,7 @@
         dsWorks: $("ds-works"), activeFiles: $("active-files"),
         servermode: $("servermode"),
         lambdasem: $("lambdasem"), lambdasemWrap: $("lambdasem-wrap"),
+        splitmode: $("splitmode"), splitmodeWrap: $("splitmode-wrap"),
       };
 
       // Static file → URL, keyed for the per-mode size readout. A dataset may not
@@ -893,7 +913,12 @@
         const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
         const parts = [];
         const add = (label, bytes) => parts.push({ label, bytes });
-        if (mode === "trigram" || mode === "hybrid") { add(".rrs", fileSizes.rrs); add(".rrf", fileSizes.rrf); }
+        if (mode === "trigram" && splitMode && rrss) {
+          // Split-set backend: the manifest + per-split files (and their .rrf), as one footprint.
+          add(`.rrss + ${rrss.splitCount()} splits`, Number(rrss.totalBytes()));
+        } else if (mode === "trigram" || mode === "hybrid") {
+          add(".rrs", fileSizes.rrs); add(".rrf", fileSizes.rrf);
+        }
         if (mode === "term") add(".rrt", fileSizes.rrt);
         if (mode === "semantic" || mode === "hybrid") { add(".rrvi", fileSizes.rrvi); add(".rrm2", fileSizes.rrm2); }
         const records = (fileSizes.idx || 0) + (fileSizes.bin || 0);
@@ -1007,8 +1032,11 @@
          Returns a Map<docID, recordObj>; unparseable/out-of-range entries are skipped. */
       async function fetchRecords(ids) {
         const map = new Map();
-        if (!records || !ids.length) return map;
-        const blobs = await records.getMany(Uint32Array.from(ids));
+        // Split-set mode reads from the split set's OWN record store (its doc IDs are the split
+        // set's, served by openalex-split/openalex-records.*); every other mode reads the monolith.
+        const store = (splitMode && splitRecords) ? splitRecords : records;
+        if (!store || !ids.length) return map;
+        const blobs = await store.getMany(Uint32Array.from(ids));
         for (let i = 0; i < ids.length; i++) {
           const bytes = blobs[i];
           if (!bytes) continue;
@@ -1818,6 +1846,40 @@
           return;
         }
         setPerf({ embed: null, vsearch: null });   // leaving the vector modes: drop their rows
+        // Split-set backend: swap the monolith RRS cursor for the RRSS reader. It returns a flat
+        // ranked list (tier/Bloom/facet-pruned), so route through the rankedIds path like the
+        // other ranked modes; facet counts come from the split set's own per-split .rrf sidecars
+        // (it has no global facet table). Independent of the monolith text index, so it works even
+        // while the full `.rrs` is still uploading.
+        if (splitMode && rrss) {
+          const filters = Array.from(activeFilters);
+          const pairs = filters.map((k) => k.split("\t"));
+          const t0 = performance.now(), r0 = reqs, b0 = bytes;
+          let sids;
+          try {
+            sids = Array.from(filters.length
+              ? await rrss.searchFiltered(q, SEM_K_FILTER, pairs)
+              : await rrss.search(q, SEM_K));
+          } catch (e) { els.mSummary.textContent = `split error: ${e}`; return; }
+          if (mySeq !== searchSeq) return;
+          const searchMs = performance.now() - t0, searchReqs = reqs - r0, searchBytes = bytes - b0;
+          // Facet counts over the result set from the split set's own sidecars.
+          const fcR0 = reqs, fcB0 = bytes, fcT0 = performance.now();
+          let fc = null;
+          try { fc = await rrss.facetCounts(Uint32Array.from(sids)); } catch (_) {}
+          if (mySeq !== searchSeq) return;
+          cur = null;
+          rankedIds = sids;
+          applyFacetCounts(fc);
+          rankedSummary = `split set${filters.length ? " + facets" : ""} · ${sids.length} match${sids.length === 1 ? "" : "es"} · ${rrss.splitCount()} splits · ${(performance.now() - t0).toFixed(0)} ms`;
+          setPerf({
+            search: { ms: searchMs, reqs: searchReqs, bytes: searchBytes },
+            facetcount: { ms: performance.now() - fcT0, reqs: reqs - fcR0, bytes: bytes - fcB0 },
+            embed: null, vsearch: null, tail: null, tailresults: null,
+          });
+          await goPageRanked(resetPaging ? 0 : offset);
+          return;
+        }
         // Trigram mode needs the text index (may still be uploading for the full set).
         if (!idx) {
           els.results.innerHTML = `<div class="empty">The full text index is still uploading — <b>Semantic</b> search works now.</div>`;
@@ -1906,6 +1968,24 @@
         try { lookup = await RrsLookup.open(LOOKUP_URL); lookupSeg = seg(); }
         catch (_) { lookup = null; mr = reqs; mb = bytes; mt = performance.now(); }
 
+        // Split-set backend (optional): boot the RRSS manifest + its `.rrhc` boot bundle in one
+        // parallel wave (openBundle), falling back to a plain open if only the bundle is absent,
+        // plus the split set's own raw record store. Absent/uploading → the toggle stays hidden
+        // and the demo runs monolith-only. Independent of the monolith, so it never blocks boot.
+        if (SPLIT_RRSS_URL) {
+          try {
+            if (typeof RrssIndex.openBundle === "function" && SPLIT_RRHC_URL) {
+              try { rrss = await RrssIndex.openBundle(SPLIT_RRSS_URL, SPLIT_BASE_URL, SPLIT_RRHC_URL); }
+              catch (_) { rrss = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL); }
+            } else {
+              rrss = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL);
+            }
+            splitRecords = await RrsRecords.open(SPLIT_REC_IDX_URL, SPLIT_REC_BIN_URL);
+            splitAvailable = true;
+          } catch (_) { rrss = null; splitRecords = null; splitAvailable = false; }
+          mr = reqs; mb = bytes; mt = performance.now();   // re-baseline; split boot has no perf row
+        }
+
         setPerf({ index, facets, recstore, lookup: lookupSeg, summary: "ready" });
         loadDatasetStats();   // fire-and-forget; fills the header line, off the search path
         renderFacets();
@@ -1918,6 +1998,9 @@
           $("fuzzmode").style.display = "none";
           const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = "none";
         }
+        // The split-set toggle is offered only when the split set is deployed and we're in trigram
+        // mode (it swaps the trigram backend).
+        els.splitmodeWrap.hidden = !(splitAvailable && searchMode === "trigram");
 
         const restored = applyUrlState();
         if (restored) {
@@ -1956,6 +2039,7 @@
           const triOnly = mode === "trigram";
           $("fuzzmode").style.display = triOnly ? "" : "none";
           const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = triOnly ? "" : "none";
+          els.splitmodeWrap.hidden = !(triOnly && splitAvailable);   // split-set toggle is trigram-only
           renderActiveFiles();   // show the files this mode range-reads
           runSearch(true);
         }));
@@ -1987,6 +2071,15 @@
       els.servermode.addEventListener("change", () => {
         serverMode = els.servermode.checked;
         runSearch(true);   // filters + facet counts now work in server mode (via the Lambda)
+      });
+      // Split-set opt-in: swap the trigram backend from the monolith RRS to the RRSS split set.
+      // Mutually exclusive with server mode (the split branch is checked first); turning it on
+      // clears server mode so the two backends don't both claim the trigram path.
+      els.splitmode.addEventListener("change", () => {
+        splitMode = els.splitmode.checked;
+        if (splitMode && serverMode) { serverMode = false; els.servermode.checked = false; }
+        renderActiveFiles();
+        runSearch(true);
       });
       // Mode-1 opt-in: embed queries with the EmbeddingGemma Lambda against the Gemma
       // vector index, instead of the in-browser model2vec embedder. Only revealed when
