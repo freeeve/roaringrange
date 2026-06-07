@@ -1,7 +1,13 @@
 # Task 012 — fst (Rust) build-perf investigation + possible upstream PRs
 
-**Status:** in-progress (planning + fork done 2026-06-06; realistic-corpus harness
-landed 2026-06-06). Spun off from task 010 (the byte-exact Go port at `~/fst-go`,
+**Status:** **done** (2026-06-07). The investigation reached a verdict (allocation gap,
+not allocator/variance), the fix (E3 — inline single-transition builder nodes, no-dep) is
+implemented, validated byte-identical, ~17× fewer build allocations / ~30% faster at 5M
+scale, pushed to the `freeeve/fst` fork, and **adopted across every roaringrange consumer**
+(rust crate, OpenAlex builder, wasm/demo client, python — all lockfiles pin the fork commit
+`0c2ac459`). The remaining work is optional, sign-off-gated **upstream contribution** (file
+Issue A, the tantivy-fst PR, the E5 reuse API) — spun off to **task 018**; none of it affects
+roaringrange. Spun off from task 010 (the byte-exact Go port at `~/fst-go`,
 https://github.com/freeeve/fst-go).
 
 ## Why this exists
