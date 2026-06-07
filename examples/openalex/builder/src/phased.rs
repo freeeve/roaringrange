@@ -290,14 +290,7 @@ fn finalize_text(active: &[usize], work: &Path, rrs_path: &str) {
     let tmp = tmp_path(Path::new(rrs_path));
     {
         let mut f = File::create(&tmp).expect("create rrs tmp");
-        merge_partials_to_rrs(
-            &partials,
-            GRAM as u16,
-            DEFAULT_STRIDE,
-            DEFAULT_HEAD_BOUNDARY,
-            &mut f,
-        )
-        .expect("merge partials");
+        merge_partials_to_rrs(&partials, GRAM as u16, DEFAULT_STRIDE, &mut f).expect("merge partials");
         f.flush().expect("flush rrs");
     }
     std::fs::rename(&tmp, rrs_path).expect("rename rrs");

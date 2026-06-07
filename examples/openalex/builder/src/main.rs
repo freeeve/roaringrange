@@ -52,8 +52,8 @@ use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use roaringrange::build::{
-    split_posting, train_record_dict, write_facets, write_index, write_lookup, write_records,
-    write_records_zstd, FacetCategory, FacetField, RecordWriter, DEFAULT_HEAD_BOUNDARY,
+    serialize_posting, split_posting, train_record_dict, write_facets, write_index, write_lookup,
+    write_records, write_records_zstd, FacetCategory, FacetField, RecordWriter, DEFAULT_HEAD_BOUNDARY,
     DEFAULT_STRIDE,
 };
 use roaringrange::ngram_keys;
@@ -415,29 +415,19 @@ fn main() {
 
     // Split each posting head/tail (parallel across shards) and write the RRS.
     let t3 = Instant::now();
-    let entries: Vec<(u64, Vec<u8>, Vec<u8>)> = shards
+    let entries: Vec<(u64, Vec<u8>)> = shards
         .into_par_iter()
         .flat_map_iter(|m| {
             let map = m.into_inner().unwrap();
             map.into_iter()
-                .map(|(k, bm)| {
-                    let (h, t) = split_posting(&bm, DEFAULT_HEAD_BOUNDARY);
-                    (k, h, t)
-                })
+                .map(|(k, bm)| (k, serialize_posting(&bm)))
                 .collect::<Vec<_>>()
         })
         .collect();
     let ngrams = entries.len();
     {
         let out = BufWriter::with_capacity(1 << 20, File::create(&rrs_path).expect("create rrs"));
-        write_index(
-            out,
-            GRAM as u16,
-            DEFAULT_STRIDE,
-            DEFAULT_HEAD_BOUNDARY,
-            entries,
-        )
-        .expect("write index");
+        write_index(out, GRAM as u16, DEFAULT_STRIDE, entries).expect("write index");
     }
     info!(
         ngrams,

@@ -32,7 +32,8 @@
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use roaringrange::build::{
-    split_posting, write_facets, write_perm, FacetCategory, FacetField, DEFAULT_HEAD_BOUNDARY,
+    serialize_posting, split_posting, write_facets, write_perm, FacetCategory, FacetField,
+    DEFAULT_HEAD_BOUNDARY,
 };
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -217,7 +218,6 @@ fn remap_text_index(in_path: &str, inverse: &[u32], out_path: &str) -> io::Resul
     if &hdr[0..4] != b"RRSI" {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "rrs: bad magic"));
     }
-    let version = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
     let gram = u16::from_le_bytes(hdr[6..8].try_into().unwrap());
     let ngrams = u32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
     let stride = u32::from_le_bytes(hdr[12..16].try_into().unwrap());
@@ -227,33 +227,28 @@ fn remap_text_index(in_path: &str, inverse: &[u32], out_path: &str) -> io::Resul
         ngrams.div_ceil(stride.max(1) as usize)
     };
 
-    // A version-2 header carries a trailing 4-byte head_boundary; consume it so the
-    // cursor reaches the sparse index. Skip the sparse index (rebuilt from the
-    // dictionary below) and read the dictionary — the cursor then lands at the first
-    // posting (dictionary order).
-    let header_extra = if version >= 2 { 4i64 } else { 0 };
-    r.seek(SeekFrom::Current(header_extra + (sparse_count * 8) as i64))?;
+    // Skip the sparse index (rebuilt from the dictionary below) and read the v3 dictionary —
+    // the cursor then lands at the first posting (dictionary order).
+    r.seek(SeekFrom::Current((sparse_count * 8) as i64))?;
     let mut keys: Vec<u64> = Vec::with_capacity(ngrams);
-    let mut sizes: Vec<(usize, usize)> = Vec::with_capacity(ngrams);
+    let mut sizes: Vec<usize> = Vec::with_capacity(ngrams);
     for _ in 0..ngrams {
-        let mut e = [0u8; 24];
+        let mut e = [0u8; 20];
         r.read_exact(&mut e)?;
         keys.push(u64::from_le_bytes(e[0..8].try_into().unwrap()));
-        let hlen = u32::from_le_bytes(e[16..20].try_into().unwrap()) as usize;
-        let tlen = u32::from_le_bytes(e[20..24].try_into().unwrap()) as usize;
-        sizes.push((hlen, tlen));
+        sizes.push(u32::from_le_bytes(e[16..20].try_into().unwrap()) as usize);
     }
 
-    // Output layout uses the 20-byte version-2 header.
-    let dict_start = 20 + sparse_count * 8;
-    let postings_start = (dict_start + ngrams * 24) as u64;
+    // Output uses the 16-byte v3 header and 20-byte dict.
+    let dict_start = 16 + sparse_count * 8;
+    let postings_start = (dict_start + ngrams * 20) as u64;
 
     // Write postings first (after the reserved header/dict region), recording the
     // output dictionary as we go; then seek back and write header + sparse + dict.
     let mut out = File::create(out_path)?;
     out.seek(SeekFrom::Start(postings_start))?;
     let mut bw = BufWriter::with_capacity(1 << 20, out);
-    let mut out_dict: Vec<(u64, u64, u32, u32)> = Vec::with_capacity(ngrams); // key, off, hlen, tlen
+    let mut out_dict: Vec<(u64, u64, u32)> = Vec::with_capacity(ngrams); // key, off, size
     let mut off = postings_start;
 
     let mut idx = 0usize;
@@ -261,28 +256,24 @@ fn remap_text_index(in_path: &str, inverse: &[u32], out_path: &str) -> io::Resul
         let end = (idx + REMAP_BATCH).min(ngrams);
         // Read this batch's raw postings sequentially.
         let mut raw: Vec<Vec<u8>> = Vec::with_capacity(end - idx);
-        for &(hlen, tlen) in &sizes[idx..end] {
-            let mut b = vec![0u8; hlen + tlen];
+        for &size in &sizes[idx..end] {
+            let mut b = vec![0u8; size];
             r.read_exact(&mut b)?;
             raw.push(b);
         }
-        // Remap in parallel: deserialize head+tail, union, remap, re-split.
-        let remapped: Vec<(Vec<u8>, Vec<u8>)> = raw
+        // Remap in parallel: deserialize the single posting, remap, re-serialize.
+        let remapped: Vec<Vec<u8>> = raw
             .par_iter()
-            .zip(&sizes[idx..end])
-            .map(|(bytes, &(hlen, _))| {
-                let mut bm = RoaringBitmap::deserialize_from(&bytes[..hlen]).expect("head");
-                bm |= RoaringBitmap::deserialize_from(&bytes[hlen..]).expect("tail");
-                let s = remap_bitmap(&bm, inverse);
-                split_posting(&s, DEFAULT_HEAD_BOUNDARY)
+            .map(|bytes| {
+                let bm = RoaringBitmap::deserialize_from(&bytes[..]).expect("posting");
+                serialize_posting(&remap_bitmap(&bm, inverse))
             })
             .collect();
         // Write in dictionary order.
-        for (i, (head, tail)) in remapped.into_iter().enumerate() {
-            bw.write_all(&head)?;
-            bw.write_all(&tail)?;
-            out_dict.push((keys[idx + i], off, head.len() as u32, tail.len() as u32));
-            off += (head.len() + tail.len()) as u64;
+        for (i, posting) in remapped.into_iter().enumerate() {
+            bw.write_all(&posting)?;
+            out_dict.push((keys[idx + i], off, posting.len() as u32));
+            off += posting.len() as u64;
         }
         idx = end;
     }
@@ -292,19 +283,17 @@ fn remap_text_index(in_path: &str, inverse: &[u32], out_path: &str) -> io::Resul
     // Header + sparse index + dictionary (keys already in sorted dictionary order).
     out.seek(SeekFrom::Start(0))?;
     out.write_all(b"RRSI")?;
-    out.write_all(&2u16.to_le_bytes())?;
+    out.write_all(&3u16.to_le_bytes())?;
     out.write_all(&gram.to_le_bytes())?;
     out.write_all(&(ngrams as u32).to_le_bytes())?;
     out.write_all(&stride.to_le_bytes())?;
-    out.write_all(&DEFAULT_HEAD_BOUNDARY.to_le_bytes())?;
     for i in 0..sparse_count {
         out.write_all(&out_dict[i * stride as usize].0.to_le_bytes())?;
     }
-    for (key, poff, hlen, tlen) in &out_dict {
+    for (key, poff, size) in &out_dict {
         out.write_all(&key.to_le_bytes())?;
         out.write_all(&poff.to_le_bytes())?;
-        out.write_all(&hlen.to_le_bytes())?;
-        out.write_all(&tlen.to_le_bytes())?;
+        out.write_all(&size.to_le_bytes())?;
     }
     out.flush()
 }
@@ -424,19 +413,13 @@ mod tests {
         let n = 5usize;
         let abc = ngram_keys("abc", 3)[0];
         let bcd = ngram_keys("bcd", 3)[0];
-        let entries: Vec<(u64, Vec<u8>, Vec<u8>)> = vec![
-            {
-                let (h, t) = split_posting(&bm(&[0, 2, 4]), DEFAULT_HEAD_BOUNDARY);
-                (abc, h, t)
-            },
-            {
-                let (h, t) = split_posting(&bm(&[1, 2, 3]), DEFAULT_HEAD_BOUNDARY);
-                (bcd, h, t)
-            },
+        let entries: Vec<(u64, Vec<u8>)> = vec![
+            (abc, serialize_posting(&bm(&[0, 2, 4]))),
+            (bcd, serialize_posting(&bm(&[1, 2, 3]))),
         ];
         {
             let w = BufWriter::new(File::create(&rrs_in).unwrap());
-            write_index(w, 3, DEFAULT_STRIDE, DEFAULT_HEAD_BOUNDARY, entries).unwrap();
+            write_index(w, 3, DEFAULT_STRIDE, entries).unwrap();
         }
         // A "year" facet field encoding per-doc years: 2020 -> {1,4}, 2010 -> {0,2}, 1990 -> {3}.
         let mk = |name: &str, b: RoaringBitmap| {

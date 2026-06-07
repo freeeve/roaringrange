@@ -53,10 +53,11 @@ collapse onto the cursor), not space.
       (openBundle + search + facetCounts correct). splitset-demo data + both demo readers rebuilt to v3.
 
 ## Follow-ups (out of this pass)
-- **openalex BUILDER → v3** (the monolith rebuild path; separate crate, not in `rust/`'s test run):
-  `examples/openalex/builder/src/{main.rs,phased.rs,secondary.rs}` still emit v2 (hand-rolled streaming
-  RRS writers + `write_index` callers) and **will not compile against v3 `roaringrange`** until updated.
-  Required before rebuilding `openalex-full.rrs` / monolith splits to v3.
+- [x] **openalex BUILDER → v3** (DONE 2026-06-07): `main.rs` `build_index` + `phased.rs`
+  `merge_partials_to_rrs` call + `secondary.rs` `remap_text_index` (v3 read+write) and its test all
+  emit/read v3; facet (`RRSF`) builders keep head/tail. Builds all-targets clean; 8 builder tests pass
+  (incl. the secondary remap round-trip → v3 reader). `headtune.rs` still reads the v2 head/tail layout
+  and is now **obsolete** (it tuned the removed `head_boundary`) — left as-is, not on the build path.
 - **Go port v3** (separate task): `go/splitsetbuild.go` → v3, regenerate the golden, re-assert Rust↔Go.
   Until then the committed `go/testdata/rrss_build_golden.txt` is **v3 (Rust) vs v2 (Go)** — the Go
   conformance test is expected to FAIL by design.
