@@ -1,6 +1,6 @@
 # 001 — Optional record-store compression
 
-Status: **implemented** (behind the `zstd` Cargo feature). Records can be stored
+Status: **done** — shipped and live in the OpenAlex demo. Records can be stored
 zstd-compressed against a shared dictionary in the additive **version-2** record
 layout (`[1-byte tag][payload]` per record, dictionary shipped as a `*.dict`
 sidecar). The raw **version-1** store is unchanged and reads byte-for-byte. This
@@ -12,10 +12,14 @@ changes neither the `RRSI` index nor the `RRSF` facet format. See
 `RrsCatalog.openRecordsWithDict`. The decode path uses pure-Rust `ruzstd`
 (wasm-compatible); the native encode/train path uses the C `zstd` crate.
 
-## Why deferred
-At current scales the savings are a few GB → a few cents/month, and the `.rrs`
-index dominates total storage. Revisit if record-store size or egress becomes a
-real number (e.g. the full ~250M-work corpus).
+## In production
+The full-corpus build enables it by default: `ec2-full-build.sh` runs the builder
+with `-records-zstd -zstd-level $ZSTD_LEVEL -dict-size $DICT_SIZE -dict …`, and
+the web reader opens the store via `RrsRecords.openWithDict(IDX, BIN, dict)`
+(falling back to plain `.open()` only when no `.dict` sidecar is present). zstd
+records compose with chunked builds (`-chunks > 1`): the shared dictionary is
+trained from a sample re-derived from the temps so the chunked store is
+byte-identical to the single-pass `write_records_zstd` store.
 
 ## Design (decided)
 - **Shared zstd dictionary, not big blocks.** Records are small (~165 B) and

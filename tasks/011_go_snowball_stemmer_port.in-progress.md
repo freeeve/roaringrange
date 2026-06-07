@@ -1,6 +1,44 @@
 # Task 011 — Byte-exact Go port of `rust-stemmers` (Snowball English / Porter2)
 
-**Status:** pending (scoping)
+**Status:** in progress — stemmer DONE (spun out to a standalone repo); roaringrange-side wiring remains.
+
+## Outcome (2026-06-06)
+
+The stemmer port was spun out to a **standalone repo** — `github.com/freeeve/go-stemmers`
+(`~/go-stemmers`, MIT) — mirroring the task-010 `~/fst-go` pattern, and the user widened
+scope to a **full port of the rust-stemmers crate (all 18 Snowball algorithms)**, not just
+English. Output is byte-identical to rust-stemmers 1.2.0, verified by:
+
+- `TestVectors` — committed `voc_*`/`res_*` for all 18 languages (rust-stemmers' own 12 +
+  snowball-data vocabularies with `rustgen`-generated goldens for the 6 it ships none for).
+- `TestRustgenParity` — live differential vs the `rustgen` oracle over a 60k-term OpenAlex
+  corpus (`cmd/oacorpus`), all 18 languages.
+- `FuzzStem` — 30s, no panics / no UTF-8 corruption.
+
+Correctness is **output-string parity**, not fst-style serialized bytes (a stemmer has no
+on-disk format). Perf pass: Env pooling + in-place slice edits + skip-copy-when-unmodified →
+English 4→1 allocs/op. Layout: `internal/snowball` runtime, `internal/<lang>` per algorithm,
+`stemmers.go` API, `rustgen/` oracle, `cmd/oacorpus/`.
+
+### Still TODO (roaringrange-side, here)
+
+Verified open as of 2026-06-07: `go/go.mod` has no go-stemmers dependency, there is no
+RRTI `.rrt` Go writer in `go/`, and the `terms.rs` tokenizer/`STOP_WORDS` are not ported
+(the only `tokenize` in `go/` is the unrelated n-gram tokenizer). Dependency path is
+**`github.com/freeeve/go-stemmers`** (plural; package `stemmers`; `Algorithm`/`New`/`Stemmer`
+API mirroring rust-stemmers) — the singular `go-stemmer` does not exist.
+
+1. Depend on `github.com/freeeve/go-stemmers` from the roaringrange `go/` module and wire it
+   into the RRTI `.rrt` Go writer (task 011's original purpose: a Go builder that stems
+   exactly as `terms.rs`).
+2. Port `terms.rs::tokenize` (Tantivy SimpleTokenizer + LowerCaser; `char::is_alphanumeric`
+   + `char::to_lowercase`) and the `STOP_WORDS` list to Go, with conformance against the
+   Rust side (the original scope items 2 & 3 below). Watch the `to_lowercase` full-mapping
+   vs Go `unicode.ToLower` edge cases.
+
+---
+
+(original scoping doc follows)
 
 A Go `stem(word) -> stem` that is **byte-identical** to `rust-stemmers`' English stemmer
 (Snowball "english" = Porter2, `Algorithm::English`) for every input, so the Go build side

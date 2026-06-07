@@ -1,5 +1,9 @@
 # 003 — Secondary index (sort columns + second-order index)
 
+Status: **done** — `RRSC` format, reader, and the OpenAlex builder integration
+are complete. Surfacing it in the live demo (Relevance/Newest toggle) + the
+Lambda newest+filters path was spun off to **task 017**.
+
 Search/paginate the corpus in a rank order other than the primary static rank,
 without losing the constant-cost-per-query property. Two mechanisms sharing one
 substrate (`RRSC` sort columns):
@@ -28,15 +32,18 @@ Design + rationale: `/Users/efreeman/.claude/plans/happy-launching-beacon.md`.
       space-agnostic `Index::search_cursor_filtered`, exposes `fields()`/`counts()`;
       cursor exposes `head_bitmap()`. wasm: `openFacets`/`facetsJson`/
       `searchCursorFiltered` + `RrsSecondaryCursor::facetCountsJson`. Tested.
-- [ ] builder: secondary doc-ID assignment + second `.rrs` + perm column **+ secondary
-      `.rrf` remap** (`examples/openalex/builder/src/main.rs`) — rides the inverse
-      perm; needs the full rebuild to be useful
+- [x] builder: secondary doc-ID assignment + second `.rrs` + perm column + secondary
+      `.rrf` remap — implemented in `examples/openalex/builder/src/secondary.rs`
+      (`build_secondary` / `order_perm` / `write_perm` / `write_secondary_facets`,
+      date-desc perm, test `perm_is_date_desc_and_consistent`)
 - [ ] (optional) `Catalog::with_secondary` convenience — standalone module chosen to
       match the demo's separate-objects wiring; add if a one-shot facade is wanted
 
-## Stage 3 — OpenAlex demo + Lambda (follow-up)
-- [ ] date-desc secondary artifact (`.rrs` + perm + `.rrf`) + Relevance/Newest toggle
-- [ ] server-mode (Lambda) wiring for newest+filters
+## Stage 3 — OpenAlex demo + Lambda → spun off to task 017
+The library + builder are complete; only the user-facing surfacing remains, tracked
+in `tasks/017_secondary_index_demo_lambda.md`:
+- date-desc secondary artifact (`.rrs` + perm + `.rrf`) + Relevance/Newest toggle
+- server-mode (Lambda) wiring for newest+filters
 
 ## Deferred
 - Go writer/reader + `go/conformance/` for `RRSC` (precedent: `.rril` is Rust-only).
