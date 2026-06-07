@@ -1021,15 +1021,15 @@
          Each step holds { ms, reqs, bytes } or null (hidden).
          boot holds just ms (a number) or null.
          Calling setPerf({ ... }) patches the model and re-renders.
-         tail: null clears/hides the "Load all matches" row. */
+         tail: null clears/hides the tail page's row. */
       const perfModel = { index: null, facets: null, recstore: null, lookup: null, vecindex: null, embedder: null, search: null, embed: null, vsearch: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null, headN: null, query: null, summary: null };
 
       /** Render the "How this search ran" rows from perfModel. */
       function renderPerf() {
         const GROUPS = [
           { key: "startup", title: "Startup · ran once" },
-          { key: "popular", title: "Load popular" },
-          { key: "rest", title: "Load the rest" },
+          { key: "popular", title: "First page" },
+          { key: "rest", title: "This page · paged into the tail" },
         ];
         const steps = [
           { g: "startup", name: "Open index", desc: "index header + dictionary", get: () => perfModel.index },
@@ -1048,14 +1048,14 @@
           },
           { g: "popular", name: "DOI lookup", desc: "resolve identifier", get: () => perfModel.doilookup },
           { g: "popular", name: "Facet counts", desc: "count facets in-wasm", get: () => perfModel.facetcount },
-          { g: "popular", name: "Records fetch", desc: "the popular page's records", get: () => perfModel.results },
+          { g: "popular", name: "Records fetch", desc: "this page's records", get: () => perfModel.results },
           {
             g: "rest",
-            name: "ID fetch",
-            desc: "fetch remaining postings",
+            name: "Tail fetch",
+            desc: "only the tail buckets this page spans",
             get: () => (!serverMode && perfModel.tail != null) ? perfModel.tail : null,
           },
-          { g: "rest", name: "Records fetch", desc: "the full page's records", get: () => perfModel.tailresults },
+          { g: "rest", name: "Records fetch", desc: "this page's records", get: () => perfModel.tailresults },
         ];
 
         /* Phases split into one-time startup opens (boot) and per-search work. Each
@@ -1099,8 +1099,7 @@
             const gBytes = rows.reduce((a, s) => a + (s.d.bytes || 0), 0);
             sub = `<span class="pg-sub">${fmtBytes(gBytes)} · ${gMs.toFixed(0)} ms</span>`;
           } else if (grp.key === "rest" && perfModel.headN != null) {
-            const note = perfModel.headN < PAGE ? " (less than page size)" : "";
-            sub = `<span class="pg-sub">popular: ${fmt(perfModel.headN)} result${perfModel.headN === 1 ? "" : "s"}${note}</span>`;
+            sub = `<span class="pg-sub">most-cited head: ${fmt(perfModel.headN)}</span>`;
           } else if (grp.key === "popular" && perfModel.query) {
             const qd = perfModel.query.length > 40 ? perfModel.query.slice(0, 40) + "…" : perfModel.query;
             sub = `<span class="pg-sub">query: "${esc(qd)}"</span>`;
@@ -1349,13 +1348,12 @@
           const lead = total
             ? `<b>${fmt(total)}</b>+ result${total === 1 ? "" : "s"}`
             : `Searching the full corpus`;
-          // Paging fetches the tail incrementally (only the buckets each page spans),
-          // so Next is cheap. "Load all matches" is the explicit full scan that yields
-          // the exact total — over the 484M corpus that can be hundreds of MB.
-          const tailUI =
-            ` · <button type="button" id="loadall" style="margin-left:2px;padding:2px 9px;border:1px solid #c7d2fe;border-radius:6px;background:#eef2ff;color:#3b5bdb;cursor:pointer;font:inherit;font-size:12px">load all matches</button>` +
-            ` <span style="color:var(--ink-faint);font-size:12px">paging fetches more on demand; this scans every match (100s of MB)</span>`;
-          els.resultcount.innerHTML = `${lead}${tailUI}`;
+          // Seamless paging: Prev/Next page the tail incrementally (only the buckets
+          // each page spans). The exact total needs a full scan, offered as a subtle
+          // link — hundreds of MB over the 484M corpus — not a "load the rest" button.
+          const exact =
+            ` · <button type="button" id="loadall" title="scans every match — can be 100s of MB" style="background:none;border:none;padding:0;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;text-decoration:underline;text-underline-offset:2px">exact count</button>`;
+          els.resultcount.innerHTML = `${lead}${exact}`;
         } else {
           els.resultcount.innerHTML = `<b>${fmt(total)}</b> result${total === 1 ? "" : "s"}`;
         }
@@ -1383,9 +1381,9 @@
         // Incremental tail: page() materializes only the container buckets (each a
         // 64K-doc range, in citation-rank order) needed to fill this page, so a deep
         // page fetches a few MB — not the whole (possibly hundreds-of-MB) tail. The
-        // exact total stays unknown until "load all matches" scans to the end, so
-        // loaded() is shown with a "+". A page that reaches past the popular head
-        // reports under "the rest"; head-only pages under "popular".
+        // exact total stays unknown until the "exact count" full scan, so loaded() is
+        // shown with a "+". A page that reaches past the head reports under the
+        // "this page · tail" group; head-only pages under "first page".
         const intoTail = offset + PAGE > c.headCount();
         skeletons(Math.min(PAGE, 8));
         const pgReq0 = reqs, pgByte0 = bytes, t0 = performance.now();
@@ -1710,7 +1708,7 @@
           syncUrl();
           return;
         }
-        perfModel.query = q;   // shown in the "Load popular" group header
+        perfModel.query = q;   // shown in the "First page" group header
         const mySeq = ++searchSeq;
         reqs = 0; bytes = 0;
         recCache.clear();
@@ -1853,10 +1851,9 @@
         } catch (_) {}
         setPerf({ tail: null, tailresults: null });   // new query: clear any prior tail-load stat
         await goPage(resetPaging ? 0 : offset, openMs, openReqs, openBytes);
-        // The tail (full intersection of the remaining postings) is never auto-pulled:
-        // over the 484M corpus a common term's tail can be hundreds of MB, so it loads
-        // only via the explicit, cost-flagged "load all matches" affordance — even when
-        // the popular head is sparse.
+        // Paging fetches the tail incrementally (page() loads only the buckets each
+        // page spans), so no auto-pull is needed; a full materialization of the tail
+        // happens only via the explicit, cost-flagged "exact count" scan.
       }
 
       /* -------- boot -------- */
