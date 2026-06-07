@@ -734,21 +734,43 @@ impl<F: RangeFetch> Cursor<F> {
             })
             .collect();
 
-        // Incremental path: a strict AND with no facet filter pages the tail in
-        // doc-ID (rank) order, intersecting only the container buckets needed to
-        // reach `need` and stopping there — so a deep page costs the buckets it
-        // spans, not the whole (possibly hundreds-of-MB) tail. Fuzzy threshold and
-        // facet-filtered tails (whose result sets are already pruned) fall back to
-        // the whole-tail load below, as does a posting whose layout isn't seekable.
-        if self.min_match == self.recs.len() && self.filter.is_none() {
+        // Incremental path: a strict AND pages the tail in doc-ID (rank) order,
+        // intersecting only the container buckets needed to reach `need` and stopping
+        // there — so a deep page costs the buckets it spans, not the whole
+        // (possibly hundreds-of-MB) tail. A facet filter is applied per bucket, so
+        // filtered queries page incrementally too. Only fuzzy threshold (and a
+        // non-seekable posting layout) fall back to the whole-tail load below.
+        if self.min_match == self.recs.len() {
             if !self.tail_scan_tried {
-                self.tail_scan = crate::posting::TailScan::open(&self.fetch, &ranges).await?;
+                let facet_fields: Vec<Vec<(u64, usize)>> = match &self.filter {
+                    Some(f) => f
+                        .fields
+                        .iter()
+                        .map(|cats| {
+                            cats.iter()
+                                .map(|c| (c.tail_off, c.tail_size as usize))
+                                .collect()
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let facet_fetch = self.filter.as_ref().map(|f| &f.fetch);
+                self.tail_scan = crate::posting::TailScan::open(
+                    &self.fetch,
+                    &ranges,
+                    facet_fetch,
+                    &facet_fields,
+                )
+                .await?;
                 self.tail_scan_tried = true;
             }
             if self.tail_scan.is_some() {
                 let mut scan = self.tail_scan.take().unwrap();
+                let facet_fetch = self.filter.as_ref().map(|f| &f.fetch);
                 while self.results.len() < need && !scan.exhausted() {
-                    let win = scan.next_window(&self.fetch, TAIL_KEY_BATCH).await?;
+                    let win = scan
+                        .next_window(&self.fetch, facet_fetch, TAIL_KEY_BATCH)
+                        .await?;
                     self.results.extend(win.iter());
                 }
                 if scan.exhausted() {

@@ -353,34 +353,80 @@ async fn intersect_key_window<F: RangeFetch>(
     Ok(acc)
 }
 
-/// Incremental, doc-ID-ordered tail intersection for the strict-AND path. Holds
-/// each tail posting's cached directory plus the candidate keys (buckets present
-/// in every posting); [`TailScan::next_window`] intersects the next slice of
-/// buckets, letting a cursor page the tail in rank order while fetching only the
-/// containers each page spans — never the whole (possibly hundreds-of-MB) tail.
+/// The union of container keys across a facet field's category postings
+/// (ascending, deduped) — the buckets where that field's category-OR could
+/// contribute a doc.
+fn union_keys(field: &[TailDir]) -> Vec<u16> {
+    let mut keys: Vec<u16> = field
+        .iter()
+        .flat_map(|d| d.dir.iter().map(|c| c.key))
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
+/// Incremental, doc-ID-ordered tail intersection for the strict-AND path,
+/// optionally ANDed with a facet filter (within-field OR, across-field AND). Holds
+/// every posting's cached directory plus the candidate keys (buckets present in all
+/// trigrams and, per facet field, in at least one selected category);
+/// [`TailScan::next_window`] intersects the next slice of buckets, letting a cursor
+/// page the tail in rank order while fetching only the containers each page spans —
+/// never the whole (possibly hundreds-of-MB) tail.
 ///
 /// Draining every window yields exactly the strict-AND result of
-/// [`tail_intersect_and`], in the same ascending order.
+/// [`tail_intersect_and`] (ANDed with the facet filter), in the same ascending order.
 pub(crate) struct TailScan {
-    dirs: Vec<TailDir>,
+    trigrams: Vec<TailDir>,
+    /// Per facet field, the selected categories' tail directories (ORed within a
+    /// field, ANDed across fields). Empty when the query is unfiltered.
+    facets: Vec<Vec<TailDir>>,
     keys: Vec<u16>,
     pos: usize,
 }
 
 impl TailScan {
-    /// Opens a scan over `tails` (each `(tail_off, tail_size)`), reading every
-    /// posting's directory once. Returns `None` if a posting isn't seekable, so
+    /// Opens a scan over the trigram `tails` and the optional `facet_fields` (each a
+    /// field's selected-category `(tail_off, tail_size)` list), reading every
+    /// posting's directory once. Returns `None` if any posting isn't seekable, so
     /// the caller falls back to the whole-tail intersection.
     pub(crate) async fn open<F: RangeFetch>(
         fetch: &F,
         tails: &[(u64, usize)],
+        facet_fetch: Option<&F>,
+        facet_fields: &[Vec<(u64, usize)>],
     ) -> Result<Option<TailScan>, IndexError> {
-        let dirs = match open_tail_dirs(fetch, tails).await? {
+        let trigrams = match open_tail_dirs(fetch, tails).await? {
             Some(d) => d,
             None => return Ok(None),
         };
-        let keys = candidate_keys(&dirs);
-        Ok(Some(TailScan { dirs, keys, pos: 0 }))
+        // Facet postings live in the separate facet sidecar, so they are read with
+        // the filter's own fetcher, not the index fetcher.
+        let mut facets = Vec::with_capacity(facet_fields.len());
+        for field in facet_fields {
+            let ff = facet_fetch.expect("facet_fetch is required when facet_fields is non-empty");
+            match open_tail_dirs(ff, field).await? {
+                Some(d) => facets.push(d),
+                None => return Ok(None),
+            }
+        }
+        // Only buckets present in all trigrams AND (per field) in at least one
+        // selected category can survive the filtered AND — so a selective facet
+        // never reads trigram containers for buckets it would empty anyway.
+        let mut keys = candidate_keys(&trigrams);
+        for field in &facets {
+            if keys.is_empty() {
+                break;
+            }
+            let field_keys = union_keys(field);
+            keys.retain(|k| field_keys.binary_search(k).is_ok());
+        }
+        Ok(Some(TailScan {
+            trigrams,
+            facets,
+            keys,
+            pos: 0,
+        }))
     }
 
     /// Whether every candidate bucket has been intersected.
@@ -388,18 +434,35 @@ impl TailScan {
         self.pos >= self.keys.len()
     }
 
-    /// Intersects up to `batch` more candidate buckets and returns the surviving
+    /// Intersects up to `batch` more candidate buckets — the trigram strict AND,
+    /// then each facet field's category-OR ANDed in — and returns the surviving
     /// docs (ascending), advancing the scan. Empty once exhausted.
     pub(crate) async fn next_window<F: RangeFetch>(
         &mut self,
         fetch: &F,
+        facet_fetch: Option<&F>,
         batch: usize,
     ) -> Result<RoaringBitmap, IndexError> {
         if self.exhausted() {
             return Ok(RoaringBitmap::new());
         }
         let end = (self.pos + batch).min(self.keys.len());
-        let bm = intersect_key_window(fetch, &self.dirs, &self.keys[self.pos..end]).await?;
+        let window = &self.keys[self.pos..end];
+        let mut bm = intersect_key_window(fetch, &self.trigrams, window).await?;
+        if !self.facets.is_empty() {
+            let ff = facet_fetch.expect("facet_fetch is required when the scan has facets");
+            for field in &self.facets {
+                if bm.is_empty() {
+                    break;
+                }
+                let reads = field.iter().map(|cat| read_dir_subset(ff, cat, window));
+                let mut field_bm = RoaringBitmap::new();
+                for c in join_all(reads).await {
+                    field_bm |= c?;
+                }
+                bm &= field_bm;
+            }
+        }
         self.pos = end;
         Ok(bm)
     }
@@ -495,10 +558,71 @@ mod tests {
         let tails = vec![(oa, sa.len()), (ob, sb.len()), (oc, sc.len())];
         let want = block_on(tail_intersect_and(&fetch, &tails)).unwrap();
         for batch in [1usize, 2, 3, 100] {
-            let mut scan = block_on(TailScan::open(&fetch, &tails)).unwrap().unwrap();
+            let mut scan = block_on(TailScan::open(&fetch, &tails, None, &[]))
+                .unwrap()
+                .unwrap();
             let mut got = RoaringBitmap::new();
             while !scan.exhausted() {
-                got |= block_on(scan.next_window(&fetch, batch)).unwrap();
+                got |= block_on(scan.next_window(&fetch, None, batch)).unwrap();
+            }
+            assert_eq!(got, want, "batch={batch}");
+        }
+    }
+
+    /// A facet-aware TailScan must equal the filtered AND:
+    /// `(trigram_a AND trigram_b) AND (cat1 OR cat2)`, for any batch size.
+    #[test]
+    fn tail_scan_with_facets_matches_filtered_and() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+        let mut cat1 = RoaringBitmap::new();
+        let mut cat2 = RoaringBitmap::new();
+        // Trigram AND lands docs across several buckets; the facet OR keeps a subset.
+        for d in [70001u32, 130000, 200005, 400000, 5_000_000] {
+            a.insert(d);
+            b.insert(d);
+        }
+        for d in 300000..304000u32 {
+            a.insert(d);
+            b.insert(d);
+        }
+        for d in [70001u32, 200005, 303000, 5_000_000] {
+            cat1.insert(d);
+        }
+        for d in [130000u32, 303500] {
+            cat2.insert(d);
+        }
+        let want = {
+            let mut x = a.clone();
+            x &= &b;
+            let mut f = cat1.clone();
+            f |= &cat2;
+            x &= &f;
+            x
+        };
+
+        let mut buf = Vec::new();
+        let mut put = |bm: &RoaringBitmap| {
+            let s = ser(bm);
+            let off = buf.len() as u64;
+            buf.extend_from_slice(&s);
+            (off, s.len())
+        };
+        let ra = put(&a);
+        let rb = put(&b);
+        let r1 = put(&cat1);
+        let r2 = put(&cat2);
+        let fetch = MemoryFetch::new(buf);
+
+        let tails = vec![ra, rb];
+        let facet_fields = vec![vec![r1, r2]]; // one field, categories cat1/cat2
+        for batch in [1usize, 2, 7, 100] {
+            let mut scan = block_on(TailScan::open(&fetch, &tails, Some(&fetch), &facet_fields))
+                .unwrap()
+                .unwrap();
+            let mut got = RoaringBitmap::new();
+            while !scan.exhausted() {
+                got |= block_on(scan.next_window(&fetch, Some(&fetch), batch)).unwrap();
             }
             assert_eq!(got, want, "batch={batch}");
         }
