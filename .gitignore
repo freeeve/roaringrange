@@ -4,6 +4,11 @@ rust/pkg/
 examples/openalex/builder/target/
 examples/search-lambda/target/
 
+# Browser reader: wasm-pack output copied into the demo at deploy time (deploy.sh
+# builds it fresh). Not committed — it's a build artifact, not source.
+examples/openalex/web/roaringrange.js
+examples/openalex/web/roaringrange_bg.wasm
+
 # Go binaries
 /openalexbuild
 examples/openalex/openalex

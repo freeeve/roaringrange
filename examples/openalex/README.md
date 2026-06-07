@@ -133,9 +133,13 @@ Docs:
 
 ## Browser reader
 
-`web/roaringrange.js` + `web/roaringrange_bg.wasm` are the
-`wasm-pack` build of `../../rust`, committed so the demo runs as-is. Rebuild
-after changing the crate:
+`web/roaringrange.js` + `web/roaringrange_bg.wasm` are the `wasm-pack` build of
+`../../rust`. They are **build artifacts, not committed** (gitignored): `deploy.sh`
+builds them fresh before uploading. To run the demo locally, build them first:
 
-    cd ../../rust && wasm-pack build --target web --features wasm
+    cd ../../rust && wasm-pack build --target web --features "wasm zstd vector terms splits"
     cp pkg/roaringrange.js pkg/roaringrange_bg.wasm ../examples/openalex/web/
+
+The feature set must cover everything the demo imports (zstd records, vector + term
+search, split sets). `deploy.sh` runs exactly this; pass `--no-build` to skip it and
+deploy whatever reader is already in `web/`.

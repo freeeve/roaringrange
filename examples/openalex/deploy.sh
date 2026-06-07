@@ -3,13 +3,16 @@
 # Deploy the OpenAlex roaringrange demo to its S3 bucket + CloudFront.
 #
 # Usage:
-#   ./deploy.sh                  deploy web assets (html/js/wasm/svg) + invalidate
+#   ./deploy.sh                  build the reader, deploy web assets (html/js/wasm/svg) + invalidate
+#   ./deploy.sh --no-build       skip the wasm-pack build; deploy the reader already in web/
 #   ./deploy.sh --data DIR       ALSO upload the built index/record files from DIR
 #   ./deploy.sh --splits DIR     ALSO upload a split set (.rrss + per-split .rrs/.rrf) from DIR
 #   BUCKET=… DISTRIBUTION=… ./deploy.sh   override the defaults below
 #
-# The wasm reader (roaringrange.js + roaringrange_bg.wasm) is uploaded under
-# content-hashed names (roaringrange.<hash>.js / roaringrange.<hash>_bg.wasm,
+# The wasm reader (roaringrange.js + roaringrange_bg.wasm) is a build artifact, not
+# committed: this script builds it fresh from ../../rust with wasm-pack (skip with
+# --no-build) and copies it into web/, which is gitignored. It is then uploaded
+# under content-hashed names (roaringrange.<hash>.js / roaringrange.<hash>_bg.wasm,
 # immutable) and the HTML is rewritten to reference them, then served no-cache. So
 # a reader rebuild always gets fresh URLs and a cached HTML can never pair with a
 # mismatched reader (no stale-import errors). Content-types are explicit: .wasm
@@ -30,14 +33,30 @@ WEB="$HERE/web"
 
 DATA_DIR=""
 SPLITS_DIR=""
+NO_BUILD=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --no-build) NO_BUILD=1; shift ;;
     --data) DATA_DIR="${2:?--data needs a directory}"; shift 2 ;;
     --splits) SPLITS_DIR="${2:?--splits needs a directory}"; shift 2 ;;
-    -h|--help) sed -n '3,11p' "$0"; exit 0 ;;
+    -h|--help) sed -n '3,12p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Build the browser reader fresh (it is gitignored, not committed) so the deploy
+# always matches the current crate. Feature set must cover everything the demo
+# imports: zstd records, vector + term search, split sets.
+RUST_DIR="$(cd "$HERE/../../rust" && pwd)"
+if [[ -z "$NO_BUILD" ]]; then
+  command -v wasm-pack >/dev/null || { echo "wasm-pack not found — install it or pass --no-build" >&2; exit 1; }
+  echo "==> building browser reader (wasm-pack --features 'wasm zstd vector terms splits')"
+  ( cd "$RUST_DIR" && wasm-pack build --target web --features "wasm zstd vector terms splits" )
+  cp "$RUST_DIR/pkg/roaringrange.js" "$RUST_DIR/pkg/roaringrange_bg.wasm" "$WEB/"
+fi
+if [[ ! -f "$WEB/roaringrange_bg.wasm" ]]; then
+  echo "no reader in $WEB (build it, or drop --no-build)" >&2; exit 1
+fi
 
 sync_ct() { # content-type, then sync globs that follow as --include patterns
   local ct="$1"; shift
