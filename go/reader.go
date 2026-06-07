@@ -6,28 +6,25 @@ import (
 	"sort"
 )
 
-// dictRec is one parsed RRS dictionary entry.
+// dictRec is one parsed v3 RRS dictionary entry: a key and its posting's byte range.
 type dictRec struct {
-	key        uint64
-	headOffset uint64
-	headSize   uint32
-	tailSize   uint32
+	key    uint64
+	offset uint64
+	size   uint32
 }
 
-// Index is a reference reader over an RRS index accessed by byte range. It
-// reads only the 20-byte header and the sparse index up front (mirroring the
+// Index is a reference reader over a v3 RRS index accessed by byte range. It
+// reads only the 16-byte header and the sparse index up front (mirroring the
 // browser reader's boot ranged GETs); the dictionary and postings are fetched
 // lazily, one ranged ReadAt per block, never in their entirety. See FORMAT.md.
 type Index struct {
 	r io.ReaderAt
 	// GramSize is the n-gram window the index was built with.
-	GramSize int
-	// HeadBoundary is the doc-ID head/tail split point recorded in the header.
-	HeadBoundary uint32
-	ngrams       int
-	stride       int
-	dictStart    int64
-	sparseKeys   []uint64
+	GramSize   int
+	ngrams     int
+	stride     int
+	dictStart  int64
+	sparseKeys []uint64
 }
 
 // Open reads and parses the RRS header and sparse index via ranged reads. It
@@ -43,7 +40,6 @@ func Open(r io.ReaderAt) (*Index, error) {
 	gramSize := int(binary.LittleEndian.Uint16(header[6:8]))
 	ngrams := int(binary.LittleEndian.Uint32(header[8:12]))
 	stride := int(binary.LittleEndian.Uint32(header[12:16]))
-	headBoundary := binary.LittleEndian.Uint32(header[16:20])
 	if stride <= 0 {
 		return nil, ErrTruncated
 	}
@@ -61,13 +57,12 @@ func Open(r io.ReaderAt) (*Index, error) {
 	}
 
 	return &Index{
-		r:            r,
-		GramSize:     gramSize,
-		HeadBoundary: headBoundary,
-		ngrams:       ngrams,
-		stride:       stride,
-		dictStart:    int64(headerSize + sparseCount*8),
-		sparseKeys:   sparseKeys,
+		r:          r,
+		GramSize:   gramSize,
+		ngrams:     ngrams,
+		stride:     stride,
+		dictStart:  int64(headerSize + sparseCount*8),
+		sparseKeys: sparseKeys,
 	}, nil
 }
 
@@ -102,37 +97,21 @@ func (s *Index) lookup(key uint64) (rec dictRec, ok bool, err error) {
 		return dictRec{}, false, nil
 	}
 	return dictRec{
-		key:        key,
-		headOffset: binary.LittleEndian.Uint64(blockBytes[off+8:]),
-		headSize:   binary.LittleEndian.Uint32(blockBytes[off+16:]),
-		tailSize:   binary.LittleEndian.Uint32(blockBytes[off+20:]),
+		key:    key,
+		offset: binary.LittleEndian.Uint64(blockBytes[off+8:]),
+		size:   binary.LittleEndian.Uint32(blockBytes[off+16:]),
 	}, true, nil
 }
 
-// Head returns the head posting bytes (docs [0,65536)) for key via one ranged
-// dictionary read and one ranged posting read, or ok=false if key is absent.
-func (s *Index) Head(key uint64) (data []byte, ok bool, err error) {
+// Posting returns the full posting bytes for key via one ranged dictionary read
+// and one ranged posting read, or ok=false if key is absent.
+func (s *Index) Posting(key uint64) (data []byte, ok bool, err error) {
 	rec, ok, err := s.lookup(key)
 	if err != nil || !ok {
 		return nil, ok, err
 	}
-	buf := make([]byte, rec.headSize)
-	if _, err := s.r.ReadAt(buf, int64(rec.headOffset)); err != nil {
-		return nil, false, err
-	}
-	return buf, true, nil
-}
-
-// Tail returns the tail posting bytes (docs [65536, MaxUint32]) for key via one
-// ranged dictionary read and one ranged posting read, or ok=false if key is
-// absent.
-func (s *Index) Tail(key uint64) (data []byte, ok bool, err error) {
-	rec, ok, err := s.lookup(key)
-	if err != nil || !ok {
-		return nil, ok, err
-	}
-	buf := make([]byte, rec.tailSize)
-	if _, err := s.r.ReadAt(buf, int64(rec.headOffset+uint64(rec.headSize))); err != nil {
+	buf := make([]byte, rec.size)
+	if _, err := s.r.ReadAt(buf, int64(rec.offset)); err != nil {
 		return nil, false, err
 	}
 	return buf, true, nil

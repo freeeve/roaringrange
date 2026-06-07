@@ -12,33 +12,29 @@ const (
 	// Magic is the RRS index magic.
 	Magic = "RRSI"
 	// Version is the RRS format version number.
-	Version = 2
-	// headerSize is the fixed RRS header size in bytes (magic[4] + version[2] +
-	// gramSize[2] + ngrams[4] + stride[4] + headBoundary[4]).
-	headerSize = 20
-	// dictEntry is the size of one RRS dictionary entry in bytes:
-	// key(8) + headOffset(8) + headSize(4) + tailSize(4).
-	dictEntry = 24
+	Version = 3
+	// headerSize is the fixed RRS header size in bytes (v3): magic[4] + version[2] +
+	// gramSize[2] + ngrams[4] + stride[4]. v2's trailing headBoundary[4] is gone.
+	headerSize = 16
+	// dictEntry is the size of one v3 RRS dictionary entry in bytes:
+	// key(8) + offset(8) + size(4).
+	dictEntry = 20
 	// DefaultStride is the default sparse-index stride.
 	DefaultStride = 512
-	// headLimit is the exclusive upper bound of the head doc-ID range; doc IDs
-	// below it form the head posting (the first roaring container).
+	// headLimit is the exclusive upper bound of the head doc-ID range used by the
+	// RRSF facet sidecar (still head/tail in v3); the RRS index itself is one posting.
 	headLimit = 65536
 )
 
-// splitEntry holds a posting that has been split into head and tail bitmaps,
-// each re-serialized as a portable RoaringBitmap.
-type splitEntry struct {
-	key  uint64
-	head []byte
-	tail []byte
+// indexEntry is one v3 RRS dictionary entry: a key and its single serialized posting.
+type indexEntry struct {
+	key     uint64
+	posting []byte
 }
 
-// Transcode reads a roaringsearch FTSR index from src and writes the RRS
-// range-fetchable layout to dst using the default stride. Each posting is
-// split into a head bitmap (docs [0,65536)) and a tail bitmap (docs
-// [65536, MaxUint32]); both are re-serialized as portable RoaringBitmaps.
-// Entries are sorted by key ascending. See FORMAT.md.
+// Transcode reads a roaringsearch FTSR index from src and writes the v3 RRS
+// range-fetchable layout to dst using the default stride. Each term is written as
+// one portable RoaringBitmap posting. Entries are sorted by key ascending. See FORMAT.md.
 func Transcode(src io.Reader, dst io.Writer) error {
 	return TranscodeStride(src, dst, DefaultStride)
 }
@@ -65,7 +61,7 @@ func TranscodeStride(src io.Reader, dst io.Writer, stride int) error {
 		return ErrTruncated
 	}
 
-	entries, err := parseSplitEntries(data, count)
+	entries, err := parseEntries(data, count)
 	if err != nil {
 		return err
 	}
@@ -74,10 +70,10 @@ func TranscodeStride(src io.Reader, dst io.Writer, stride int) error {
 	return writeIndex(dst, gramSize, stride, entries)
 }
 
-// parseSplitEntries walks the FTSR entries, deserializes each portable roaring
-// bitmap, and splits it into head and tail bitmaps re-serialized as bytes.
-func parseSplitEntries(data []byte, count uint32) ([]splitEntry, error) {
-	entries := make([]splitEntry, 0, count)
+// parseEntries walks the FTSR entries, deserializing each portable roaring bitmap and
+// re-serializing it as one canonical v3 RRS posting (no head/tail split).
+func parseEntries(data []byte, count uint32) ([]indexEntry, error) {
+	entries := make([]indexEntry, 0, count)
 	pos := 12
 	for range count {
 		if pos+12 > len(data) {
@@ -89,24 +85,24 @@ func parseSplitEntries(data []byte, count uint32) ([]splitEntry, error) {
 		if pos+size > len(data) {
 			return nil, ErrTruncated
 		}
-		head, tail, err := splitPosting(data[pos : pos+size])
+		posting, err := serializePosting(data[pos : pos+size])
 		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, splitEntry{key: key, head: head, tail: tail})
+		entries = append(entries, indexEntry{key: key, posting: posting})
 		pos += size
 	}
 	return entries, nil
 }
 
-// splitPosting deserializes a portable roaring bitmap and returns the head
-// (docs [0,65536)) and tail (docs [65536, MaxUint32]) as portable bitmaps.
-func splitPosting(payload []byte) (head, tail []byte, err error) {
+// serializePosting deserializes a portable roaring bitmap and re-serializes it as one
+// canonical portable RoaringBitmap — the v3 RRS posting (mirrors Rust build::serialize_posting).
+func serializePosting(payload []byte) ([]byte, error) {
 	bm := roaring.New()
 	if _, err := bm.FromBuffer(append([]byte(nil), payload...)); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return splitBitmap(bm)
+	return bm.ToBytes()
 }
 
 // splitBitmap returns the head (docs [0,65536)) and tail (docs [65536, MaxUint32])
@@ -139,13 +135,9 @@ func splitBitmapHB(bm *roaring.Bitmap, headBoundary uint32) (head, tail []byte, 
 
 // writeIndex emits the header, sparse index, dictionary, and postings for the
 // given key-sorted entries, using the default head boundary (65536).
-func writeIndex(dst io.Writer, gramSize uint16, stride int, entries []splitEntry) error {
-	return writeIndexHB(dst, gramSize, stride, headLimit, entries)
-}
-
-// writeIndexHB is writeIndex with an explicit head boundary written into the
-// header — the build-side mirror of the Rust build::write_index.
-func writeIndexHB(dst io.Writer, gramSize uint16, stride int, headBoundary uint32, entries []splitEntry) error {
+// writeIndex emits the v3 RRS header, sparse index, dictionary, and postings (one bitmap per
+// term) for the given key-sorted entries — the build-side mirror of the Rust build::write_index.
+func writeIndex(dst io.Writer, gramSize uint16, stride int, entries []indexEntry) error {
 	n := len(entries)
 	sparseCount := (n + stride - 1) / stride
 	dictStart := headerSize + sparseCount*8
@@ -157,7 +149,6 @@ func writeIndexHB(dst io.Writer, gramSize uint16, stride int, headBoundary uint3
 	binary.LittleEndian.PutUint16(header[6:8], gramSize)
 	binary.LittleEndian.PutUint32(header[8:12], uint32(n))
 	binary.LittleEndian.PutUint32(header[12:16], uint32(stride))
-	binary.LittleEndian.PutUint32(header[16:20], headBoundary)
 	if _, err := dst.Write(header); err != nil {
 		return err
 	}
@@ -176,19 +167,15 @@ func writeIndexHB(dst io.Writer, gramSize uint16, stride int, headBoundary uint3
 		b := dict[i*dictEntry:]
 		binary.LittleEndian.PutUint64(b[0:8], e.key)
 		binary.LittleEndian.PutUint64(b[8:16], uint64(off))
-		binary.LittleEndian.PutUint32(b[16:20], uint32(len(e.head)))
-		binary.LittleEndian.PutUint32(b[20:24], uint32(len(e.tail)))
-		off += len(e.head) + len(e.tail)
+		binary.LittleEndian.PutUint32(b[16:20], uint32(len(e.posting)))
+		off += len(e.posting)
 	}
 	if _, err := dst.Write(dict); err != nil {
 		return err
 	}
 
 	for _, e := range entries {
-		if _, err := dst.Write(e.head); err != nil {
-			return err
-		}
-		if _, err := dst.Write(e.tail); err != nil {
+		if _, err := dst.Write(e.posting); err != nil {
 			return err
 		}
 	}

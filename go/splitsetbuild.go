@@ -186,16 +186,16 @@ func (b *SplitSetBuilder) seal() error {
 	}
 	slices.Sort(keys)
 
-	entries := make([]splitEntry, 0, len(keys))
+	entries := make([]indexEntry, 0, len(keys))
 	for _, k := range keys {
-		head, tail, err := splitBitmapHB(b.open[k], b.headBoundary)
+		posting, err := b.open[k].ToBytes()
 		if err != nil {
 			return err
 		}
-		entries = append(entries, splitEntry{key: k, head: head, tail: tail})
+		entries = append(entries, indexEntry{key: k, posting: posting})
 	}
 	var buf bytes.Buffer
-	if err := writeIndexHB(&buf, b.cfg.GramSize, b.stride, b.headBoundary, entries); err != nil {
+	if err := writeIndex(&buf, b.cfg.GramSize, b.stride, entries); err != nil {
 		return err
 	}
 

@@ -23,18 +23,6 @@ func makeBitmap(t *testing.T, values ...uint32) []byte {
 	return b
 }
 
-// splitValues partitions values into head (<65536) and tail (>=65536) sets.
-func splitValues(values []uint32) (head, tail []uint32) {
-	for _, v := range values {
-		if v < headLimit {
-			head = append(head, v)
-		} else {
-			tail = append(tail, v)
-		}
-	}
-	return head, tail
-}
-
 // bitmapValues deserializes a portable roaring bitmap and returns its members.
 func bitmapValues(t *testing.T, data []byte) []uint32 {
 	t.Helper()
@@ -146,33 +134,20 @@ func TestTranscodeRoundTrip(t *testing.T) {
 	}
 
 	for key, vs := range values {
-		wantHead, wantTail := splitValues(vs)
-
-		headBytes, ok, err := idx.Head(key)
+		postingBytes, ok, err := idx.Posting(key)
 		if err != nil || !ok {
-			t.Fatalf("head %d: ok=%v err=%v", key, ok, err)
+			t.Fatalf("posting %d: ok=%v err=%v", key, ok, err)
 		}
-		if got := bitmapValues(t, headBytes); !equalU32(got, wantHead) {
-			t.Fatalf("head %d = %v, want %v", key, got, wantHead)
-		}
-
-		tailBytes, ok, err := idx.Tail(key)
-		if err != nil || !ok {
-			t.Fatalf("tail %d: ok=%v err=%v", key, ok, err)
-		}
-		if got := bitmapValues(t, tailBytes); !equalU32(got, wantTail) {
-			t.Fatalf("tail %d = %v, want %v", key, got, wantTail)
+		if got := bitmapValues(t, postingBytes); !equalU32(got, vs) {
+			t.Fatalf("posting %d = %v, want %v", key, got, vs)
 		}
 	}
 
-	if _, ok, _ := idx.Head(999); ok {
-		t.Fatalf("head 999 should be absent")
+	if _, ok, _ := idx.Posting(999); ok {
+		t.Fatalf("posting 999 should be absent")
 	}
-	if _, ok, _ := idx.Tail(999); ok {
-		t.Fatalf("tail 999 should be absent")
-	}
-	if _, ok, _ := idx.Head(0); ok {
-		t.Fatalf("head 0 (below first key) should be absent")
+	if _, ok, _ := idx.Posting(0); ok {
+		t.Fatalf("posting 0 (below first key) should be absent")
 	}
 }
 
@@ -200,20 +175,19 @@ func TestTranscodeDictSorted(t *testing.T) {
 
 	var prevKey uint64
 	expectOff := postingsStart
-	for i := 0; i < n; i++ {
+	for i := range n {
 		b := raw[dictStart+i*dictEntry:]
 		key := binary.LittleEndian.Uint64(b[0:8])
-		headOff := binary.LittleEndian.Uint64(b[8:16])
-		headSize := binary.LittleEndian.Uint32(b[16:20])
-		tailSize := binary.LittleEndian.Uint32(b[20:24])
+		off := binary.LittleEndian.Uint64(b[8:16])
+		size := binary.LittleEndian.Uint32(b[16:20])
 		if i > 0 && key <= prevKey {
 			t.Fatalf("dictionary not key-sorted at %d", i)
 		}
-		if headOff != uint64(expectOff) {
-			t.Fatalf("headOffset[%d] = %d, want %d", i, headOff, expectOff)
+		if off != uint64(expectOff) {
+			t.Fatalf("offset[%d] = %d, want %d", i, off, expectOff)
 		}
 		prevKey = key
-		expectOff += int(headSize) + int(tailSize)
+		expectOff += int(size)
 	}
 	if expectOff != len(raw) {
 		t.Fatalf("postings end = %d, want file len %d", expectOff, len(raw))

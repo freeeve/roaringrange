@@ -66,10 +66,10 @@ func TestOpenRejectsBadMagic(t *testing.T) {
 	}
 }
 
-// TestSplitPostingRejectsGarbage surfaces a deserialize error for non-roaring
+// TestSerializePostingRejectsGarbage surfaces a deserialize error for non-roaring
 // posting bytes.
-func TestSplitPostingRejectsGarbage(t *testing.T) {
-	if _, _, err := splitPosting([]byte{0xde, 0xad, 0xbe, 0xef}); err == nil {
+func TestSerializePostingRejectsGarbage(t *testing.T) {
+	if _, err := serializePosting([]byte{0xde, 0xad, 0xbe, 0xef}); err == nil {
 		t.Fatal("expected error for garbage posting bytes")
 	}
 }

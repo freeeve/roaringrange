@@ -58,7 +58,11 @@ collapse onto the cursor), not space.
   emit/read v3; facet (`RRSF`) builders keep head/tail. Builds all-targets clean; 8 builder tests pass
   (incl. the secondary remap round-trip → v3 reader). `headtune.rs` still reads the v2 head/tail layout
   and is now **obsolete** (it tuned the removed `head_boundary`) — left as-is, not on the build path.
-- **Go port v3** (separate task): `go/splitsetbuild.go` → v3, regenerate the golden, re-assert Rust↔Go.
+- [x] **Go port v3** (DONE 2026-06-07): `go/{transcode.go,reader.go,splitsetbuild.go}` → v3 (16 B
+  header, 20 B dict, single posting; `indexEntry`/`serializePosting`; reader `Posting()` replaces
+  `Head()`/`Tail()`); `splitBitmap`/`splitBitmapHB` kept for the unchanged `RRSF` facets. Tests
+  updated; **the shared golden conformance test passes**, so Rust↔Go is byte-for-byte on v3 again.
+  gofmt -s + go vet + go test clean.
   Until then the committed `go/testdata/rrss_build_golden.txt` is **v3 (Rust) vs v2 (Go)** — the Go
   conformance test is expected to FAIL by design.
 - **Cheap eager prefix:** v3-v1 derives bucket 0 via the full container directory (~60 KB for very
