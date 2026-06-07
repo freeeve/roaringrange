@@ -56,6 +56,17 @@ required-features = ["splits"]
 name = "build_term_splitset"
 required-features = ["splits", "terms", "zstd"]
 
+# Trigram sibling of build_term_splitset: a trigram (`RRS`-bodied) split set over the same
+# `RRSR` record store, emitting the manifest, splits, per-split `.rrf`, and `.rrhc` boot bundle.
+[[example]]
+name = "build_trigram_splitset"
+required-features = ["splits", "zstd", "hotcache"]
+
+# Opens an RRSS split set from disk and runs a query — a smoke check for a built split set.
+[[example]]
+name = "splitset_verify"
+required-features = ["splits"]
+
 [dependencies]
 roaring = "0.11"
 # Unicode general-category lookup so the tokenizer filters exactly on letters
