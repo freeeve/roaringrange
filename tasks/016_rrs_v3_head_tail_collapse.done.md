@@ -1,6 +1,8 @@
 # Task 016 — RRS v3: collapse head/tail into one uniformly-paged posting
 
-**Status:** in progress. Spun from [014](014_rrs_tail_paging_followups.md) **Part 1**.
+**Status:** done (2026-06-07). Spun from [014](014_rrs_tail_paging_followups.md) **Part 1**. Code
+complete across Rust core + OpenAlex builder + Go port (byte-for-byte conformant); the deferred items
+below are optional optimizations + the operational v3 rebuild/redeploy.
 
 Collapse the RRS trigram index's separate head/tail posting storage into **one bitmap per term**,
 paged uniformly by container bucket. The head was a build-time `[0, head_boundary)` prefix stored
