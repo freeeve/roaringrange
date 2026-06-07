@@ -86,12 +86,27 @@ chars).
 
 (`a`, `v`, `y` are omitted when empty/zero; `c` = `cited_by_count`.)
 
-### 3. Upload
+### 3. Upload / deploy
 
-Upload the four artifacts to the static origin (S3 bucket fronted by
-CloudFront), alongside the demo UI. The reader fetches byte ranges out of
-`openalex.rrs` / `openalex.rrf` and slices records out of the `.bin` using the
-`.idx` offsets.
+`deploy.sh` builds the browser reader and pushes the demo (web UI + reader) to its
+S3 origin + CloudFront:
+
+```bash
+cd examples/openalex
+./deploy.sh                                 # build reader, upload web assets (html/js/wasm/svg), invalidate HTML
+./deploy.sh --data /tmp                      # ALSO upload built index/record files from a dir
+./deploy.sh --splits /tmp/openalex-split     # ALSO upload a split set (.rrss + per-split files)
+./deploy.sh --no-build                       # reuse the reader already in web/ (skip wasm-pack)
+BUCKET=my-bucket DISTRIBUTION=E123ABC ./deploy.sh   # override the S3 bucket / CloudFront id
+```
+
+Needs AWS credentials with write access to the bucket (e.g. `AWS_PROFILE=… ./deploy.sh`).
+Defaults target the project's own bucket/distribution — see the script header to override.
+The reader uploads under content-hashed, immutable names and the HTML is rewritten to
+reference it, so the multi-GB data objects are left untouched (never re-uploaded or
+cache-invalidated) unless `--data` / `--splits` is passed. Once live, the reader fetches
+byte ranges out of `*.rrs` / `*.rrf` and slices records out of the `.bin` via the `.idx`
+offsets.
 
 ### 4. Demo
 
