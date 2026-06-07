@@ -125,16 +125,26 @@ async fn read_posting_subset<F: RangeFetch>(
         .iter()
         .filter(|c| keys.binary_search(&c.key).is_ok())
         .collect();
+    fetch_containers(fetch, off, &needed).await
+}
+
+/// Fetches a posting's `needed` containers (in ascending offset order) and
+/// reassembles them into a standalone bitmap. The containers are coalesced into a
+/// few byte spans, bridging gaps up to SPAN_GAP, so a run of consecutive keys is
+/// one ranged read instead of hundreds; each span is fetched once and the bodies
+/// sliced back out. Empty when nothing is needed. Shared by the whole-tail seek
+/// ([`read_posting_subset`]) and the key-windowed scan ([`read_dir_subset`]).
+async fn fetch_containers<F: RangeFetch>(
+    fetch: &F,
+    off: u64,
+    needed: &[&Container],
+) -> Result<RoaringBitmap, IndexError> {
     if needed.is_empty() {
         return Ok(RoaringBitmap::new());
     }
-    // Coalesce the needed containers (already in ascending offset order) into a
-    // few byte spans, bridging gaps up to SPAN_GAP, so a run of consecutive keys
-    // is one ranged read instead of hundreds. Each span is fetched once; the
-    // container bodies are sliced back out for reassembly.
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut span_of: Vec<usize> = Vec::with_capacity(needed.len());
-    for c in &needed {
+    for c in needed {
         let (cs, ce) = (c.start, c.start + c.len);
         match spans.last_mut() {
             Some(last) if cs <= last.1 + SPAN_GAP => last.1 = ce,
@@ -245,6 +255,156 @@ fn assemble(sel: &[(u16, u32, &[u8])]) -> Vec<u8> {
     blob
 }
 
+/// One tail posting prepared for incremental, key-ordered intersection: its file
+/// offset and parsed container directory (read once, so paging the tail re-reads
+/// no headers). Containers are keyed by `doc_id >> 16`, ascending.
+struct TailDir {
+    off: u64,
+    dir: Vec<Container>,
+}
+
+/// Reads each tail posting's container directory — one header read each (KB), not
+/// the whole posting. Returns `None` if any posting isn't the seekable
+/// NO_RUNCONTAINER-with-offsets layout, so the caller can fall back to a full load.
+async fn open_tail_dirs<F: RangeFetch>(
+    fetch: &F,
+    tails: &[(u64, usize)],
+) -> Result<Option<Vec<TailDir>>, IndexError> {
+    let mut out = Vec::with_capacity(tails.len());
+    for &(off, len) in tails {
+        let prefix = fetch.read(off, len.min(HEADER_PREFIX)).await?;
+        let header = match needed_header_len(&prefix) {
+            Some(hl) if hl <= prefix.len() => prefix,
+            Some(hl) => fetch.read(off, hl).await?,
+            None => return Ok(None),
+        };
+        match parse_dir(&header, len) {
+            Some(dir) => out.push(TailDir { off, dir }),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(out))
+}
+
+/// The container keys present in EVERY posting (ascending) — the only buckets a
+/// strict AND can populate. Computed from the cached directories (no fetches):
+/// start from the smallest directory's keys and retain those present in all others.
+fn candidate_keys(dirs: &[TailDir]) -> Vec<u16> {
+    if dirs.is_empty() {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..dirs.len()).collect();
+    order.sort_by_key(|&i| dirs[i].dir.len());
+    let mut keys: Vec<u16> = dirs[order[0]].dir.iter().map(|c| c.key).collect();
+    for &i in &order[1..] {
+        if keys.is_empty() {
+            break;
+        }
+        let other = &dirs[i].dir;
+        keys.retain(|k| other.binary_search_by_key(k, |c| c.key).is_ok());
+    }
+    keys
+}
+
+/// Like [`read_posting_subset`] but over a cached directory (no header re-read):
+/// the containers whose key is in `keys`, assembled into a bitmap.
+async fn read_dir_subset<F: RangeFetch>(
+    fetch: &F,
+    d: &TailDir,
+    keys: &[u16],
+) -> Result<RoaringBitmap, IndexError> {
+    let needed: Vec<&Container> = d
+        .dir
+        .iter()
+        .filter(|c| keys.binary_search(&c.key).is_ok())
+        .collect();
+    fetch_containers(fetch, d.off, &needed).await
+}
+
+/// Strict-AND intersect the cached tail directories over only the container keys
+/// in `window`, reading just those container bodies. Surviving docs, ascending.
+async fn intersect_key_window<F: RangeFetch>(
+    fetch: &F,
+    dirs: &[TailDir],
+    window: &[u16],
+) -> Result<RoaringBitmap, IndexError> {
+    if dirs.is_empty() || window.is_empty() {
+        return Ok(RoaringBitmap::new());
+    }
+    let reads = dirs.iter().map(|d| read_dir_subset(fetch, d, window));
+    let results = join_all(reads).await;
+    let mut bms = Vec::with_capacity(dirs.len());
+    for r in results {
+        let b = r?;
+        if b.is_empty() {
+            return Ok(RoaringBitmap::new()); // a missing posting kills the AND
+        }
+        bms.push(b);
+    }
+    bms.sort_by_key(|b| b.len());
+    let mut iter = bms.into_iter();
+    let mut acc = iter.next().unwrap();
+    for b in iter {
+        acc &= b;
+        if acc.is_empty() {
+            break;
+        }
+    }
+    Ok(acc)
+}
+
+/// Incremental, doc-ID-ordered tail intersection for the strict-AND path. Holds
+/// each tail posting's cached directory plus the candidate keys (buckets present
+/// in every posting); [`TailScan::next_window`] intersects the next slice of
+/// buckets, letting a cursor page the tail in rank order while fetching only the
+/// containers each page spans — never the whole (possibly hundreds-of-MB) tail.
+///
+/// Draining every window yields exactly the strict-AND result of
+/// [`tail_intersect_and`], in the same ascending order.
+pub(crate) struct TailScan {
+    dirs: Vec<TailDir>,
+    keys: Vec<u16>,
+    pos: usize,
+}
+
+impl TailScan {
+    /// Opens a scan over `tails` (each `(tail_off, tail_size)`), reading every
+    /// posting's directory once. Returns `None` if a posting isn't seekable, so
+    /// the caller falls back to the whole-tail intersection.
+    pub(crate) async fn open<F: RangeFetch>(
+        fetch: &F,
+        tails: &[(u64, usize)],
+    ) -> Result<Option<TailScan>, IndexError> {
+        let dirs = match open_tail_dirs(fetch, tails).await? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let keys = candidate_keys(&dirs);
+        Ok(Some(TailScan { dirs, keys, pos: 0 }))
+    }
+
+    /// Whether every candidate bucket has been intersected.
+    pub(crate) fn exhausted(&self) -> bool {
+        self.pos >= self.keys.len()
+    }
+
+    /// Intersects up to `batch` more candidate buckets and returns the surviving
+    /// docs (ascending), advancing the scan. Empty once exhausted.
+    pub(crate) async fn next_window<F: RangeFetch>(
+        &mut self,
+        fetch: &F,
+        batch: usize,
+    ) -> Result<RoaringBitmap, IndexError> {
+        if self.exhausted() {
+            return Ok(RoaringBitmap::new());
+        }
+        let end = (self.pos + batch).min(self.keys.len());
+        let bm = intersect_key_window(fetch, &self.dirs, &self.keys[self.pos..end]).await?;
+        self.pos = end;
+        Ok(bm)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +460,48 @@ mod tests {
         let tails = vec![(oa, sa.len()), (ob, sb.len()), (oc, sc.len())];
         let got = block_on(tail_intersect_and(&fetch, &tails)).unwrap();
         assert_eq!(got, want);
+    }
+
+    /// Draining the incremental TailScan must equal the whole-tail strict AND, in
+    /// the same ascending order, for any batch size.
+    #[test]
+    fn tail_scan_matches_full_and() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+        let mut c = RoaringBitmap::new();
+        for d in [70000u32, 70001, 130000, 200005, 5_000_000] {
+            a.insert(d);
+        }
+        for d in [70001u32, 130000, 200005, 200006, 9_000_000] {
+            b.insert(d);
+        }
+        for d in [70001u32, 130000, 200005, 3_000_000] {
+            c.insert(d);
+        }
+        for d in 300000..306000u32 {
+            a.insert(d);
+            b.insert(d);
+            c.insert(d);
+        }
+        let (sa, sb, sc) = (ser(&a), ser(&b), ser(&c));
+        let mut buf = Vec::new();
+        let oa = buf.len() as u64;
+        buf.extend_from_slice(&sa);
+        let ob = buf.len() as u64;
+        buf.extend_from_slice(&sb);
+        let oc = buf.len() as u64;
+        buf.extend_from_slice(&sc);
+        let fetch = MemoryFetch::new(buf);
+        let tails = vec![(oa, sa.len()), (ob, sb.len()), (oc, sc.len())];
+        let want = block_on(tail_intersect_and(&fetch, &tails)).unwrap();
+        for batch in [1usize, 2, 3, 100] {
+            let mut scan = block_on(TailScan::open(&fetch, &tails)).unwrap().unwrap();
+            let mut got = RoaringBitmap::new();
+            while !scan.exhausted() {
+                got |= block_on(scan.next_window(&fetch, batch)).unwrap();
+            }
+            assert_eq!(got, want, "batch={batch}");
+        }
     }
 
     /// The directory must report sorted keys, a first container starting right

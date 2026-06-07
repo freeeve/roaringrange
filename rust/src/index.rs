@@ -565,6 +565,8 @@ impl<F: RangeFetch> Index<F> {
             results,
             pos: 0,
             tail_done: false,
+            tail_scan: None,
+            tail_scan_tried: false,
         })
     }
 }
@@ -679,7 +681,16 @@ pub struct Cursor<F: RangeFetch> {
     results: Vec<u32>,
     pos: usize,
     tail_done: bool,
+    /// Incremental tail scanner for the strict-AND, unfiltered path: built on first
+    /// tail access so a deep page fetches only the container buckets it spans.
+    /// `None` (with `tail_scan_tried`) means the whole-tail load path is used.
+    tail_scan: Option<crate::posting::TailScan>,
+    tail_scan_tried: bool,
 }
+
+/// Candidate container buckets (each a 64K-doc range) intersected per incremental
+/// tail step. Larger means fewer round-trips but more over-read past a filled page.
+const TAIL_KEY_BATCH: usize = 8;
 
 impl<F: RangeFetch> Cursor<F> {
     /// An exhausted cursor with no results (empty or absent query).
@@ -693,6 +704,8 @@ impl<F: RangeFetch> Cursor<F> {
             results: Vec::new(),
             pos: 0,
             tail_done: true,
+            tail_scan: None,
+            tail_scan_tried: true,
         }
     }
 
@@ -720,9 +733,36 @@ impl<F: RangeFetch> Cursor<F> {
                 )
             })
             .collect();
-        // Strict AND (Exact mode) intersects the tails with container-level
-        // ranged reads, so a rare phrase of common trigrams costs KB instead of
-        // every full tail posting. Fuzzy threshold still needs each full posting.
+
+        // Incremental path: a strict AND with no facet filter pages the tail in
+        // doc-ID (rank) order, intersecting only the container buckets needed to
+        // reach `need` and stopping there — so a deep page costs the buckets it
+        // spans, not the whole (possibly hundreds-of-MB) tail. Fuzzy threshold and
+        // facet-filtered tails (whose result sets are already pruned) fall back to
+        // the whole-tail load below, as does a posting whose layout isn't seekable.
+        if self.min_match == self.recs.len() && self.filter.is_none() {
+            if !self.tail_scan_tried {
+                self.tail_scan = crate::posting::TailScan::open(&self.fetch, &ranges).await?;
+                self.tail_scan_tried = true;
+            }
+            if self.tail_scan.is_some() {
+                let mut scan = self.tail_scan.take().unwrap();
+                while self.results.len() < need && !scan.exhausted() {
+                    let win = scan.next_window(&self.fetch, TAIL_KEY_BATCH).await?;
+                    self.results.extend(win.iter());
+                }
+                if scan.exhausted() {
+                    self.tail_done = true;
+                }
+                self.tail_scan = Some(scan);
+                return Ok(());
+            }
+            // tail_scan is None: not seekable — fall through to the whole-tail load.
+        }
+
+        // Whole-tail load. Strict AND still seeks at container granularity (a rare
+        // phrase of common trigrams costs KB, not every full posting); fuzzy
+        // threshold needs each full posting; a facet tail is ANDed in after.
         let mut tail_and = if self.min_match == self.recs.len() {
             crate::posting::tail_intersect_and(&self.fetch, &ranges).await?
         } else {
@@ -858,5 +898,67 @@ mod tests {
         assert_eq!(sparse_count(512, 512), 1);
         assert_eq!(sparse_count(513, 512), 2);
         assert_eq!(sparse_count(5, 2), 3);
+    }
+
+    /// Paging the cursor in small steps must reconstruct exactly the ordered result
+    /// list that forcing the whole tail (load_tail) yields — head docs (< 65536)
+    /// first, then the tail buckets in ascending (rank) order — and finish with the
+    /// tail no longer pending. Exercises the incremental ensure() path end to end.
+    #[test]
+    fn cursor_pages_match_full_tail_load() {
+        use crate::build::{split_posting, write_index};
+        use crate::ngram::ngram_keys;
+        use crate::MemoryFetch;
+        use futures::executor::block_on;
+        use roaring::RoaringBitmap;
+
+        fn bm(docs: &[u32]) -> RoaringBitmap {
+            let mut b = RoaringBitmap::new();
+            for &d in docs {
+                b.insert(d);
+            }
+            b
+        }
+        fn rrs(entries: &[(u64, RoaringBitmap)]) -> MemoryFetch {
+            let posts: Vec<(u64, Vec<u8>, Vec<u8>)> = entries
+                .iter()
+                .map(|(k, b)| {
+                    let (h, t) = split_posting(b, 65536);
+                    (*k, h, t)
+                })
+                .collect();
+            let mut out = Vec::new();
+            write_index(&mut out, 3, 2, 65536, posts).unwrap();
+            MemoryFetch::new(out)
+        }
+
+        // "aaab" -> trigrams "aaa","aab"; a doc matches only when in BOTH (strict AND).
+        let keys = ngram_keys("aaab", 3);
+        assert_eq!(keys.len(), 2);
+        let aaa = bm(&[0, 1, 2, 3, 70000, 70001, 70002, 140000, 200000, 5_000_000]);
+        let aab = bm(&[0, 1, 2, 99, 70000, 70001, 70003, 140000, 200000, 5_000_000]);
+        let idx = block_on(Index::open(rrs(&[(keys[0], aaa), (keys[1], aab)]))).unwrap();
+
+        let mut full = block_on(idx.search_cursor("aaab", 0)).unwrap();
+        block_on(full.load_tail()).unwrap();
+        let want = block_on(full.page(0, 1000)).unwrap();
+        assert_eq!(want, vec![0, 1, 2, 70000, 70001, 140000, 200000, 5_000_000]);
+
+        let mut cur = block_on(idx.search_cursor("aaab", 0)).unwrap();
+        assert_eq!(cur.head_count(), 3); // docs 0,1,2 are < 65536
+        assert!(cur.pending_tail());
+        let mut got = Vec::new();
+        let mut off = 0;
+        loop {
+            let pg = block_on(cur.page(off, 3)).unwrap();
+            if pg.is_empty() {
+                break;
+            }
+            got.extend(pg);
+            off += 3;
+        }
+        assert_eq!(got, want);
+        assert!(!cur.pending_tail());
+        assert_eq!(cur.loaded(), want.len());
     }
 }
