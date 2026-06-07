@@ -77,7 +77,9 @@ futures = { version = "0.3", default-features = false, features = ["std", "execu
 # behind the `terms` feature; `default-features = false` keeps the optional `mmap`
 # extra out (and the `levenshtein` automaton is no longer needed — typo/substring
 # search routes to the trigram `RRS` index).
-fst = { version = "0.4", optional = true, default-features = false }
+# Forked fst (BurntSushi 0.4.7 + inline single-transition builder nodes): ~17x
+# fewer build allocations / ~30% faster index builds, byte-identical output.
+fst = { git = "https://github.com/freeeve/fst", branch = "inline-transitions", optional = true, default-features = false }
 # Snowball stemmers for the optional `terms` stemming filter — the same pure-Rust
 # crate Tantivy uses. wasm-safe (no C), so the browser reader can stem queries to
 # match a stemmed index (build/query symmetry). Optional, pulled in by `terms`.
