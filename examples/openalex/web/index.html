@@ -682,7 +682,7 @@
             <span class="track"></span>
             <span>Server-side search</span>
           </label>
-          <span class="srvnote">runs the intersection in a Lambda and returns only result IDs — KB instead of MB for huge result sets (facets off)</span>
+          <span class="srvnote">runs the intersection in a Lambda and returns just this page's result IDs plus facet counts — KB instead of MB for huge result sets</span>
         </div>
 
         <div class="srvtoggle" id="lambdasem-wrap" hidden>
@@ -691,7 +691,7 @@
             <span class="track"></span>
             <span>Lambda embeddings</span>
           </label>
-          <span class="srvnote">embeds the query with EmbeddingGemma-300M in a Lambda (mode 1), then range-searches a Gemma-embedded vector index — vs the in-browser model2vec embedder</span>
+          <span class="srvnote">embeds the query with EmbeddingGemma-300M in a Lambda — a full contextual transformer, for markedly more accurate semantic matches — then range-searches its Gemma-embedded vector index. The default in-browser embedder is model2vec (<code>potion-retrieval-32M</code>): a static distillation that mean-pools precomputed token vectors in wasm — instant and server-free, but lower fidelity.</span>
         </div>
 
         <div class="srvtoggle" id="splitmode-wrap" hidden>

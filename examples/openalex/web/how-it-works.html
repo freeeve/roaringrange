@@ -631,7 +631,7 @@
     <marker id="sv4" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#0d9488"></path></marker>
   </defs>
   <text x="32" y="38" class="title">Semantic search — embed the query, then range-fetch the nearest clusters</text>
-  <text x="32" y="60" class="sub">no backend in mode 2; one tiny embed call in mode 1 — the rest is the same range-read path as the text index</text>
+  <text x="32" y="60" class="sub">no backend with in-browser model2vec; one tiny embed call with the Gemma Lambda — the rest is the same range-read path as the text index</text>
 
   <rect x="32" y="86" width="330" height="352" rx="10" fill="#eef2ff" stroke="#3b5bdb"></rect>
   <text x="52" y="114" class="box">Browser — WASM reader (Rust)</text>
@@ -654,10 +654,10 @@
   <text x="706" y="122" class="seg mono" text-anchor="middle" font-size="9.5">.rrvi · centroids+codebooks+dir</text>
   <rect x="618" y="136" width="176" height="42" rx="8" fill="#3b5bdb"></rect>
   <text x="706" y="155" class="seg" text-anchor="middle" font-size="12.5">.rrm2 model matrix</text>
-  <text x="706" y="170" class="seg mono" text-anchor="middle" font-size="9.5">static · mode 2</text>
+  <text x="706" y="170" class="seg mono" text-anchor="middle" font-size="9.5">static · in-browser</text>
   <rect x="618" y="182" width="176" height="48" rx="8" fill="#0d9488"></rect>
   <text x="706" y="202" class="seg" text-anchor="middle" font-size="12.5">Lambda · Gemma</text>
-  <text x="706" y="218" class="seg mono" text-anchor="middle" font-size="9.5">ONNX · mode 1</text>
+  <text x="706" y="218" class="seg mono" text-anchor="middle" font-size="9.5">ONNX · server-side</text>
   <rect x="618" y="234" width="176" height="128" fill="#64748b"></rect>
   <text x="706" y="290" class="seg" text-anchor="middle">cluster code lists</text>
   <text x="706" y="308" class="seg mono" text-anchor="middle" font-size="10">.rrvi · [u32 ids][u8 codes]</text>
@@ -668,9 +668,9 @@
   <line x1="362" y1="150" x2="616" y2="109" stroke="#3b5bdb" stroke-width="1.6" marker-end="url(#sv2)"></line>
   <text x="378" y="140" class="req"><tspan class="wave">①</tspan> GET boot region (once)</text>
   <line x1="362" y1="202" x2="616" y2="157" stroke="#3b5bdb" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#sv2)"></line>
-  <text x="378" y="192" class="req"><tspan class="wave">②</tspan> GET .rrm2 (once · mode 2)</text>
+  <text x="378" y="192" class="req"><tspan class="wave">②</tspan> GET .rrm2 (once · model2vec)</text>
   <line x1="362" y1="222" x2="616" y2="206" stroke="#0d9488" stroke-width="1.6" marker-end="url(#sv4)"></line>
-  <text x="378" y="240" class="req" fill="#0d9488"><tspan font-weight="700">②</tspan> or POST /embed (mode 1)</text>
+  <text x="378" y="240" class="req" fill="#0d9488"><tspan font-weight="700">②</tspan> or POST /embed (Gemma Lambda)</text>
   <line x1="362" y1="290" x2="616" y2="298" stroke="#3b5bdb" stroke-width="1.6" marker-end="url(#sv2)"></line>
   <text x="378" y="280" class="req"><tspan class="wave">④</tspan> GET nprobe cluster lists (parallel)</text>
   <line x1="362" y1="400" x2="616" y2="388" stroke="#3b5bdb" stroke-width="1.6" marker-end="url(#sv2)"></line>
@@ -681,22 +681,22 @@
   <rect x="520" y="452" width="12" height="12" rx="3" fill="#64748b"></rect>
   <text x="538" y="462" class="req">range-fetched per query</text>
   <rect x="694" y="452" width="12" height="12" rx="3" fill="#0d9488"></rect>
-  <text x="712" y="462" class="req">live · mode 1</text>
+  <text x="712" y="462" class="req">live · Gemma Lambda</text>
 
   <text x="32" y="496" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">VectorIndex::open(f).search(query_vec, k, nprobe) → [ VectorHit { doc_id, score } ]</tspan></text>
 </svg></div>
-          <figcaption>The query embeds to a 512-d vector (in the browser, or via the mode-1 Lambda), the reader picks the <code>nprobe</code> nearest centroids from the in-memory boot region, and range-fetches only those clusters&rsquo; PQ codes to rank by asymmetric distance. <b>Out come ranked doc IDs in the same numbering as the text index</b> &mdash; so records render through the very same path.</figcaption>
+          <figcaption>The query embeds to a 512-d vector (in the browser, or via the EmbeddingGemma Lambda), the reader picks the <code>nprobe</code> nearest centroids from the in-memory boot region, and range-fetches only those clusters&rsquo; PQ codes to rank by asymmetric distance. <b>Out come ranked doc IDs in the same numbering as the text index</b> &mdash; so records render through the very same path.</figcaption>
         </figure>
 
         <h3 class="sub">Two ways to embed a query</h3>
         <p class="body">
           The search machinery is identical; only the <b>embedder</b> differs. Each model defines its own vector space,
-          so each mode has its own <code>.rrvi</code> &mdash; but the corpus is embedded once, offline, for <b>$0</b> either way.
+          so each embedder has its own <code>.rrvi</code> &mdash; but the corpus is embedded once, offline, for <b>$0</b> either way.
         </p>
         <div class="facets-grid reveal">
           <div class="facet">
             <div class="fname">In the browser &mdash; model2vec</div>
-            <span class="fkey">mode 2 · no backend</span>
+            <span class="fkey">in-browser · no backend</span>
             <div class="fdesc">
               A <b>static</b> model (<code>potion-retrieval-32M</code>) ported to wasm: tokenize (BERT WordPiece), average
               the per-token vectors, normalize. No neural net, no API key, <b>$0</b>. The token matrix
@@ -705,7 +705,7 @@
           </div>
           <div class="facet">
             <div class="fname">Lambda-based &mdash; EmbeddingGemma</div>
-            <span class="fkey">mode 1 · AWS Lambda</span>
+            <span class="fkey">server-side · AWS Lambda</span>
             <div class="fdesc">
               <code>EmbeddingGemma-300M</code> runs in a Lambda as <b>ONNX</b> (no PyTorch), fronted by CloudFront. A real
               transformer with <b>asymmetric prompts</b> (<code>query:</code> vs <code>document:</code>) gives stronger
@@ -815,7 +815,7 @@
 
   <text x="32" y="486" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">write  build_ivfpq_from_parts(parts).write(w)      read  VectorIndex::open(f).search(q, k, nprobe)</tspan></text>
 </svg></div>
-          <figcaption>A 48-byte header, then the boot region &mdash; an optional OPQ rotation, the coarse centroids, the PQ codebooks, and a cluster directory &mdash; read once into memory. Each query fetches only the <code>nprobe</code> nearest clusters&rsquo; code lists (<code>[u32 ids][u8 codes]</code>). An optional <code>.rrm2</code> (mode-2 static matrix) and <code>.rrvr</code> (bf16 full-vector re-rank sidecar, fetched only for the surviving top-K) ride alongside. <b>The whole index is never downloaded.</b></figcaption>
+          <figcaption>A 48-byte header, then the boot region &mdash; an optional OPQ rotation, the coarse centroids, the PQ codebooks, and a cluster directory &mdash; read once into memory. Each query fetches only the <code>nprobe</code> nearest clusters&rsquo; code lists (<code>[u32 ids][u8 codes]</code>). An optional <code>.rrm2</code> (model2vec static matrix) and <code>.rrvr</code> (bf16 full-vector re-rank sidecar, fetched only for the surviving top-K) ride alongside. <b>The whole index is never downloaded.</b></figcaption>
         </figure>
       </section>
 
