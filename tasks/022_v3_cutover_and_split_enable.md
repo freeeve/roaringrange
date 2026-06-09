@@ -12,7 +12,7 @@ The reader/wasm crate is **RRSI v3-only** (commit `d4cc15b`). Live state today (
 
 ## Already done (ready to ship)
 - **Term mode fixed + live** — `index.html` points at `openalex-484m-stem.rrt`. (deployed, `--no-build`).
-- **Split manifest fixed** — `splitset_strip_summaries` produced `/tmp/oa-out/splitset-trigram-484m/openalex.stripped.rrss`
+- **Split manifest fixed** — `splitset_strip_summaries` produced `/tmp/oa-out/openalex-trigram.stripped.rrss`
   (**727 MB → 29 KB**, Bloom/facet summaries dropped). Verified: opens + `"machine learning"` → 10 hits
   against the real split bodies. Split bodies are already v3 and already uploaded (780 objects).
 - **`split: null`** in `index.html` (so the demo can't trip on the old 727 MB manifest meanwhile).
@@ -24,7 +24,7 @@ The reader/wasm crate is **RRSI v3-only** (commit `d4cc15b`). Live state today (
 
 ## Cutover steps (do together — see the coordination risk)
 1. **Upload the fixed split manifest** (tiny, harmless to do early):
-   `aws s3 cp /tmp/oa-out/splitset-trigram-484m/openalex.stripped.rrss s3://openalex-eve/openalex-trigram-split/openalex.rrss --cache-control "public, max-age=31536000, immutable"` (AWS_PROFILE=openalex-admin).
+   `aws s3 cp /tmp/oa-out/openalex-trigram.stripped.rrss s3://openalex-eve/openalex-trigram-split/openalex.rrss --cache-control "public, max-age=31536000, immutable"` (AWS_PROFILE=openalex-admin).
    (Optional: build a real `.rrhc` so split boot is 1 RTT — `write_splitset_bundle` with `max_splits`=tier-0;
    not required, the demo's `openBundle` falls back to a plain open on the 29 KB manifest.)
 2. **Re-enable split** in `index.html` DATASETS `full`:
