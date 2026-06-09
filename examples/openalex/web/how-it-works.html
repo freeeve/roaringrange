@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>How it works — OpenAlex Search (a RoaringRange demo)</title>
-<meta name="description" content="How a static, no-backend, in-browser full-text search over 47.8M OpenAlex works is built from byte-range reads — powered by roaringrange." />
+<meta name="description" content="How a static, no-backend, in-browser search over 484M OpenAlex works — trigram, whole-word term, and semantic vector indexes — is built from byte-range reads, powered by roaringrange." />
 <!-- system font stack only; no external font/CDN dependency (keeps the page self-contained) -->
 <style>
   :root{
@@ -263,7 +263,7 @@
 <section class="hero">
   <div class="wrap">
     <p class="eyebrow">Powered by RoaringRange</p>
-    <h1 class="hero-title">Searching millions of papers, with <em>no server.</em></h1>
+    <h1 class="hero-title">Searching half a billion papers, with <em>no server.</em></h1>
     <p class="lead">
       This <b>RoaringRange</b> demo searches OpenAlex works entirely in your browser, with <b>no backend</b>.
       The index is one static file on S3, and a query fetches just a few small byte-ranges over HTTP —
@@ -272,8 +272,8 @@
       <a href="https://pagefind.app/" target="_blank" rel="noopener">Pagefind</a>.
     </p>
     <div class="specs reveal">
-      <div class="spec"><div class="num">47.8<small>M</small></div><div class="lbl">OpenAlex works indexed</div></div>
-      <div class="spec"><div class="num">0</div><div class="lbl">servers &middot; backends</div></div>
+      <div class="spec"><div class="num">484<small>M</small></div><div class="lbl">OpenAlex works indexed</div></div>
+      <div class="spec"><div class="num">0</div><div class="lbl">servers · backends</div></div>
       <div class="spec"><div class="num">~3<small>MB</small></div><div class="lbl">downloaded at boot</div></div>
       <div class="spec"><div class="num">KB&ndash;MB</div><div class="lbl">fetched per query</div></div>
     </div>
@@ -317,9 +317,17 @@
           <span class="pchip">abstract <span>&larr; abstract_inverted_index</span></span>
           <span class="pchip">author names</span>
           <span class="pchip">host venue</span>
-          <span class="parrow">&rarr;</span>
+          <span class="parrow">→</span>
           <span class="pout">trigrams</span>
         </div>
+        <p class="body">
+          The same text is indexed a <b>second</b> way — as whole <b>words</b>, not character trigrams.
+          This <b>term index</b> (the <code>.rrt</code> file) Snowball-stems each word and stores one posting per term,
+          so a query word costs a <em>single</em> fetch carrying that word&rsquo;s true rarity — strongest for exact
+          and prefix/autocomplete matches, where trigrams shine at substring and typo-tolerant search. Both indexes
+          share the same doc IDs, so a query can use either or fuse them; both formats sit side by side in
+          <a href="#formats">section&nbsp;04</a>.
+        </p>
 
         <h3 class="sub">The five facets</h3>
         <p class="body">Five fields from each work become filter categories — the <code>.rrf</code> sidecar. Counts are free; selecting one fetches a single small posting.</p>
@@ -350,21 +358,21 @@
             <span class="oa">green OA</span>
           </div>
           <p class="r-abs">Deeper neural networks are more difficult to train. We present a residual learning framework to ease the training of networks that are substantially deeper than those used previously&hellip; <span class="field-tag">abstract</span></p>
-          <p class="r-id">id&nbsp; <b>W2194775991</b>&nbsp; &rarr; openalex.org/W2194775991</p>
+          <p class="r-id">id&nbsp; <b>W2194775991</b>&nbsp; → openalex.org/W2194775991</p>
         </article>
 
         <h3 class="sub">DOI lookup</h3>
         <p class="body">
           A small companion index — the <code>.rril</code> file — maps each work&rsquo;s <b>DOI</b> straight to its document.
           Pasting a DOI, or a <code>doi.org</code> URL, jumps to the exact work in a couple of byte-range reads instead of a text search.
-          The format appears in <a href="#formats">section&nbsp;03</a>.
+          The format appears in <a href="#formats">section&nbsp;04</a>.
         </p>
       </section>
 
       <!-- ====================== 02 ====================== -->
       <section class="sect" id="search">
         <div class="sect-head">
-          <div class="sect-kicker"><span class="sect-num">02</span><span class="sect-tag">Query &rarr; range reads</span></div>
+          <div class="sect-kicker"><span class="sect-num">02</span><span class="sect-tag">Query → range reads</span></div>
           <h2 class="sect-title">Searching in the browser</h2>
           <p class="sect-intro">
             A query tokenizes into trigrams, fetches matching dictionary blocks and head postings as parallel HTTP <code>Range</code> requests,
@@ -374,7 +382,7 @@
 
         <p class="fig-lead">One query, a near-constant number of round-trips — <b>independent of corpus size.</b></p>
         <figure class="fig reveal">
-          <div class="fig-head"><span class="chip">flow</span><span class="fig-name">In-browser search <span class="muted">&middot; HTTP range reads</span></span></div>
+          <div class="fig-head"><span class="chip">flow</span><span class="fig-name">In-browser search <span class="muted">· HTTP range reads</span></span></div>
           <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 576" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="In-browser search via HTTP range reads">
   <defs>
     
@@ -450,7 +458,7 @@
 
         <p class="fig-lead">Two tiers in time: the popular head paints first, then the full tail fills itself in.</p>
         <figure class="fig reveal">
-          <div class="fig-head"><span class="chip">head / tail</span><span class="fig-name">Two-tier search <span class="muted">&middot; instant top-K, then the rest</span></span></div>
+          <div class="fig-head"><span class="chip">head / tail</span><span class="fig-name">Two-tier search <span class="muted">· instant top-K, then the rest</span></span></div>
           <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 560" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="Two-tier AND: the popular head answers instantly, the full tail loads on demand via container-level range reads">
   <defs>
     
@@ -525,7 +533,7 @@
 
         <p class="fig-lead">Boot is cheap because only the small top of each file loads up front.</p>
         <figure class="fig reveal">
-          <div class="fig-head"><span class="chip">boot</span><span class="fig-name">What boots <span class="muted">&middot; versus what stays in S3</span></span></div>
+          <div class="fig-head"><span class="chip">boot</span><span class="fig-name">What boots <span class="muted">· versus what stays in S3</span></span></div>
           <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 392" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="What loads at boot versus what stays in S3 and is range-fetched on demand">
   <defs>
     
@@ -604,19 +612,19 @@
         </p>
         <div class="pipe reveal">
           <span class="pchip">query text</span>
-          <span class="parrow">&rarr;</span>
+          <span class="parrow">→</span>
           <span class="pchip">embed <span>&larr; 512-d unit vector</span></span>
-          <span class="parrow">&rarr;</span>
+          <span class="parrow">→</span>
           <span class="pchip">nprobe clusters <span>&larr; range reads</span></span>
-          <span class="parrow">&rarr;</span>
+          <span class="parrow">→</span>
           <span class="pchip">PQ ADC rank</span>
-          <span class="parrow">&rarr;</span>
+          <span class="parrow">→</span>
           <span class="pout">top-K doc IDs</span>
         </div>
 
         <p class="fig-lead">The query path mirrors the trigram one &mdash; a near-constant number of round-trips, <b>independent of corpus size.</b></p>
         <figure class="fig reveal">
-          <div class="fig-head"><span class="chip">flow</span><span class="fig-name">Semantic search <span class="muted">&middot; embed &rarr; range-fetch clusters</span></span></div>
+          <div class="fig-head"><span class="chip">flow</span><span class="fig-name">Semantic search <span class="muted">· embed → range-fetch clusters</span></span></div>
           <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 512" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="Semantic search: embed the query, then range-fetch the nearest clusters">
   <defs>
     <marker id="sv2" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b5bdb"></path></marker>
@@ -688,7 +696,7 @@
         <div class="facets-grid reveal">
           <div class="facet">
             <div class="fname">In the browser &mdash; model2vec</div>
-            <span class="fkey">mode 2 &middot; no backend</span>
+            <span class="fkey">mode 2 · no backend</span>
             <div class="fdesc">
               A <b>static</b> model (<code>potion-retrieval-32M</code>) ported to wasm: tokenize (BERT WordPiece), average
               the per-token vectors, normalize. No neural net, no API key, <b>$0</b>. The token matrix
@@ -697,7 +705,7 @@
           </div>
           <div class="facet">
             <div class="fname">Lambda-based &mdash; EmbeddingGemma</div>
-            <span class="fkey">mode 1 &middot; AWS Lambda</span>
+            <span class="fkey">mode 1 · AWS Lambda</span>
             <div class="fdesc">
               <code>EmbeddingGemma-300M</code> runs in a Lambda as <b>ONNX</b> (no PyTorch), fronted by CloudFront. A real
               transformer with <b>asymmetric prompts</b> (<code>query:</code> vs <code>document:</code>) gives stronger
@@ -720,7 +728,7 @@
         <div class="facets-grid reveal">
           <div class="facet">
             <div class="fname">Post-filter</div>
-            <span class="fkey">retrieve &rarr; drop</span>
+            <span class="fkey">retrieve → drop</span>
             <div class="fdesc">Over-fetch a larger top-<em>N</em>, then drop IDs outside the selected bitmaps. Dead simple &mdash; one bitmap test per candidate &mdash; but a very selective filter can thin a page, so <em>N</em> is raised to compensate.</div>
           </div>
           <div class="facet">
@@ -747,7 +755,7 @@
         </div>
 
         <figure class="fig reveal">
-          <div class="fig-head"><span class="chip">.rrvi</span><span class="fig-name">Vector index <span class="muted">&middot; one static file</span></span></div>
+          <div class="fig-head"><span class="chip">.rrvi</span><span class="fig-name">Vector index <span class="muted">· one static file</span></span></div>
           <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 500" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRVI vector index file format">
   <defs><marker id="vf" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#475569"></path></marker></defs>
   <text x="32" y="38" class="title">Vector index — one static file (<tspan class="mono">.rrvi</tspan>)</text>
@@ -822,8 +830,25 @@
           </p>
         </div>
 
+        <h3 class="sub">The full index family</h3>
+        <p class="body">
+          Every artifact below is a standalone static file (or a set of them) sharing one global doc-ID space, so they
+          compose à la carte — pick the indexes a query needs and ignore the rest. The demo publishes the whole family
+          over the full OpenAlex corpus, <b>484,369,476 works</b>; each box loads by HTTP byte-range.
+        </p>
+        <div class="facets-grid reveal">
+          <div class="facet"><div class="fname">Trigram text index</div><span class="fkey">.rrs · RRSI · ~107 GB</span><div class="fdesc">Substring &amp; typo-tolerant full-text search — the monolith detailed below.</div></div>
+          <div class="facet"><div class="fname">Term index</div><span class="fkey">.rrt · RRTI · ~50 GB</span><div class="fdesc">Whole-word, Snowball-stemmed exact &amp; prefix matches — one fetch per query word.</div></div>
+          <div class="facet"><div class="fname">Facet sidecar</div><span class="fkey">.rrf · RRSF · ~2.2 GB</span><div class="fdesc">Year, type, open-access, language, and topic filters with free counts.</div></div>
+          <div class="facet"><div class="fname">Vector index</div><span class="fkey">.rrvi (+ .rrm2) · RRVI · ~16 GB</span><div class="fdesc">IVFPQ semantic search; in-browser model2vec, or a Gemma Lambda embedder.</div></div>
+          <div class="facet"><div class="fname">DOI lookup</div><span class="fkey">.rril · RRIL · ~4.5 GB</span><div class="fdesc">A DOI, or a <code>doi.org</code> URL, straight to its doc ID in a couple of reads.</div></div>
+          <div class="facet"><div class="fname">Record store</div><span class="fkey">.idx / .bin (+ .dict) · RRSR · ~119 GB</span><div class="fdesc">Doc ID → the stored card fields, zstd-compressed against a trained dictionary.</div></div>
+          <div class="facet"><div class="fname">Split sets</div><span class="fkey">.rrss + .rrhc · RRSS</span><div class="fdesc">Byte-capped immutable splits, pruned queries — a 120 GB / 389-split trigram set and a 61 GB / 243-split term set.</div></div>
+          <div class="facet"><div class="fname">Sort columns</div><span class="fkey">.rrsc · RRSC</span><div class="fdesc">Secondary sort keys &amp; full second indexes — client-side re-rank, e.g. newest-first.</div></div>
+        </div>
+
         <figure class="fig reveal">
-          <div class="fig-head"><span class="chip">.rrs</span><span class="fig-name">Text index <span class="muted">&middot; one static file</span></span></div>
+          <div class="fig-head"><span class="chip">.rrs</span><span class="fig-name">Text index <span class="muted">· one static file</span></span></div>
           <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 540" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRS text index file format, RRSI v2">
   <defs>
     <marker id="arF" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
@@ -906,7 +931,7 @@
         </figure>
 
         <figure class="fig reveal">
-          <div class="fig-head"><span class="chip">.rrf</span><span class="fig-name">Facet sidecar <span class="muted">&middot; filtering without a backend</span></span></div>
+          <div class="fig-head"><span class="chip">.rrf</span><span class="fig-name">Facet sidecar <span class="muted">· filtering without a backend</span></span></div>
           <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 584" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRSF facet sidecar layout">
   <defs>
     
@@ -985,7 +1010,7 @@
         </figure>
 
         <figure class="fig reveal">
-          <div class="fig-head"><span class="chip">.idx / .bin</span><span class="fig-name">Record store <span class="muted">&middot; doc ID &rarr; stored fields</span></span></div>
+          <div class="fig-head"><span class="chip">.idx / .bin</span><span class="fig-name">Record store <span class="muted">· doc ID → stored fields</span></span></div>
           <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 584" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRSR record store layout">
   <defs>
     
@@ -1050,7 +1075,7 @@
         </figure>
 
         <figure class="fig reveal">
-          <div class="fig-head"><span class="chip">.rril</span><span class="fig-name">DOI lookup <span class="muted">&middot; identifier &rarr; doc ID</span></span></div>
+          <div class="fig-head"><span class="chip">.rril</span><span class="fig-name">DOI lookup <span class="muted">· identifier → doc ID</span></span></div>
           <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 452" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRIL DOI lookup file layout and binary search">
   <defs>
     <marker id="arL" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
@@ -1076,7 +1101,7 @@
   <text x="32" y="176" class="lbl mono">magic &#34;RRIL&#34; · ver · count N</text>
 
   <text x="32" y="214" class="lbl" font-weight="700">binary-search the sorted hashes — halve the window per 16 B probe</text>
-  <text x="948" y="214" class="note mono" text-anchor="end" font-size="11" fill="#94a3b8">≈ ⌈log₂ N⌉ ≈ 26 probes for 47.8M</text>
+  <text x="948" y="214" class="note mono" text-anchor="end" font-size="11" fill="#94a3b8">≈ ⌈log₂ N⌉ ≈ 29 probes for 484M</text>
 
   <g>
     <rect x="32" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>
@@ -1116,7 +1141,7 @@
           <figcaption>Maps each work&rsquo;s normalized DOI to a doc ID: a header, then fixed-size records sorted by hash. A lookup normalizes the query and binary-searches the hashes — a handful of 16-byte ranged reads — and a second &ldquo;verify&rdquo; hash rejects collisions. <b>An exact DOI lands on the exact work, or nothing, with no text search.</b></figcaption>
         </figure>
         <figure class="fig reveal">
-          <div class="fig-head"><span class="chip">.rrsc</span><span class="fig-name">Sort columns <span class="muted">&middot; secondary indexes &amp; client-side re-rank</span></span></div>
+          <div class="fig-head"><span class="chip">.rrsc</span><span class="fig-name">Sort columns <span class="muted">· secondary indexes &amp; client-side re-rank</span></span></div>
           <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 524" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRSC sort columns / secondary index layout and client-side re-rank">
   <defs>
     <marker id="arS" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
@@ -1227,7 +1252,120 @@
   <text x="48" y="492" class="note"><tspan font-weight="700">Full second index</tspan> — a second <tspan class="mono">.rrs</tspan> reindexed in secondary order + a <tspan class="mono">u32</tspan> permutation column (<tspan class="mono">secondary_docid → primary_docid</tspan>).</text>
   <text x="48" y="509" class="note">A result page is a contiguous run, so <tspan class="mono">slice_u32(start, len)</tspan> maps it back to primary IDs in one ranged read. Records &amp; facets stay keyed by primary ID.</text>
 </svg></div>
-          <figcaption>An optional, range-fetchable store of <b>dense values per doc ID</b> — the build-time counterpart of an alternate sort key. A search returns IDs in citation rank; an <code>.rrsc</code> column lets the reader fetch one value per candidate and <b>top-K client-side</b> (sort by date, rating, any metric), ties broken by doc ID. The same container also backs a full second index: a <code>u32</code> permutation column maps <code>secondary_docid &rarr; primary_docid</code>, so a results page — a contiguous run — resolves back to primary IDs in a single ranged read.</figcaption>
+          <figcaption>An optional, range-fetchable store of <b>dense values per doc ID</b> — the build-time counterpart of an alternate sort key. A search returns IDs in citation rank; an <code>.rrsc</code> column lets the reader fetch one value per candidate and <b>top-K client-side</b> (sort by date, rating, any metric), ties broken by doc ID. The same container also backs a full second index: a <code>u32</code> permutation column maps <code>secondary_docid → primary_docid</code>, so a results page — a contiguous run — resolves back to primary IDs in a single ranged read.</figcaption>
+        </figure>
+
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">.rrt</span><span class="fig-name">Term index <span class="muted">· whole-word, blocked dictionary</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 520" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRTI term index file format">
+  <defs><marker id="arT" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#475569"></path></marker></defs>
+  <text x="32" y="38" class="title">Term index — one static file (<tspan class="mono">.rrt</tspan>)</text>
+  <text x="32" y="60" class="sub">a blocked, front-coded word dictionary + a small resident FST router — one ranged read locates a word, one fetches its posting</text>
+
+  <rect x="648" y="26" width="12" height="12" rx="3" fill="#3b5bdb"></rect><text x="666" y="36" class="note">loaded at boot</text>
+  <rect x="792" y="26" width="12" height="12" rx="3" fill="#64748b"></rect><text x="810" y="36" class="note">range-fetched</text>
+
+  <rect x="32" y="86" width="96" height="56" rx="6" fill="#3b5bdb"></rect>
+  <rect x="132" y="86" width="200" height="56" rx="6" fill="#3b5bdb"></rect>
+  <rect x="336" y="86" width="270" height="56" rx="6" fill="#64748b"></rect>
+  <rect x="610" y="86" width="338" height="56" rx="6" fill="#64748b"></rect>
+  <text x="80" y="112" class="seg" text-anchor="middle">Header</text>
+  <text x="80" y="128" class="seg mono" text-anchor="middle" font-size="11">40 B</text>
+  <text x="232" y="112" class="seg" text-anchor="middle">Router FST</text>
+  <text x="232" y="128" class="seg mono" text-anchor="middle" font-size="11">block last-terms · O(#blocks)</text>
+  <text x="471" y="112" class="seg" text-anchor="middle">Dict blocks</text>
+  <text x="471" y="128" class="seg mono" text-anchor="middle" font-size="11">front-coded · byte-capped</text>
+  <text x="779" y="112" class="seg" text-anchor="middle">Postings</text>
+  <text x="779" y="128" class="seg mono" text-anchor="middle" font-size="11">per term · [ tail_size ][ head ][ tail ]</text>
+  <text x="32" y="172" class="lbl mono">magic &#34;RRTI&#34; · version 2 · flags(stemmed, stop-words) · termCount · headBoundary · routerLen · dictLen</text>
+
+  <line x1="232" y1="142" x2="232" y2="206" stroke="#3b5bdb" stroke-width="1.5"></line>
+  <rect x="32" y="206" width="430" height="150" rx="8" fill="#eef0fd" stroke="#3b5bdb"></rect>
+  <text x="48" y="230" class="lbl" font-weight="700">Router FST — resident, a few MB even for tens of millions of terms</text>
+  <text x="48" y="252" class="note">maps each block&#39;s <tspan font-weight="700">last term</tspan> → <tspan class="mono">(blockOff &lt;&lt; 24) | blockLen</tspan></text>
+  <text x="48" y="272" class="note"><tspan class="mono">router.range().ge(term)</tspan> → the one block that can hold the term</text>
+  <text x="48" y="300" class="note" fill="#64748b">blocks are sorted &amp; contiguous, so the first key ≥ term names its block —</text>
+  <text x="48" y="318" class="note" fill="#64748b">no full vocabulary in RAM (that was v1&#39;s monolithic FST; v2 dropped it).</text>
+  <rect x="48" y="330" width="398" height="16" rx="3" fill="#dbe3fb"></rect>
+  <text x="60" y="342" class="note mono" font-size="10">O(#blocks) resident · O(vocabulary) range-fetched on demand</text>
+
+  <line x1="471" y1="142" x2="700" y2="206" stroke="#64748b" stroke-width="1.5" marker-end="url(#arT)"></line>
+  <rect x="496" y="206" width="452" height="150" rx="8" fill="#f1f5f9" stroke="#64748b"></rect>
+  <text x="512" y="230" class="lbl" font-weight="700">one dict entry — front-coded against the previous term</text>
+  <text x="512" y="254" class="note mono" font-size="12">[ shared : uvarint ]      bytes shared w/ prev term</text>
+  <text x="512" y="274" class="note mono" font-size="12">[ suffixLen ][ suffix ]   term = prev[..shared] + suffix</text>
+  <text x="512" y="294" class="note mono" font-size="12">[ headOffΔ : uvarint ]   posting offset, delta-coded</text>
+  <text x="512" y="314" class="note mono" font-size="12">[ headSize : uvarint ]    head posting byte length</text>
+  <text x="512" y="340" class="note" fill="#64748b" font-size="12">scholarly vocabulary shares long prefixes → front-coding pays.</text>
+
+  <rect x="32" y="376" width="916" height="86" rx="8" fill="#f8fafc" stroke="#cbd5e1"></rect>
+  <text x="48" y="398" class="note" font-weight="700">Reader</text>
+  <text x="118" y="398" class="note">— resident router, then two ranged reads.</text>
+  <text x="48" y="418" class="note" font-size="13"><tspan font-weight="700" fill="#3b5bdb">boot</tspan>  header (40 B) + router FST → kept in memory.</text>
+  <text x="48" y="438" class="note" font-size="13"><tspan font-weight="700" fill="#64748b">per word</tspan>  router → one dict-block fetch → front-coded scan → <tspan class="mono">(head_off, headSize)</tspan> → fetch the head posting (AND across words, smallest first).</text>
+  <text x="48" y="455" class="note" font-size="12" fill="#94a3b8">postings are the RRS [head][tail] rank split verbatim — doc IDs descend by citations, so top-K lives in the head; tails fetched only when a page needs more.</text>
+
+  <text x="32" y="500" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">TermIndex::open(f).search(query, limit) → ranked doc IDs   ·   .complete(prefix) → autocomplete</tspan></text>
+</svg></div>
+          <figcaption>A whole-word inverted index: the dictionary is a <b>blocked, front-coded sorted-string table</b> (the Quickwit/<code>tantivy-sstable</code> shape) with a small <b>resident FST</b> routing over block boundaries — only the router (O(#blocks)) stays in memory while the dictionary blocks range-fetch on demand, so a full-corpus vocabulary loads in a browser. Each query word costs one block read plus one posting read, versus ~(L−2) trigram fetches; stemming and stop-word removal are recorded in the header so the reader tokenizes queries identically. The postings region is byte-identical to the trigram <code>.rrs</code>, so doc IDs and the head/tail rank split carry straight over.</figcaption>
+        </figure>
+
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">.rrss</span><span class="fig-name">Split set <span class="muted">· many immutable splits, pruned queries</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 560" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRSS split-set manifest format">
+  <defs><marker id="arX" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#475569"></path></marker></defs>
+  <text x="32" y="38" class="title">Split set — a manifest over many splits (<tspan class="mono">.rrss</tspan>)</text>
+  <text x="32" y="60" class="sub">Quickwit-style: the manifest names N byte-capped immutable splits; a query prunes to the few that can match and reads only those</text>
+
+  <rect x="612" y="26" width="12" height="12" rx="3" fill="#3b5bdb"></rect><text x="630" y="36" class="note">manifest · resident</text>
+  <rect x="806" y="26" width="12" height="12" rx="3" fill="#64748b"></rect><text x="824" y="36" class="note">split · range-fetched</text>
+
+  <rect x="32" y="86" width="120" height="52" rx="6" fill="#3b5bdb"></rect>
+  <rect x="156" y="86" width="300" height="52" rx="6" fill="#3b5bdb"></rect>
+  <rect x="460" y="86" width="220" height="52" rx="6" fill="#3b5bdb"></rect>
+  <rect x="684" y="86" width="264" height="52" rx="6" fill="#3b5bdb"></rect>
+  <text x="92" y="110" class="seg" text-anchor="middle">Header</text>
+  <text x="92" y="126" class="seg mono" text-anchor="middle" font-size="11">64 B</text>
+  <text x="306" y="110" class="seg" text-anchor="middle">Split entries</text>
+  <text x="306" y="126" class="seg mono" text-anchor="middle" font-size="11">56 B × splitCount</text>
+  <text x="570" y="110" class="seg" text-anchor="middle">String blob</text>
+  <text x="570" y="126" class="seg mono" text-anchor="middle" font-size="11">split file names</text>
+  <text x="816" y="110" class="seg" text-anchor="middle">Summary blob</text>
+  <text x="816" y="126" class="seg mono" text-anchor="middle" font-size="11">Bloom · facets · tombstones</text>
+  <text x="32" y="168" class="lbl mono">magic &#34;RRSS&#34; · policy(rank-tiered | stable-key) · bodyKind(.rrs | .rrt) · tierCount · splitCount · baseCount</text>
+
+  <line x1="306" y1="138" x2="250" y2="196" stroke="#3b5bdb" stroke-width="1.5"></line>
+  <rect x="32" y="196" width="430" height="124" rx="8" fill="#eef0fd" stroke="#3b5bdb"></rect>
+  <text x="48" y="218" class="lbl" font-weight="700">one split entry — 56 B</text>
+  <text x="48" y="240" class="note mono" font-size="11.5">name → tier → docCount → [docIdLo, docIdHi]</text>
+  <text x="48" y="260" class="note mono" font-size="11.5">byteSize · epoch · summaryOff / Len</text>
+  <text x="48" y="288" class="note" font-size="12">doc IDs are rank-ordered, so a split&#39;s <tspan class="mono">[docIdLo,docIdHi]</tspan> <tspan font-weight="700">is</tspan> its rank band —</text>
+  <text x="48" y="306" class="note" font-size="12">tier 0 = top-cited; the manifest prunes across splits without opening them.</text>
+
+  <rect x="496" y="196" width="452" height="124" rx="8" fill="#f1f5f9" stroke="#64748b"></rect>
+  <text x="512" y="218" class="lbl" font-weight="700">splits — separate files, one plain RRS / RRTI each</text>
+  <rect x="512" y="232" width="124" height="40" rx="5" fill="#3b5bdb"></rect>
+  <text x="574" y="252" class="seg" text-anchor="middle" font-size="12">s0 · tier 0</text>
+  <text x="574" y="266" class="seg mono" text-anchor="middle" font-size="9">hot · read</text>
+  <rect x="644" y="232" width="124" height="40" rx="5" fill="#94a3b8"></rect>
+  <text x="706" y="252" class="seg" text-anchor="middle" font-size="12">s1 · tier 1</text>
+  <text x="706" y="266" class="seg mono" text-anchor="middle" font-size="9">cold · pruned</text>
+  <rect x="776" y="232" width="124" height="40" rx="5" fill="#94a3b8"></rect>
+  <text x="838" y="252" class="seg" text-anchor="middle" font-size="12">s2 … sN</text>
+  <text x="838" y="266" class="seg mono" text-anchor="middle" font-size="9">cold · pruned</text>
+  <text x="512" y="296" class="note" font-size="12">each split is exactly today&#39;s monolith → one split = one <tspan class="mono">.rrs</tspan>.</text>
+  <text x="512" y="312" class="note" font-size="11.5" fill="#64748b">a split keeps its own head/tail; a small tier-0 split is one resident head.</text>
+
+  <rect x="32" y="340" width="916" height="92" rx="8" fill="#f8fafc" stroke="#cbd5e1"></rect>
+  <text x="48" y="362" class="note" font-weight="700">Pruning</text>
+  <text x="132" y="362" class="note">— read only the splits that can match.</text>
+  <text x="48" y="382" class="note" font-size="13"><tspan font-weight="700">tier</tspan> read tier 0, descend only if the page under-fills · <tspan font-weight="700">Bloom</tspan> skip a split whose vocabulary can&#39;t hold a query term · <tspan font-weight="700">facet</tspan> skip a split with none of a filtered category.</text>
+  <text x="48" y="406" class="note" font-size="13"><tspan font-weight="700" fill="#3b5bdb">RRHC boot</tspan>  one <tspan class="mono">.rrhc</tspan> bundle inlines the manifest + the top tier&#39;s split boots, so N splits still boot in 1–2 round trips.</text>
+  <text x="48" y="424" class="note" font-size="12" fill="#94a3b8">base + delta: a small delta of new docs merges at read time (tombstones supersede), compacted into the base later — fresh docs without a full rebuild.</text>
+
+  <text x="32" y="468" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">SplitSet::open(manifest).search(query, k, fetcher) → ranked doc IDs · pruned splits never fetched</tspan></text>
+</svg></div>
+          <figcaption>The split set replaces nothing: each split is a vanilla <code>.rrs</code> (or <code>.rrt</code>) — one split is exactly today&rsquo;s monolith — and only the <b>manifest</b> (<code>.rrss</code>) is new, carrying the cross-split pruning metadata (rank tier, doc-ID range, byte size, and optional term-Bloom / facet-presence / tombstone summaries). The bandwidth win is <b>pruning</b>, not log-structuredness: because doc IDs are rank-ordered, a top-K query reads only the top tier and leaves the cold tail in S3. A <code>.rrhc</code> boot bundle inlines the manifest plus the top tier&rsquo;s split boots so N splits still boot in 1–2 round trips, and a small base&nbsp;+&nbsp;delta lifecycle absorbs freshly-added docs without a full rebuild. The demo publishes both a 389-split trigram set and a 243-split term set.</figcaption>
         </figure>
       </section>
     </main>
@@ -1238,8 +1376,8 @@
   <div class="wrap">
     <div class="foot-in">
       <div class="foot-meta">
-        <span>no backend</span><span class="dot">&middot;</span>
-        <span>range-fetched from S3</span><span class="dot">&middot;</span>
+        <span>no backend</span><span class="dot">·</span>
+        <span>range-fetched from S3</span><span class="dot">·</span>
         <span>powered by roaringrange</span>
       </div>
       <div class="foot-links">
