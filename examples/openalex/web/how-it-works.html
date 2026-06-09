@@ -375,7 +375,7 @@
           <div class="sect-kicker"><span class="sect-num">02</span><span class="sect-tag">Query → range reads</span></div>
           <h2 class="sect-title">Searching in the browser</h2>
           <p class="sect-intro">
-            A query tokenizes into trigrams, fetches matching dictionary blocks and head postings as parallel HTTP <code>Range</code> requests,
+            A query tokenizes into trigrams, fetches matching dictionary blocks and each trigram&rsquo;s eager prefix as parallel HTTP <code>Range</code> requests,
             <b>AND</b>s the roaring bitmaps, and reads the page&rsquo;s records — a few KB&ndash;MB in total. The multi-GB file is never downloaded whole.
           </p>
         </div>
@@ -421,7 +421,7 @@
   <rect x="706" y="304" width="180" height="84" rx="8" fill="#94a3b8"></rect>
   <text x="796" y="123" class="seg" text-anchor="middle">header + sparse index</text>
   <text x="796" y="198" class="seg" text-anchor="middle">dictionary</text>
-  <text x="796" y="276" class="seg" text-anchor="middle">head postings</text>
+  <text x="796" y="276" class="seg" text-anchor="middle">eager prefix</text>
   <text x="796" y="350" class="seg" text-anchor="middle">tail postings</text>
   <text x="796" y="410" class="sub mono" text-anchor="middle" font-size="11">index.rrs (multi-GB)</text>
 
@@ -437,7 +437,7 @@
   <text x="372" y="250" class="req"><tspan class="wave">③</tspan> GET dict blocks ×N (parallel)</text>
 
   <line x1="350" y1="322" x2="704" y2="272" stroke="#3b5bdb" stroke-width="1.6" marker-end="url(#a2)"></line>
-  <text x="372" y="312" class="req"><tspan class="wave">④</tspan> GET head postings ×N (parallel)</text>
+  <text x="372" y="312" class="req"><tspan class="wave">④</tspan> GET eager prefix ×N (parallel)</text>
 
   <line x1="350" y1="360" x2="704" y2="346" stroke="#94a3b8" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#a3)"></line>
   <text x="372" y="378" class="req" fill="#64748b"><tspan fill="#94a3b8" font-weight="700">⑤</tspan> GET tail postings — only if needed</text>
@@ -453,10 +453,10 @@
 
   <text x="32" y="540" class="req"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">Catalog::open(f).with_facets(f).with_records(f, f).search(q, offset, len, max_missing, filter) → SearchPage { ids, records, facet_counts }</tspan></text>
 </svg></div>
-          <figcaption>A query tokenizes into trigrams, fetches the matching dictionary blocks and head postings as parallel <code>Range</code> requests, ANDs the roaring bitmaps, and reads the page&rsquo;s records. <b>The multi-GB file is never downloaded whole.</b></figcaption>
+          <figcaption>A query tokenizes into trigrams, fetches the matching dictionary blocks and eager-prefix postings as parallel <code>Range</code> requests, ANDs the roaring bitmaps, and reads the page&rsquo;s records. <b>The multi-GB file is never downloaded whole.</b></figcaption>
         </figure>
 
-        <p class="fig-lead">Two tiers in time: the popular head paints first, then the full tail fills itself in.</p>
+        <p class="fig-lead">Two tiers in time: each posting&rsquo;s first bucket paints first, then the deeper buckets fill in.</p>
         <figure class="fig reveal">
           <div class="fig-head"><span class="chip">head / tail</span><span class="fig-name">Two-tier search <span class="muted">· instant top-K, then the rest</span></span></div>
           <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 560" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="Two-tier AND: the popular head answers instantly, the full tail loads on demand via container-level range reads">
@@ -465,26 +465,26 @@
   </defs>
 
   <text x="32" y="36" class="title">Two tiers in time: popular results paint instantly, then the full set fills itself in</text>
-  <text x="32" y="58" class="sub">doc IDs are numbered by citation count, so the most-cited works sit in the head — a ranked top-K is free and paints first</text>
+  <text x="32" y="58" class="sub">doc IDs are numbered by citation count, so the most-cited works sit in the first container bucket — a ranked top-K is free and paints first</text>
 
   
   <rect x="32" y="78" width="150" height="46" rx="6" fill="#3b5bdb"></rect>
-  <text x="107" y="99" class="seg" text-anchor="middle">head</text>
+  <text x="107" y="99" class="seg" text-anchor="middle">bucket 0</text>
   <text x="107" y="115" class="seg" text-anchor="middle" font-weight="400">top 65,536</text>
   <rect x="186" y="78" width="762" height="46" rx="6" fill="#cbd5e1"></rect>
-  <text x="567" y="99" class="box" text-anchor="middle" fill="#334155">tail — the rest of the corpus (→ 492M)</text>
+  <text x="567" y="99" class="box" text-anchor="middle" fill="#334155">buckets 1 … N — the rest of the corpus (→ 484M)</text>
   <text x="567" y="116" class="req" text-anchor="middle">one roaring container per 65,536 doc IDs, sorted by key</text>
-  <text x="32" y="146" class="req">doc IDs ascending = most-cited → least   <tspan class="mono" fill="#94a3b8">[0 … 65,536) head · [65,536 … N) tail</tspan></text>
+  <text x="32" y="146" class="req">doc IDs ascending = most-cited → least   <tspan class="mono" fill="#94a3b8">bucket 0: [0 … 65,536) · buckets 1…N: [65,536 … N)</tspan></text>
 
   
   <rect x="32" y="166" width="448" height="344" rx="10" fill="#eef2ff" stroke="#3b5bdb"></rect>
-  <text x="52" y="194" class="box"><tspan class="tag" fill="#3b5bdb">①</tspan> First — the popular head (instant)</text>
+  <text x="52" y="194" class="box"><tspan class="tag" fill="#3b5bdb">①</tspan> First — bucket 0, the eager prefix (instant)</text>
   <line x1="52" y1="204" x2="460" y2="204" stroke="#c7d2fe"></line>
-  <text x="52" y="230" class="step"><tspan class="mono">AND</tspan> each trigram&#39;s <tspan font-weight="700">head</tspan> posting</text>
+  <text x="52" y="230" class="step"><tspan class="mono">AND</tspan> each trigram&#39;s <tspan font-weight="700">first bucket</tspan></text>
   <text x="68" y="248" class="step">(each is ≤ one 8 KB roaring container)</text>
   <text x="52" y="280" class="step">→ the most-cited matches, already in</text>
   <text x="68" y="298" class="step">rank order — render the first page</text>
-  <text x="52" y="330" class="step"><tspan font-weight="700">the tail isn&#39;t fetched yet</tspan></text>
+  <text x="52" y="330" class="step"><tspan font-weight="700">deeper buckets aren&#39;t fetched yet</tspan></text>
   <rect x="52" y="352" width="408" height="58" rx="8" fill="#fff" stroke="#c7d2fe"></rect>
   <text x="68" y="376" class="step"><tspan font-weight="700">6 popular results</tspan>  <tspan fill="#3b5bdb">· loading the rest…</tspan></text>
   <text x="68" y="396" class="req">first paint, in one wave</text>
@@ -492,12 +492,12 @@
 
   
   <rect x="500" y="166" width="448" height="344" rx="10" fill="#f8fafc" stroke="#94a3b8"></rect>
-  <text x="520" y="194" class="box"><tspan class="tag" fill="#64748b">②</tspan> Then — the full tail (automatic)</text>
+  <text x="520" y="194" class="box"><tspan class="tag" fill="#64748b">②</tspan> Then — the deeper buckets (automatic)</text>
   <text x="520" y="212" class="req">auto-loads after a sparse head; on demand for a big result set</text>
   <line x1="520" y1="222" x2="928" y2="222" stroke="#e2e8f0"></line>
-  <text x="520" y="246" class="step">read the <tspan font-weight="700">rarest</tspan> trigram&#39;s tail in full</text>
+  <text x="520" y="246" class="step">read the <tspan font-weight="700">rarest</tspan> trigram&#39;s deeper buckets in full</text>
   <text x="536" y="264" class="step">→ a small candidate set of doc IDs</text>
-  <text x="520" y="294" class="step">for every other tail, fetch <tspan font-weight="700">only</tspan> the</text>
+  <text x="520" y="294" class="step">for every other posting, fetch <tspan font-weight="700">only</tspan> the</text>
   <text x="520" y="312" class="step">containers whose key still has a candidate:</text>
 
   
@@ -519,16 +519,16 @@
   <text x="520" y="388" class="req">adjacent fetched containers coalesce into one <tspan class="mono">Range</tspan> read</text>
   <text x="520" y="418" class="step"><tspan class="mono">AND</tspan> → the complete result set + exact count</text>
   <text x="520" y="456" class="req" fill="#334155" font-weight="700">cost: ~hundreds of KB across a few dozen reads —</text>
-  <text x="520" y="474" class="req">not the tens of MB of reading every full tail</text>
+  <text x="520" y="474" class="req">not the tens of MB of reading every full posting</text>
 
   
   <rect x="32" y="524" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
   <text x="50" y="534" class="req">fetched (candidate keys)</text>
   <rect x="210" y="524" width="12" height="12" rx="3" fill="#cbd5e1"></rect>
   <text x="228" y="534" class="req">skipped</text>
-  <text x="320" y="534" class="req"><tspan font-weight="700" fill="#3b5bdb">Why it used to be slow:</tspan> a rare phrase of common trigrams matches no popular doc, so the old path intersected every full tail. Now the head answers first; the tail fetches only what survivors touch.</text>
+  <text x="320" y="534" class="req"><tspan font-weight="700" fill="#3b5bdb">Why it used to be slow:</tspan> a rare phrase of common trigrams matches no popular doc, so the old path intersected every full posting. Now bucket 0 answers first; deeper buckets fetch only what survivors touch.</text>
 </svg></div>
-          <figcaption>Doc IDs are numbered by citation count, so the most-cited matches live in the head and a ranked top-K paints instantly from one cheap wave. Once the query settles, the tail auto-loads — intersecting the rarest posting first, then fetching only the roaring containers surviving candidates still touch (adjacent ones coalesced into single reads). <b>A rare phrase of common trigrams costs a few hundred KB, not the tens of MB of reading every full tail.</b></figcaption>
+          <figcaption>Doc IDs are numbered by citation count, so the most-cited matches live in each posting&rsquo;s first container bucket and a ranked top-K paints instantly from one cheap wave. Once the query settles, the deeper buckets auto-load — intersecting the rarest posting first, then fetching only the roaring containers surviving candidates still touch (adjacent ones coalesced into single reads). <b>A rare phrase of common trigrams costs a few hundred KB, not the tens of MB of reading every full posting.</b></figcaption>
         </figure>
 
         <p class="fig-lead">Boot is cheap because only the small top of each file loads up front.</p>
@@ -857,7 +857,7 @@
   </defs>
 
   <text x="32" y="38" class="title">Text index — one static file (<tspan class="mono">.rrs</tspan>)</text>
-  <text x="32" y="60" class="sub">a trigram dictionary + popularity-split postings; a few small ranged reads per query, independent of corpus size</text>
+  <text x="32" y="60" class="sub">a trigram dictionary + one roaring posting per term, paged by popularity-ordered container buckets; a few small ranged reads per query, independent of corpus size</text>
 
   <rect x="648" y="26" width="12" height="12" rx="3" fill="#3b5bdb"></rect>
   <text x="666" y="36" class="note">loaded at boot</text>
@@ -871,63 +871,60 @@
     <rect x="320" y="86" width="230" height="56" rx="6" fill="#64748b"></rect>
     <rect x="554" y="86" width="394" height="56" rx="6" fill="#64748b"></rect>
     <text x="87" y="112" class="seg" text-anchor="middle">Header</text>
-    <text x="87" y="128" class="seg mono" text-anchor="middle" font-size="11">20 B</text>
+    <text x="87" y="128" class="seg mono" text-anchor="middle" font-size="11">16 B</text>
     <text x="231" y="112" class="seg" text-anchor="middle">Sparse index</text>
     <text x="231" y="128" class="seg mono" text-anchor="middle" font-size="11">8 B × ⌈ngrams/stride⌉</text>
     <text x="435" y="112" class="seg" text-anchor="middle">Dictionary</text>
-    <text x="435" y="128" class="seg mono" text-anchor="middle" font-size="11">24 B/entry · key-sorted</text>
+    <text x="435" y="128" class="seg mono" text-anchor="middle" font-size="11">20 B/entry · key-sorted</text>
     <text x="751" y="112" class="seg" text-anchor="middle">Postings</text>
-    <text x="751" y="128" class="seg mono" text-anchor="middle" font-size="11">per trigram · [ head ][ tail ]</text>
+    <text x="751" y="128" class="seg mono" text-anchor="middle" font-size="11">per trigram · one roaring bitmap</text>
   </g>
-  <text x="32" y="172" class="lbl mono">magic &#34;RRSI&#34; · version · gramSize · ngrams · stride · headBoundary</text>
+  <text x="32" y="172" class="lbl mono">magic &#34;RRSI&#34; · version 3 · gramSize · ngrams · stride</text>
 
   
   <line x1="435" y1="142" x2="256" y2="210" stroke="#64748b" stroke-width="1.5"></line>
   <rect x="32" y="210" width="448" height="152" rx="8" fill="#eef0fd" stroke="#3b5bdb"></rect>
-  <text x="48" y="236" class="lbl" font-weight="700">one dictionary entry — 24 B, sorted by key</text>
+  <text x="48" y="236" class="lbl" font-weight="700">one dictionary entry — 20 B, sorted by key</text>
   <g>
-    <rect x="48" y="252" width="138" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
-    <text x="117" y="274" class="note mono" text-anchor="middle" font-size="12">key</text>
-    <text x="117" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u64 · 8 B</text>
-    <rect x="190" y="252" width="138" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
-    <text x="259" y="274" class="note mono" text-anchor="middle" font-size="12">headOffset</text>
-    <text x="259" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u64 · 8 B</text>
-    <rect x="332" y="252" width="64" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
-    <text x="364" y="274" class="note mono" text-anchor="middle" font-size="12">headSize</text>
-    <text x="364" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u32</text>
-    <rect x="400" y="252" width="64" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
-    <text x="432" y="274" class="note mono" text-anchor="middle" font-size="12">tailSize</text>
-    <text x="432" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u32</text>
+    <rect x="48" y="252" width="180" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
+    <text x="138" y="274" class="note mono" text-anchor="middle" font-size="12">key</text>
+    <text x="138" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u64 · 8 B</text>
+    <rect x="232" y="252" width="138" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
+    <text x="301" y="274" class="note mono" text-anchor="middle" font-size="12">offset</text>
+    <text x="301" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u64 · 8 B</text>
+    <rect x="374" y="252" width="90" height="46" rx="5" fill="#fff" stroke="#b9c5f5"></rect>
+    <text x="419" y="274" class="note mono" text-anchor="middle" font-size="12">size</text>
+    <text x="419" y="290" class="note mono" text-anchor="middle" font-size="10" fill="#94a3b8">u32</text>
   </g>
   <rect x="48" y="306" width="416" height="52" rx="5" fill="#dbe3fb"></rect>
-  <text x="60" y="326" class="note" font-size="12">tail at <tspan class="mono">headOffset + headSize</tspan>, length <tspan class="mono">tailSize</tspan></text>
-  <text x="60" y="346" class="note" font-size="12"><tspan class="mono">fullSize = headSize + tailSize</tspan></text>
+  <text x="60" y="326" class="note" font-size="12">the term's posting at <tspan class="mono">[ offset, offset + size )</tspan></text>
+  <text x="60" y="346" class="note" font-size="12">one portable RoaringBitmap — no separate head/tail (v3)</text>
 
   
   <line x1="751" y1="142" x2="751" y2="210" stroke="#64748b" stroke-width="1.5" marker-end="url(#arF)"></line>
   <rect x="496" y="210" width="452" height="152" rx="8" fill="#f1f5f9" stroke="#64748b"></rect>
-  <text x="512" y="236" class="lbl" font-weight="700">postings — per trigram: <tspan class="mono">[ head ][ tail ]</tspan></text>
+  <text x="512" y="236" class="lbl" font-weight="700">one posting — a RoaringBitmap of 64K-doc buckets</text>
   <rect x="512" y="252" width="160" height="46" rx="5" fill="#64748b"></rect>
-  <text x="592" y="274" class="seg" text-anchor="middle" font-size="13">head</text>
-  <text x="592" y="290" class="seg mono" text-anchor="middle" font-size="10">docs [0, headBoundary)</text>
+  <text x="592" y="272" class="seg" text-anchor="middle" font-size="12">bucket 0</text>
+  <text x="592" y="288" class="seg mono" text-anchor="middle" font-size="9.5">docs [0, 65536) · eager prefix</text>
   <rect x="676" y="252" width="256" height="46" rx="5" fill="#94a3b8"></rect>
-  <text x="804" y="274" class="seg" text-anchor="middle" font-size="13">tail</text>
-  <text x="804" y="290" class="seg mono" text-anchor="middle" font-size="10">docs ≥ headBoundary</text>
-  <text x="512" y="324" class="note" font-size="13"><tspan class="mono" fill="#3b5bdb">headBoundary</tspan> — dynamic, a multiple of 65,536 (default</text>
-  <text x="512" y="344" class="note" font-size="13">65,536). Doc IDs descend by popularity → head = top-K.</text>
+  <text x="804" y="272" class="seg" text-anchor="middle" font-size="12">buckets 1 … N</text>
+  <text x="804" y="288" class="seg mono" text-anchor="middle" font-size="9.5">paged on demand (TailScan)</text>
+  <text x="512" y="324" class="note" font-size="13">Doc IDs descend by popularity → <tspan class="mono">bucket 0</tspan> is the top-K, fetched</text>
+  <text x="512" y="344" class="note" font-size="13">eagerly; deeper buckets only when a page needs them.</text>
 
   
   <rect x="32" y="384" width="916" height="86" rx="8" fill="#f8fafc" stroke="#cbd5e1"></rect>
   <text x="48" y="406" class="note" font-weight="700">Reader</text>
-  <text x="120" y="406" class="note">— two range-fetch tiers over one static file.</text>
-  <text x="48" y="426" class="note" font-size="13"><tspan font-weight="700" fill="#3b5bdb">boot</tspan>  header (20 B) + sparse index → kept in memory, ~tens of KB.</text>
-  <text x="48" y="446" class="note" font-size="13"><tspan font-weight="700" fill="#64748b">per query</tspan>  binary-search the sparse index → fetch one dictionary block → the head postings per trigram (AND smallest-first).</text>
-  <text x="48" y="462" class="note" font-size="12" fill="#94a3b8">tails fetched only when a query needs more than the head&#39;s top-K.</text>
+  <text x="120" y="406" class="note">— boot, then a couple of ranged reads per query.</text>
+  <text x="48" y="426" class="note" font-size="13"><tspan font-weight="700" fill="#3b5bdb">boot</tspan>  header (16 B) + sparse index → kept in memory, ~tens of KB.</text>
+  <text x="48" y="446" class="note" font-size="13"><tspan font-weight="700" fill="#64748b">per query</tspan>  binary-search the sparse index → fetch one dictionary block → each trigram's eager prefix (bucket 0), AND smallest-first.</text>
+  <text x="48" y="462" class="note" font-size="12" fill="#94a3b8">deeper buckets fetched only when a page needs more than bucket 0&#39;s top-K.</text>
 
   <text x="32" y="500" class="sub">Boot is ~tens of KB; each query is a handful of small ranged reads — independent of corpus size.</text>
   <text x="32" y="528" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">write  build::write_index(w, gram, stride, entries)      read  Index::open(f).search(q, limit)</tspan></text>
 </svg></div>
-          <figcaption>A 20-byte header, a small sparse index loaded once, a key-sorted dictionary, then popularity-split postings. The header now carries <code>headBoundary</code> &mdash; a <b>dynamic head/tail split</b> (a multiple of 65,536, raised for larger corpora) &mdash; so the head holds the most-popular docs and top-K stays free. Boot keeps the header + sparse index in memory; each query binary-searches it, fetches one dictionary block, then the head postings per trigram.</figcaption>
+          <figcaption>A 16-byte header, a small sparse index loaded once, a key-sorted dictionary (20 B/entry), then one portable RoaringBitmap per trigram. <b>v3 collapsed the old head/tail blobs into a single posting</b>: because doc IDs descend by citation, a posting&rsquo;s <b>first container bucket</b> (docs [0, 65536)) holds the most-popular docs, so the reader fetches that <b>eager prefix</b> for an instant first page and pages deeper 64K-doc buckets (<code>TailScan</code>) only as a query needs them. Boot keeps the header + sparse index in memory; each query binary-searches it, fetches one dictionary block, then each trigram&rsquo;s eager prefix.</figcaption>
         </figure>
 
         <figure class="fig reveal">
@@ -992,7 +989,7 @@
   <rect x="726" y="284" width="206" height="40" rx="5" fill="#94a3b8"></rect>
   <text x="829" y="303" class="seg" text-anchor="middle" font-size="12">tail</text>
   <text x="829" y="318" class="seg mono" text-anchor="middle" font-size="10">docs ≥ headBoundary</text>
-  <text x="572" y="346" class="note" font-size="12">Split tracks the index&#39;s <tspan class="mono" fill="#3b5bdb">headBoundary</tspan> — a multiple of</text>
+  <text x="572" y="346" class="note" font-size="12">Split at a fixed <tspan class="mono" fill="#3b5bdb">64K-doc</tspan> bucket boundary — a multiple of</text>
   <text x="572" y="362" class="note" font-size="12">65,536 (default 65,536), raised for larger corpora.</text>
   <text x="572" y="382" class="note" font-size="12">A ≤ ~8 KB head per category; tails only when paging in.</text>
 
@@ -1002,11 +999,11 @@
   <text x="48" y="450" class="note">Within a field, selected categories OR together; distinct fields AND. Result = textMatch AND filter, applied to the head first.</text>
   <text x="48" y="468" class="note">Live (search-filtered) counts = |resultBitmap ∩ categoryHead|, computed in memory over the query&#39;s head result.</text>
 
-  <text x="32" y="506" class="sub">Doc IDs share the index&#39;s popularity order, so facet postings split at the same dynamic <tspan class="mono">headBoundary</tspan> and range-fetch the same way (see <tspan class="mono">format.svg</tspan>).</text>
+  <text x="32" y="506" class="sub">Doc IDs share the index&#39;s popularity order, so facet postings split at the same 64K-doc container boundary and range-fetch the same way (see <tspan class="mono">format.svg</tspan>).</text>
 
   <text x="32" y="568" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">write  build::write_facets(w, fields)      read  FacetIndex::open(f).counts(result)</tspan></text>
 </svg></div>
-          <figcaption>Maps each category (year, type, language, &hellip;) to a doc-ID bitmap. Header, tables, and names load once — so listing categories and their full-corpus counts is free; selecting one fetches a single small head posting. Because facet doc IDs share the index&rsquo;s popularity order, postings split at the <b>same dynamic <code>headBoundary</code></b> as the text index. <b>Within a field categories OR; across fields they AND.</b></figcaption>
+          <figcaption>Maps each category (year, type, language, &hellip;) to a doc-ID bitmap. Header, tables, and names load once — so listing categories and their full-corpus counts is free; selecting one fetches a single small head posting. Because facet doc IDs share the index&rsquo;s popularity order, postings split at the <b>same 64K-doc container boundary</b> the text index buckets at. <b>Within a field categories OR; across fields they AND.</b></figcaption>
         </figure>
 
         <figure class="fig reveal">
@@ -1354,7 +1351,7 @@
   <text x="838" y="252" class="seg" text-anchor="middle" font-size="12">s2 … sN</text>
   <text x="838" y="266" class="seg mono" text-anchor="middle" font-size="9">cold · pruned</text>
   <text x="512" y="296" class="note" font-size="12">each split is exactly today&#39;s monolith → one split = one <tspan class="mono">.rrs</tspan>.</text>
-  <text x="512" y="312" class="note" font-size="11.5" fill="#64748b">a split keeps its own head/tail; a small tier-0 split is one resident head.</text>
+  <text x="512" y="312" class="note" font-size="11.5" fill="#64748b">a split is a v3 RRS — one posting per term, paged by bucket; a tier-0 split is mostly its eager prefix.</text>
 
   <rect x="32" y="340" width="916" height="92" rx="8" fill="#f8fafc" stroke="#cbd5e1"></rect>
   <text x="48" y="362" class="note" font-weight="700">Pruning</text>
