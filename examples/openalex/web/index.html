@@ -774,18 +774,23 @@
       /* -------- config & element handles -------- */
       // Dataset selector: ?ds=poc points the demo at the proof-of-concept build
       // under poc/ (compressed records + DOI lookup) for testing; default is the
-      // live 47M index. Each entry is an index basename, a record-store basename,
+      // live full 484M-work index. Each entry is an index basename, a record-store basename,
       // and whether records are zstd-compressed (needing the trained dictionary).
       // `rrvi`/`rrm2` enable semantic + hybrid search: a range-fetched IVFPQ vector
       // index (top-cited subset) and the model2vec token-embedding matrix the
       // browser embeds the query with (no backend). doc IDs are shared with the
       // text index + record store, so results render through the same path.
       // `split` (optional): an RRSS split set built over the same corpus/ranking as the monolith,
-      // under the `openalex-split/` prefix — its manifest, the per-split base URL, the `.rrhc`
-      // boot bundle, and its own (raw) record store. Enables the "Split-set index" toggle.
+      // under the `openalex-trigram-split/` prefix — its manifest, the per-split base URL, and the
+      // `.rrhc` boot bundle. Because it shares the monolith's rank-ordered doc-ID space (doc id ==
+      // citation rank), it reuses the monolith `records-full` store. Enables the "Split-set index" toggle.
       const DATASETS = {
-        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-1m-stem.rrt", rrviGemma: null,
-                  split: { rrss: "openalex-split/openalex.rrss", base: "openalex-split", rrhc: "openalex-split/openalex.rrhc", rec: "openalex-split/openalex-records" } },
+        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrviGemma: null,
+                  // split: DISABLED — the trigram split set's manifest is ~727 MB (Bloom-dominated) and
+                  // its .rrhc boot bundle is empty, so opening it would pull ~727 MB at boot; the split
+                  // bodies are also RRSI v3 while the live wasm is v2. Re-enable after rebuilding the split
+                  // set with sane Bloom sizing + a real .rrhc, alongside the v3 monolith/wasm cutover.
+                  split: null },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
       };
