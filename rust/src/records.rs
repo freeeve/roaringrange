@@ -119,11 +119,33 @@ impl<F: RangeFetch> RecordStore<F> {
         }
     }
 
-    /// Inflates a zstd frame compressed against the shared dictionary. Gated on
-    /// the `zstd` feature (pure-Rust `ruzstd` decode, so it also works on wasm);
-    /// without the feature, or with no dictionary set, returns a clear error
-    /// rather than panicking.
-    #[cfg(feature = "zstd")]
+    /// Inflates a zstd frame compressed against the shared dictionary, on native
+    /// targets, through C `libzstd` (the `zstd` crate). The pure-Rust `ruzstd`
+    /// decoder has a heap-corrupting defect in its `RingBuffer` under heavy
+    /// concurrent decode — observed as a `malloc` guard abort (`abort()` from
+    /// `nanov2_guard_corruption_detected`) mid-build — so native callers use the
+    /// reference decoder. The wasm path keeps `ruzstd` (libzstd's C/asm does not
+    /// build for wasm32). Output is byte-identical for valid frames.
+    #[cfg(all(feature = "zstd", not(target_arch = "wasm32")))]
+    fn inflate_zstd(&self, frame: &[u8]) -> Result<Vec<u8>, IndexError> {
+        use std::io::Read;
+        let dict = self.dict.as_deref().ok_or(IndexError::Malformed(
+            "compressed record but no dictionary set",
+        ))?;
+        // Stream the frame through a fresh dictionary-seeded decoder via
+        // `read_to_end`, so no decompressed-size guess is needed.
+        let mut decoder = zstd::stream::read::Decoder::with_dictionary(frame, dict)
+            .map_err(|_| IndexError::Malformed("zstd frame header failed to decode"))?;
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|_| IndexError::Malformed("zstd frame failed to decode"))?;
+        Ok(out)
+    }
+
+    /// Inflates a zstd frame compressed against the shared dictionary, on wasm32,
+    /// through pure-Rust `ruzstd` (libzstd's C/asm does not build for wasm32).
+    #[cfg(all(feature = "zstd", target_arch = "wasm32"))]
     fn inflate_zstd(&self, frame: &[u8]) -> Result<Vec<u8>, IndexError> {
         // ruzstd 0.8 re-exports these from `decoding`; the 0.7 top-level
         // `frame_decoder`/`streaming_decoder` module paths were removed.
@@ -135,7 +157,7 @@ impl<F: RangeFetch> RecordStore<F> {
         // Parse the shared dictionary, seed a frame decoder with it, then stream the
         // frame through it via `read_to_end`. `decode_dict`/`add_dict`/
         // `new_with_decoder` each return a `Result`. Decode-with-dictionary is
-        // pure-Rust ruzstd (public since 0.8.2), so it compiles for wasm32 too.
+        // pure-Rust ruzstd (public since 0.8.2).
         let dictionary = Dictionary::decode_dict(dict)
             .map_err(|_| IndexError::Malformed("zstd dictionary failed to parse"))?;
         let mut fd = FrameDecoder::new();
