@@ -62,6 +62,12 @@ required-features = ["splits", "terms", "zstd"]
 name = "build_trigram_splitset"
 required-features = ["splits", "zstd", "hotcache"]
 
+# Single-index sibling of build_trigram_splitset: folds the whole record store into one v3 `RRS`
+# monolith (`openalex-full.rrs`) via the chunked partial→merge path. `.rrf`/`.rril` are reused.
+[[example]]
+name = "build_trigram_monolith"
+required-features = ["zstd"]
+
 # Opens an RRSS split set from disk and runs a query — a smoke check for a built split set.
 [[example]]
 name = "splitset_verify"
