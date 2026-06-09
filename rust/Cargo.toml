@@ -71,6 +71,10 @@ required-features = ["splits"]
 name = "live_bench"
 required-features = ["terms", "splits", "vector"]
 
+[[example]]
+name = "splitset_strip_summaries"
+required-features = ["splits"]
+
 [dependencies]
 roaring = "0.11"
 # Unicode general-category lookup so the tokenizer filters exactly on letters
