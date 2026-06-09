@@ -753,7 +753,7 @@
     </main>
 
     <script type="module">
-      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex, RrssIndex } from "./roaringrange.js";
+      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex, RrssIndex, rangeCacheStats } from "./roaringrange.js";
 
       /* -------- byte/request accounting via fetch interception (from webtest) -------- */
       const realFetch = self.fetch.bind(self);
@@ -786,11 +786,11 @@
       // citation rank), it reuses the monolith `records-full` store. Enables the "Split-set index" toggle.
       const DATASETS = {
         "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrviGemma: null,
-                  // split: DISABLED — the trigram split set's manifest is ~727 MB (Bloom-dominated) and
-                  // its .rrhc boot bundle is empty, so opening it would pull ~727 MB at boot; the split
-                  // bodies are also RRSI v3 while the live wasm is v2. Re-enable after rebuilding the split
-                  // set with sane Bloom sizing + a real .rrhc, alongside the v3 monolith/wasm cutover.
-                  split: null },
+                  // split: re-enabled on the v3 wasm cutover — manifest stripped to ~29 KB (Bloom summaries
+                  // dropped), split bodies are RRSI v3 (readable by the v3 wasm), records shared with the
+                  // monolith's rank-ordered doc-ID space (records-full). The empty .rrhc makes openBundle
+                  // fall back to a plain manifest open (29 KB, cheap).
+                  split: { rrss: "openalex-trigram-split/openalex.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full" } },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
       };
@@ -1146,8 +1146,13 @@
         const tReqs = q.reduce((a, s) => a + (s.d.reqs || 0), 0);
         const tBytes = q.reduce((a, s) => a + (s.d.bytes || 0), 0);
         const tMs = q.reduce((a, s) => a + (s.d.ms || 0), 0);
+        /* Client range cache (default 128 MiB, shared across every index type): cumulative hits +
+           resident size this session. Re-typed queries re-request the same ranges, so these are
+           round-trips the browser served without touching the network. */
+        const [cBytes, , cHits] = rangeCacheStats();
+        const cacheStr = cHits > 0 ? ` · cache ${cHits} hits, ${fmtBytes(cBytes)} resident` : "";
         els.mTotal.textContent = q.length > 0
-          ? `this search: ${tReqs} req · ${fmtBytes(tBytes)} · ${tMs.toFixed(0)} ms`
+          ? `this search: ${tReqs} req · ${fmtBytes(tBytes)} · ${tMs.toFixed(0)} ms${cacheStr}`
           : "";
 
         /* Bar note: switch caption for server mode. */
