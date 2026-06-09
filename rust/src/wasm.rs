@@ -22,6 +22,7 @@ use crate::index::{Cursor, Index};
 use crate::lookup::Lookup;
 use crate::records::RecordStore;
 use crate::secondary::{SecondaryCursor, SecondaryIndex};
+use crate::range_cache::RangeCache;
 use crate::sortcols::SortCols;
 #[cfg(feature = "terms")]
 use crate::terms::TermIndex;
@@ -29,9 +30,68 @@ use crate::terms::TermIndex;
 use crate::vector::VectorIndex;
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint32Array, Uint8Array};
 use roaring::RoaringBitmap;
+use std::cell::RefCell;
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
+
+thread_local! {
+    /// Process-wide range cache shared by every [`WasmFetch`]. `None` until the client opts in via
+    /// [`set_range_cache_mb`]; resized or cleared by the same call. The wasm runtime is
+    /// single-threaded, so a thread-local `Rc<RefCell<_>>` is all the sharing this needs.
+    static RANGE_CACHE: RefCell<Option<Rc<RefCell<RangeCache>>>> = const { RefCell::new(None) };
+}
+
+/// A handle to the shared range cache, if the client has enabled one.
+fn current_range_cache() -> Option<Rc<RefCell<RangeCache>>> {
+    RANGE_CACHE.with(|c| c.borrow().clone())
+}
+
+/// Sets the shared range-cache budget in **mebibytes**, enabling caching for every range read
+/// across every index type (trigram, term, facet, vector, records, split-set, ...). `0` or negative
+/// disables and clears the cache. Resizing keeps warm entries, evicting LRU-first if the new budget
+/// is smaller. Already-open indexes are affected too: each read resolves the cache live.
+#[wasm_bindgen(js_name = setRangeCacheMb)]
+pub fn set_range_cache_mb(mb: f64) {
+    let max_bytes = if mb <= 0.0 {
+        0
+    } else {
+        (mb * 1024.0 * 1024.0) as usize
+    };
+    RANGE_CACHE.with(|c| {
+        let mut slot = c.borrow_mut();
+        match (max_bytes, slot.as_ref()) {
+            (0, _) => *slot = None,
+            (_, Some(existing)) => existing.borrow_mut().set_max_bytes(max_bytes),
+            (_, None) => *slot = Some(Rc::new(RefCell::new(RangeCache::new(max_bytes)))),
+        }
+    });
+}
+
+/// `[payloadBytes, entryCount, hits, misses]` for the shared range cache, or `[0, 0, 0, 0]` when no
+/// cache is enabled — a JS-side readout of cache effectiveness.
+#[wasm_bindgen(js_name = rangeCacheStats)]
+pub fn range_cache_stats() -> Vec<f64> {
+    RANGE_CACHE.with(|c| match c.borrow().as_ref() {
+        Some(cache) => {
+            let (bytes, entries, hits, misses) = cache.borrow().stats();
+            vec![bytes as f64, entries as f64, hits as f64, misses as f64]
+        }
+        None => vec![0.0, 0.0, 0.0, 0.0],
+    })
+}
+
+/// Default shared range-cache budget (MiB), installed on module start so caching is on by default;
+/// clients resize or disable it at runtime via [`set_range_cache_mb`].
+const DEFAULT_CACHE_MB: f64 = 128.0;
+
+/// Runs once when the wasm module is instantiated: installs the default range cache so every index
+/// type benefits without any JS setup. `setRangeCacheMb(0)` disables it; `setRangeCacheMb(n)` resizes.
+#[wasm_bindgen(start)]
+pub fn wasm_start() {
+    set_range_cache_mb(DEFAULT_CACHE_MB);
+}
 
 /// A [`RangeFetch`] backed by the browser `fetch()` API, reading byte ranges of
 /// a single index URL via the `Range` request header.
@@ -110,6 +170,15 @@ impl RangeFetch for WasmFetch {
         if len == 0 {
             return Ok(Vec::new());
         }
+        // Serve from the shared range cache when the client enabled one; a re-typed query
+        // re-requests the same (url, offset, len), so this skips the network round-trip. The
+        // borrow is released before any await (RefCell is not held across `.await`).
+        let cache = current_range_cache();
+        if let Some(cache) = &cache {
+            if let Some(bytes) = cache.borrow_mut().get(&self.url, offset, len) {
+                return Ok(bytes);
+            }
+        }
         let end = match offset.checked_add(len as u64) {
             Some(sum) => sum - 1,
             None => {
@@ -167,6 +236,10 @@ impl RangeFetch for WasmFetch {
                 "range {range} returned {} bytes, expected {len} (origin may not honor Range requests)",
                 bytes.len()
             )));
+        }
+        // Populate the cache (clone is a memcpy, far cheaper than the network read it spares).
+        if let Some(cache) = &cache {
+            cache.borrow_mut().insert(&self.url, offset, len, bytes.clone());
         }
         Ok(bytes)
     }

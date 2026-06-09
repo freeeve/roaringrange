@@ -12,6 +12,7 @@ pub mod fetch;
 pub mod index;
 pub mod lookup;
 pub mod ngram;
+pub mod range_cache;
 pub mod records;
 pub mod secondary;
 pub mod sortcols;
