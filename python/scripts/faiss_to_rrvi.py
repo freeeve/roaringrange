@@ -39,6 +39,63 @@ def _require_faiss():
         ) from e
 
 
+def extract_ivfpq(index, nlist: int, m: int, doc_ids: np.ndarray | None = None):
+    """Extracts the trained parts of an `OPQ{m},IVF{nlist},PQ{m}` index in the
+    shape `rr.write_rrvi_from_faiss` consumes: `(opq, centroids, codebooks,
+    ids, assign, codes, count)`, all little-endian and validated (square
+    zero-bias OPQ, matching nlist, 8-bit codes, every coded vector recovered).
+
+    `doc_ids` maps FAISS row ids back to doc ids for an index filled with plain
+    `add()`; `None` means the FAISS ids ARE the doc ids (`add_with_ids`).
+    """
+    faiss = _require_faiss()
+    dim = index.d
+    opq_vt = faiss.downcast_VectorTransform(index.chain.at(0))
+    if opq_vt.d_in != dim or opq_vt.d_out != dim:
+        raise ValueError("unexpected OPQ shape (need a square dim×dim rotation)")
+    opq = faiss.vector_to_array(opq_vt.A).astype("<f4")  # d_out*d_in, row-major
+    bias = faiss.vector_to_array(opq_vt.b)
+    if bias.size and np.any(bias != 0):
+        raise ValueError("OPQ has a non-zero bias, which RRVI does not model")
+
+    # extract_index_ivf returns the IndexIVF base; downcast to reach .pq.
+    ivf = faiss.downcast_index(faiss.extract_index_ivf(index))  # IndexIVFPQ
+    if ivf.nlist != nlist:
+        raise ValueError(f"trained nlist {ivf.nlist} != requested {nlist}")
+    quantizer = faiss.downcast_index(ivf.quantizer)
+    centroids = quantizer.reconstruct_n(0, nlist).reshape(nlist, dim).astype("<f4")
+
+    pq = ivf.pq
+    if pq.nbits != 8:
+        raise ValueError("RRVI export requires 8-bit PQ codes")
+    codebooks = faiss.vector_to_array(pq.centroids).astype("<f4")  # m*256*(dim/m)
+    code_size = pq.code_size  # == m for 8-bit codes
+
+    n = index.ntotal
+    ids_out = np.empty(n, dtype="<u4")
+    assign_out = np.empty(n, dtype="<u4")
+    codes_out = np.empty((n, m), dtype="uint8")
+    invlists = ivf.invlists
+    pos = 0
+    for cluster in range(nlist):
+        ln = invlists.list_size(cluster)
+        if ln == 0:
+            continue
+        fids = faiss.rev_swig_ptr(invlists.get_ids(cluster), ln).copy()
+        fcodes = (
+            faiss.rev_swig_ptr(invlists.get_codes(cluster), ln * code_size)
+            .reshape(ln, code_size)
+            .copy()
+        )
+        ids_out[pos : pos + ln] = doc_ids[fids] if doc_ids is not None else fids.astype("<u4")
+        assign_out[pos : pos + ln] = cluster
+        codes_out[pos : pos + ln] = fcodes[:, :m]
+        pos += ln
+    if pos != n:
+        raise RuntimeError(f"recovered {pos} coded vectors, expected {n}")
+    return opq, centroids, codebooks, ids_out, assign_out, codes_out, pos
+
+
 def export_to_rrvi(
     vectors: np.ndarray,
     doc_ids: np.ndarray,
@@ -86,52 +143,10 @@ def export_to_rrvi(
     index.train(sample)
     index.add(x)
 
-    # --- extract the trained parts -------------------------------------------
-    # OPQ rotation: the first transform in the pre-transform chain. y = A·x.
-    opq_vt = faiss.downcast_VectorTransform(index.chain.at(0))
-    if opq_vt.d_in != dim or opq_vt.d_out != dim:
-        raise ValueError("unexpected OPQ shape (need a square dim×dim rotation)")
-    opq = faiss.vector_to_array(opq_vt.A).astype("<f4")  # d_out*d_in, row-major
-    bias = faiss.vector_to_array(opq_vt.b)
-    if bias.size and np.any(bias != 0):
-        raise ValueError("OPQ has a non-zero bias, which RRVI does not model")
-
-    # extract_index_ivf returns the IndexIVF base; downcast to reach .pq.
-    ivf = faiss.downcast_index(faiss.extract_index_ivf(index))  # IndexIVFPQ
-    if ivf.nlist != nlist:
-        raise ValueError(f"trained nlist {ivf.nlist} != requested {nlist}")
-    quantizer = faiss.downcast_index(ivf.quantizer)
-    centroids = quantizer.reconstruct_n(0, nlist).reshape(nlist, dim).astype("<f4")
-
-    pq = ivf.pq
-    if pq.nbits != 8:
-        raise ValueError("RRVI export requires 8-bit PQ codes")
-    codebooks = faiss.vector_to_array(pq.centroids).astype("<f4")  # m*256*(dim/m)
-    code_size = pq.code_size  # == m for 8-bit codes
-
-    # Per-vector cluster + code, mapped from FAISS row ids back to doc ids.
-    ids_out = np.empty(n, dtype="<u4")
-    assign_out = np.empty(n, dtype="<u4")
-    codes_out = np.empty((n, m), dtype="uint8")
-    invlists = ivf.invlists
-    pos = 0
-    for cluster in range(nlist):
-        ln = invlists.list_size(cluster)
-        if ln == 0:
-            continue
-        fids = faiss.rev_swig_ptr(invlists.get_ids(cluster), ln).copy()
-        fcodes = (
-            faiss.rev_swig_ptr(invlists.get_codes(cluster), ln * code_size)
-            .reshape(ln, code_size)
-            .copy()
-        )
-        ids_out[pos : pos + ln] = doc_ids[fids]
-        assign_out[pos : pos + ln] = cluster
-        codes_out[pos : pos + ln] = fcodes[:, :m]
-        pos += ln
-    if pos != n:
-        raise RuntimeError(f"recovered {pos} coded vectors, expected {n}")
-
+    # Vectors were added with plain add(), so FAISS row ids map through doc_ids.
+    opq, centroids, codebooks, ids_out, assign_out, codes_out, pos = extract_ivfpq(
+        index, nlist, m, doc_ids=doc_ids
+    )
     return rr.write_rrvi_from_faiss(
         out_path,
         dim,
@@ -139,9 +154,9 @@ def export_to_rrvi(
         m,
         centroids.tobytes(),
         codebooks.tobytes(),
-        ids_out.tobytes(),
-        assign_out.tobytes(),
-        codes_out.tobytes(),
+        ids_out[:pos].tobytes(),
+        assign_out[:pos].tobytes(),
+        codes_out[:pos].tobytes(),
         nbits=8,
         metric=metric,
         opq=opq.tobytes(),
