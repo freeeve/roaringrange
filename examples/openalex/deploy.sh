@@ -7,6 +7,8 @@
 #   ./deploy.sh --no-build       skip the wasm-pack build; deploy the reader already in web/
 #   ./deploy.sh --data DIR       ALSO upload the built index/record files from DIR
 #   ./deploy.sh --splits DIR     ALSO upload a split set (.rrss + per-split .rrs/.rrf) from DIR
+#   ./deploy.sh --splits-prefix P  S3 prefix for --splits (default openalex-trigram-split,
+#                                  what index.html's `split` config reads)
 #   BUCKET=… DISTRIBUTION=… ./deploy.sh   override the defaults below
 #
 # The wasm reader (roaringrange.js + roaringrange_bg.wasm) is a build artifact, not
@@ -33,13 +35,15 @@ WEB="$HERE/web"
 
 DATA_DIR=""
 SPLITS_DIR=""
+SPLITS_PREFIX="openalex-trigram-split"
 NO_BUILD=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-build) NO_BUILD=1; shift ;;
     --data) DATA_DIR="${2:?--data needs a directory}"; shift 2 ;;
     --splits) SPLITS_DIR="${2:?--splits needs a directory}"; shift 2 ;;
-    -h|--help) sed -n '3,12p' "$0"; exit 0 ;;
+    --splits-prefix) SPLITS_PREFIX="${2:?--splits-prefix needs a prefix}"; shift 2 ;;
+    -h|--help) sed -n '3,14p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -106,17 +110,17 @@ if [[ -n "$DATA_DIR" ]]; then
   done
 fi
 
-# Split-set artifacts: the `.rrss` manifest, the per-split `.rrs`/`.rrf` files, and the split
-# set's OWN record store `*-records.{idx,bin}` (all built by `openalex-build -split-set -out DIR`).
-# Uploaded under the `openalex-split/` prefix so its `openalex-records.{idx,bin}` never collides
-# with a same-corpus monolith's records at the root, matching the `split` URLs in index.html's
-# DATASETS config. Includes the `.rrhc` boot bundle the demo's "Split-set index" toggle opens.
-# Versioned/immutable like the monolith data files, so the cache is never invalidated. (The doc
-# ids match the monolith's ONLY when both are built over the same corpus, since both rank by
-# cited_by_count via the same rank_rows — but each reader uses its own record store regardless.)
+# Split-set artifacts: the `.rrss` manifest, the `.rrhc` boot bundle, the per-split
+# `.rrs`/`.rrt`/`.rrf` files, and (if the set ships one) its own record store
+# `*-records.{idx,bin}`. Uploaded under $SPLITS_PREFIX, which must match the `split` URLs in
+# index.html's DATASETS config — the live trigram split set reads `openalex-trigram-split/`
+# (the default; it shares the monolith's root `records-full` store, so it uploads no records
+# of its own). Use --splits-prefix for a different set (the term set lives at
+# `openalex-split/` with its own `*-records.{idx,bin}`). Versioned/immutable like the
+# monolith data files, so the cache is never invalidated.
 if [[ -n "$SPLITS_DIR" ]]; then
-  echo "==> split-set artifacts <- $SPLITS_DIR -> s3://$BUCKET/openalex-split/ (immutable; only changed files upload)"
-  aws s3 sync "$SPLITS_DIR/" "s3://$BUCKET/openalex-split/" \
+  echo "==> split-set artifacts <- $SPLITS_DIR -> s3://$BUCKET/$SPLITS_PREFIX/ (immutable; only changed files upload)"
+  aws s3 sync "$SPLITS_DIR/" "s3://$BUCKET/$SPLITS_PREFIX/" \
     --exclude "*" --include "*.rrss" --include "*.rrhc" --include "*-s*.rrs" --include "*-s*.rrt" \
     --include "*-s*.rrf" --include "*-records.idx" --include "*-records.bin" \
     --cache-control "public, max-age=31536000, immutable"

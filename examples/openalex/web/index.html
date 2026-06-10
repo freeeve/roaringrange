@@ -980,8 +980,10 @@
       let restoring = false;             // suppress URL writes while applying URL -> state
 
       /* -------- deep-linking: keep the address bar in sync with the active search --------
-         Params: q (query), fuzz (maxMissing, omitted when 0), repeated f (each
-         "field\tcategory", the same tab format the cursor filters use), p (page offset). */
+         Params: q (query), mode (term/semantic/hybrid, omitted for the default trigram),
+         split (1 when the split-set backend is on), fuzz (maxMissing, omitted when 0),
+         repeated f (each "field\tcategory", the same tab format the cursor filters use),
+         p (page offset). */
       function currentFuzz() {
         return Number.parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
       }
@@ -990,12 +992,28 @@
         const q = els.q.value.trim();
         const params = new URLSearchParams();
         if (q) params.set("q", q);
+        const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
+        if (mode !== "trigram") params.set("mode", mode);
+        if (splitMode) params.set("split", "1");
         const mm = currentFuzz();
         if (mm) params.set("fuzz", String(mm));
         for (const key of activeFilters) params.append("f", key);
         if (offset > 0) params.set("p", String(offset));
         const qs = params.toString();
         history.replaceState(null, "", qs ? `?${qs}` : location.pathname);
+      }
+
+      /* Mode-dependent controls: fuzzy, server-side, and the split toggle apply only
+         to the trigram path. Shared by the mode radios' change handler, boot, and the
+         URL restore so the three can't drift. Leaving trigram CLEARS the split toggle
+         (not just hides it): splitMode also routes record fetches, so a stale true
+         would silently affect the other modes with no visible control to turn it off. */
+      function syncModeUi(mode) {
+        const triOnly = mode === "trigram";
+        $("fuzzmode").style.display = triOnly ? "" : "none";
+        const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = triOnly ? "" : "none";
+        els.splitmodeWrap.hidden = !(triOnly && splitAvailable);
+        if (!triOnly && splitMode) { splitMode = false; els.splitmode.checked = false; }
       }
 
       /* Apply URL params to the inputs/checkboxes on load. Facet boxes must already be
@@ -1007,6 +1025,16 @@
         restoring = true;
         try {
           els.q.value = q;
+          // Restore the search mode (default trigram). A deep link must replay in the
+          // backend that produced it — its page offset indexes that backend's ranking.
+          const mode = params.get("mode");
+          if (["term", "semantic", "hybrid"].includes(mode)) {
+            const r = $(`mode-${mode}`);
+            if (r) { r.checked = true; syncModeUi(mode); }
+          } else if (params.get("split") === "1" && splitAvailable) {
+            splitMode = true;
+            els.splitmode.checked = true;
+          }
           const mm = Number.parseInt(params.get("fuzz") || "0", 10) || 0;
           const radio = document.querySelector(`input[name="fuzz"][value="${mm === 1 ? 1 : 0}"]`);
           if (radio) radio.checked = true;
@@ -2021,12 +2049,8 @@
         if (!trigramAvailable && RRVI_URL) {
           searchMode = "semantic";
           const r = $("mode-semantic"); if (r) r.checked = true;
-          $("fuzzmode").style.display = "none";
-          const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = "none";
         }
-        // The split-set toggle is offered only when the split set is deployed and we're in trigram
-        // mode (it swaps the trigram backend).
-        els.splitmodeWrap.hidden = !(splitAvailable && searchMode === "trigram");
+        syncModeUi(searchMode);
 
         const restored = applyUrlState();
         if (restored) {
@@ -2061,11 +2085,7 @@
       // apply to the trigram path, so hide them outside trigram mode.
       document.querySelectorAll('input[name="mode"]').forEach((r) =>
         r.addEventListener("change", () => {
-          const mode = document.querySelector('input[name="mode"]:checked').value;
-          const triOnly = mode === "trigram";
-          $("fuzzmode").style.display = triOnly ? "" : "none";
-          const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = triOnly ? "" : "none";
-          els.splitmodeWrap.hidden = !(triOnly && splitAvailable);   // split-set toggle is trigram-only
+          syncModeUi(document.querySelector('input[name="mode"]:checked').value);
           renderActiveFiles();   // show the files this mode range-reads
           runSearch(true);
         }));
@@ -2096,6 +2116,9 @@
       // facet filters (no client cursor), so clear any and dim the panel.
       els.servermode.addEventListener("change", () => {
         serverMode = els.servermode.checked;
+        // Mutually exclusive with split mode in BOTH directions (the split branch wins
+        // in runSearch, so leaving it set would silently ignore this toggle).
+        if (serverMode && splitMode) { splitMode = false; els.splitmode.checked = false; }
         runSearch(true);   // filters + facet counts now work in server mode (via the Lambda)
       });
       // Split-set opt-in: swap the trigram backend from the monolith RRS to the RRSS split set.
