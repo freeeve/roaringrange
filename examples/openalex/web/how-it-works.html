@@ -1407,7 +1407,10 @@
           That last column is the point: at a tenth of this corpus, an average query is ~0.4&nbsp;MB &mdash; under
           200&nbsp;ms of transfer on a modest mobile connection &mdash; and <em>millions</em> of monthly queries fit
           inside a CDN free tier. The architecture&rsquo;s sweet spot is <b>large corpus &times; modest traffic</b>,
-          and it widens fast as the corpus shrinks.
+          and it widens fast as the corpus shrinks. And because doc&nbsp;ID == citation rank, the 1/10th-scale
+          column is <a href="index.html?ds=lite">live right now</a>: a 3.4&nbsp;KB manifest listing only the
+          top-cited splits searches the top&nbsp;47.6M works through the <em>same</em> deployed files — no new
+          index, just a shorter table of contents.
         </p>
 
         <h3 class="sub">The monthly bill, vs a backend</h3>

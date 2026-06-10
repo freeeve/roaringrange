@@ -793,6 +793,14 @@
                   split: { rrss: "openalex-trigram-split/openalex.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full" } },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
+        // ?ds=lite — the SAME deployed artifacts, searched through a 3.4 KB manifest listing
+        // only the top-cited ~10% of splits (46 splits, 47.6M docs). Doc ID == citation rank,
+        // so a tier-prefix manifest IS the top slice of the corpus: per-query bytes drop ~10x
+        // (the economics page's "1/10th scale" column, live). Boots straight into split mode;
+        // term/semantic stay full-corpus (their indexes aren't tiered).
+        "lite": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrviGemma: null,
+                  forceSplit: true,
+                  split: { rrss: "openalex-trigram-split/openalex-lite.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full" } },
       };
       const dsParam = new URLSearchParams(location.search).get("ds");
       const DS = DATASETS[dsParam] ? dsParam : "full";
@@ -1002,6 +1010,7 @@
         if (restoring) return;
         const q = els.q.value.trim();
         const params = new URLSearchParams();
+        if (DATASETS[dsParam]) params.set("ds", dsParam);   // keep a non-default dataset pinned
         if (q) params.set("q", q);
         const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
         if (mode !== "trigram") params.set("mode", mode);
@@ -2112,9 +2121,12 @@
         syncModeUi(searchMode);
 
         // The split set is off the boot critical path — its boot reveals the toggle
-        // when it lands — EXCEPT when the URL restores split=1: that search needs the
-        // split set open before it replays.
-        if (new URLSearchParams(location.search).get("split") === "1") await bootSplitSet();
+        // when it lands — EXCEPT when the URL restores split=1 or the dataset forces
+        // split mode (?ds=lite): those searches need the split set open first.
+        if (new URLSearchParams(location.search).get("split") === "1" || DATASETS[DS].forceSplit) {
+          await bootSplitSet();
+        }
+        if (DATASETS[DS].forceSplit && rrss) { splitMode = true; els.splitmode.checked = true; }
 
         const restored = applyUrlState();
         if (restored) {

@@ -10,21 +10,31 @@
 //! longer skips splits it can't match, so it may descend more tiers (still correct, just more
 //! reads). The tier short-circuit (read tier 0 first) is unaffected, so common queries are fine.
 //!
-//!   cargo run --release --features splits --example splitset_strip_summaries -- <in.rrss> <out.rrss>
+//! An optional `max_tier` additionally keeps only the splits whose rank tier is `<= max_tier`
+//! — because doc ID == citation rank, a tier-0-only manifest IS a search over the top-cited
+//! slice of the corpus, using the very same split bodies and record store already on S3
+//! (a "lite" dataset for the cost of one small manifest).
+//!
+//!   cargo run --release --features splits --example splitset_strip_summaries -- <in.rrss> <out.rrss> [max_tier]
 
 use roaringrange::{write_splitset, SplitSet, SplitSetConfig, SplitSpec};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        eprintln!("usage: splitset_strip_summaries <in.rrss> <out.rrss>");
+    if args.len() < 3 || args.len() > 4 {
+        eprintln!("usage: splitset_strip_summaries <in.rrss> <out.rrss> [max_tier]");
         std::process::exit(2);
     }
+    let max_tier: Option<u16> = args.get(3).map(|s| s.parse().expect("max_tier (u16)"));
     let buf = std::fs::read(&args[1]).expect("read manifest");
     let ss = SplitSet::from_bytes(&buf).expect("parse manifest");
     assert!(
         ss.sortcol().is_none(),
         "sortcol present — stable-key sets aren't handled by this stripper"
+    );
+    assert!(
+        max_tier.is_none() || ss.delta_splits().is_empty(),
+        "tier filtering over a set with delta splits is not supported"
     );
     eprintln!(
         "in : {} splits, {:.1} MB manifest, {} tiers, bodyKind {}, gram {}",
@@ -38,6 +48,7 @@ fn main() {
     let splits: Vec<SplitSpec> = ss
         .splits()
         .iter()
+        .filter(|s| max_tier.is_none_or(|mt| s.tier <= mt))
         .map(|s| {
             assert!(
                 !s.has_tombstone() && !s.absolute_ids(),
@@ -58,10 +69,11 @@ fn main() {
         })
         .collect();
 
+    let docs: u64 = splits.iter().map(|s| s.doc_count as u64).sum();
     let config = SplitSetConfig {
         policy: ss.policy(),
-        tier_count: ss.tier_count(),
-        base_count: ss.base_count(),
+        tier_count: max_tier.map_or(ss.tier_count(), |mt| mt + 1),
+        base_count: splits.len() as u32,
         byte_cap: ss.byte_cap(),
         gram_size: ss.gram_size(),
         body_kind: ss.body_kind(),
@@ -73,8 +85,9 @@ fn main() {
     write_splitset(&mut out, &splits, &config).expect("write manifest");
     std::fs::write(&args[2], &out).expect("write out");
     eprintln!(
-        "out: {} splits, {:.1} KB manifest (summaries dropped) -> {}",
+        "out: {} splits ({docs} docs{}), {:.1} KB manifest (summaries dropped) -> {}",
         splits.len(),
+        max_tier.map_or(String::new(), |mt| format!(", tiers ≤ {mt}")),
         out.len() as f64 / 1024.0,
         args[2]
     );
