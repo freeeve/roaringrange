@@ -100,8 +100,8 @@ func runConformance(t *testing.T, gram int, queries []string) {
 }
 
 // searchRR reproduces a strict-AND search through the roaringrange reference
-// reader: derive the query's n-gram keys, OR each key's head+tail, AND the keys
-// together. An absent key makes the strict-AND result empty.
+// reader: derive the query's n-gram keys, deserialize each key's (v3 single)
+// posting, AND the keys together. An absent key makes the strict-AND result empty.
 func searchRR(t *testing.T, ix *rr.Index, q string, gram int) []uint32 {
 	t.Helper()
 	keys := rr.NgramKeys(q, gram)
@@ -110,30 +110,16 @@ func searchRR(t *testing.T, ix *rr.Index, q string, gram int) []uint32 {
 	}
 	var acc *roaring.Bitmap
 	for _, k := range keys {
-		full := roaring.New()
-		present := false
-		if hb, ok, err := ix.Head(k); err != nil {
-			t.Fatalf("Head: %v", err)
-		} else if ok {
-			present = true
-			b := roaring.New()
-			if _, err := b.FromBuffer(append([]byte(nil), hb...)); err != nil {
-				t.Fatalf("head FromBuffer: %v", err)
-			}
-			full.Or(b)
+		pb, ok, err := ix.Posting(k)
+		if err != nil {
+			t.Fatalf("Posting: %v", err)
 		}
-		if tb, ok, err := ix.Tail(k); err != nil {
-			t.Fatalf("Tail: %v", err)
-		} else if ok {
-			present = true
-			b := roaring.New()
-			if _, err := b.FromBuffer(append([]byte(nil), tb...)); err != nil {
-				t.Fatalf("tail FromBuffer: %v", err)
-			}
-			full.Or(b)
-		}
-		if !present {
+		if !ok {
 			return nil // absent key -> strict AND is empty
+		}
+		full := roaring.New()
+		if _, err := full.FromBuffer(append([]byte(nil), pb...)); err != nil {
+			t.Fatalf("posting FromBuffer: %v", err)
 		}
 		if acc == nil {
 			acc = full
