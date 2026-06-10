@@ -197,8 +197,10 @@ fn needed_header_len(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < 8 || read_u32(bytes, 0) != NO_RUNCONTAINER_COOKIE {
         return None;
     }
+    // Checked: size is corruption-controlled and size*8 overflows 32-bit usize
+    // on wasm32; None falls back to the full-posting read path.
     let size = read_u32(bytes, 4) as usize;
-    Some(8 + size * 4 + size * 4)
+    size.checked_mul(8).and_then(|n| n.checked_add(8))
 }
 
 /// Parses a NO_RUNCONTAINER posting's container directory from `header` (which
@@ -213,9 +215,11 @@ fn parse_dir(header: &[u8], total: usize) -> Option<Vec<Container>> {
     if size == 0 {
         return Some(Vec::new());
     }
-    let desc = 8;
-    let offs = desc + size * 4;
-    let data = offs + size * 4;
+    // Checked: a corruption-controlled size wraps these sums on wasm32, which
+    // would defeat the bounds checks below and index past the header buffer.
+    let desc = 8usize;
+    let offs = size.checked_mul(4).and_then(|n| n.checked_add(desc))?;
+    let data = size.checked_mul(4).and_then(|n| n.checked_add(offs))?;
     if header.len() < data || data > total {
         return None;
     }

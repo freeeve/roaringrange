@@ -152,8 +152,8 @@ impl<F: RangeFetch> Index<F> {
         let ngrams = read_u32(&header, 8);
         let stride = read_u32(&header, 12);
 
-        let sparse_count = sparse_count(ngrams, stride);
-        let sparse_bytes = fetch.read(HEADER_SIZE as u64, sparse_count * 8).await?;
+        let (sparse_count, sparse_len) = sparse_layout(ngrams, stride)?;
+        let sparse_bytes = fetch.read(HEADER_SIZE as u64, sparse_len).await?;
         let mut sparse_keys = Vec::with_capacity(sparse_count);
         for i in 0..sparse_count {
             sparse_keys.push(read_u64(&sparse_bytes, i * 8));
@@ -193,8 +193,10 @@ impl<F: RangeFetch> Index<F> {
         let ngrams = read_u32(boot, 8);
         let stride = read_u32(boot, 12);
 
-        let sparse_count = sparse_count(ngrams, stride);
-        let dict_start = HEADER_SIZE + sparse_count * 8;
+        let (sparse_count, sparse_len) = sparse_layout(ngrams, stride)?;
+        let dict_start = HEADER_SIZE
+            .checked_add(sparse_len)
+            .ok_or(IndexError::Malformed("RRS boot region length overflows"))?;
         if boot.len() < dict_start {
             return Err(IndexError::Malformed(
                 "RRS boot region missing sparse index",
@@ -831,7 +833,10 @@ pub fn rrs_boot_len(header: &[u8]) -> Result<usize, IndexError> {
     }
     let ngrams = read_u32(header, 8);
     let stride = read_u32(header, 12);
-    Ok(HEADER_SIZE + sparse_count(ngrams, stride) * 8)
+    let (_, sparse_len) = sparse_layout(ngrams, stride)?;
+    HEADER_SIZE
+        .checked_add(sparse_len)
+        .ok_or(IndexError::Malformed("RRS boot region length overflows"))
 }
 
 /// Number of sparse-index entries: `ceil(ngrams / stride)`.
@@ -840,6 +845,23 @@ fn sparse_count(ngrams: u32, stride: u32) -> usize {
         return 0;
     }
     ngrams.div_ceil(stride) as usize
+}
+
+/// Validates a parsed RRS header's `ngrams`/`stride` pair and returns the sparse
+/// index's `(entry count, byte length)`. `stride == 0` with a non-empty dictionary
+/// is corruption — `sparse_count` would silently be 0 and every query would come
+/// back empty rather than erroring. The byte length is checked so a hostile count
+/// cannot wrap 32-bit `usize` arithmetic on wasm32 and defeat the boot-length
+/// bounds checks downstream.
+fn sparse_layout(ngrams: u32, stride: u32) -> Result<(usize, usize), IndexError> {
+    if stride == 0 && ngrams != 0 {
+        return Err(IndexError::Malformed("RRS stride is zero"));
+    }
+    let count = sparse_count(ngrams, stride);
+    let bytes = count
+        .checked_mul(8)
+        .ok_or(IndexError::Malformed("RRS sparse index length overflows"))?;
+    Ok((count, bytes))
 }
 
 /// Returns the docs present in at least `min_match` of the postings. With

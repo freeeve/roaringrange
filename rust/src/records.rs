@@ -198,7 +198,11 @@ impl<F: RangeFetch> RecordStore<F> {
         if end < start {
             return Err(IndexError::Malformed("record offset pair has end < start"));
         }
-        let bytes = self.bin.read(start, (end - start) as usize).await?;
+        // Checked: an `as usize` cast truncates a corrupt >4 GiB length on wasm32,
+        // silently returning a wrong-length prefix of the blob as the record.
+        let len = usize::try_from(end - start)
+            .map_err(|_| IndexError::Malformed("record length exceeds the address space"))?;
+        let bytes = self.bin.read(start, len).await?;
         Ok(Some(self.decode(bytes)?))
     }
 

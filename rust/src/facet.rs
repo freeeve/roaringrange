@@ -198,7 +198,10 @@ impl<F: RangeFetch> FacetIndex<F> {
         // read once; a large one would pull hundreds of MB of unused tails that
         // way, so fetch only the top-N heads per field instead. Offsets are
         // untrusted, so derive every slice bound with checked math.
-        let region_len = match (cats.first(), cats.last()) {
+        // The region length stays u64 until the eager branch: casting first would
+        // truncate a >4 GiB region on wasm32 and route it down the eager path with
+        // a wrapped length — a valid oversized sidecar is simply "large" (lazy).
+        let region_len: u64 = match (cats.first(), cats.last()) {
             (Some(first), Some(last)) => last
                 .range
                 .tail_off
@@ -206,14 +209,14 @@ impl<F: RangeFetch> FacetIndex<F> {
                 .checked_sub(first.range.head_off)
                 .ok_or(IndexError::Malformed(
                     "facet postings region has end < start",
-                ))? as usize,
+                ))?,
             _ => 0,
         };
         if region_len == 0 {
             // Empty sidecar; nothing to load.
-        } else if region_len <= eager_limit {
+        } else if region_len <= eager_limit as u64 {
             let blob_start = cats[0].range.head_off;
-            let blob = fetch.read(blob_start, region_len).await?;
+            let blob = fetch.read(blob_start, region_len as usize).await?;
             for c in &mut cats {
                 let s = c
                     .range

@@ -89,10 +89,13 @@ impl MemoryFetch {
 
 impl RangeFetch for MemoryFetch {
     async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
-        let start = offset as usize;
-        let end = start.checked_add(len);
-        match end {
-            Some(end) if end <= self.bytes.len() => Ok(self.bytes[start..end].to_vec()),
+        // The offset converts before any arithmetic: an `as usize` cast would
+        // truncate an offset >= 2^32 on wasm32 and serve the wrong bytes as Ok.
+        let range = usize::try_from(offset)
+            .ok()
+            .and_then(|start| start.checked_add(len).map(|end| (start, end)));
+        match range {
+            Some((start, end)) if end <= self.bytes.len() => Ok(self.bytes[start..end].to_vec()),
             _ => Err(FetchError::OutOfRange {
                 offset,
                 len,

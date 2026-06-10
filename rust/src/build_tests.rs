@@ -287,6 +287,15 @@ fn open_rejects_bad_magic() {
 }
 
 #[test]
+fn open_rejects_zero_stride_with_nonempty_dict() {
+    // stride 0 with ngrams > 0 is corruption: sparse_count would silently be 0
+    // and every query would return empty instead of surfacing an error.
+    let mut buf = build_rrs(3, 2, &[(6382179, bm(&[1]))]);
+    buf[12..16].copy_from_slice(&0u32.to_le_bytes());
+    assert!(block_on(Index::open(MemoryFetch::new(buf))).is_err());
+}
+
+#[test]
 fn empty_query_returns_nothing() {
     let buf = build_rrs(3, 2, &[(6382179, bm(&[1, 2, 3]))]);
     let idx = block_on(Index::open(MemoryFetch::new(buf))).unwrap();
