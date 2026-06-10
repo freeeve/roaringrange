@@ -682,7 +682,7 @@
             <span class="track"></span>
             <span>Server-side search</span>
           </label>
-          <span class="srvnote">runs the intersection in a Lambda and returns just this page's result IDs plus facet counts — KB instead of MB for huge result sets. Queries whose estimated client-side fetch exceeds ~8&nbsp;MB route here automatically (the dictionary prices every posting before anything is fetched); this switch forces it for every query</span>
+          <span class="srvnote">runs the intersection in a Lambda and returns just this page's result IDs plus facet counts — KB instead of MB for huge result sets, at the cost of the in-region exact-total scan (slow for very common terms)</span>
         </div>
 
         <div class="srvtoggle" id="lambdasem-wrap" hidden>
@@ -829,14 +829,18 @@
       // Optional server-side search: the regional Lambda runs the same intersection
       // over in-region S3 reads and returns only this page's IDs + the exact total,
       // so the multi-MB postings never egress to the browser. Opt-in via the toggle.
-      const LAMBDA_URL = "https://6ebz0mnwd0.execute-api.us-east-1.amazonaws.com/";
+      // Same-origin via the CloudFront /search behavior (origin = the regional API
+      // Gateway in front of the search Lambda) — one host for every byte the demo moves.
+      const LAMBDA_URL = "https://openalex.evefreeman.com/search";
       // Cost-based routing: a trigram query whose estimated client-side fetch exceeds
-      // this routes to the Lambda automatically (the same intersection, in-region,
-      // only IDs cross the wire). Priced BEFORE any posting is fetched: the dictionary
-      // records every posting's byte size and the facet table is resident. Only the
-      // full dataset has a Lambda behind it.
+      // the threshold can route to the Lambda automatically (the same intersection,
+      // in-region, only IDs cross the wire), priced BEFORE any posting is fetched —
+      // the dictionary records every posting's byte size and the facet table is
+      // resident. DISABLED by choice: the heavy queries it would route are exactly the
+      // ones the Lambda answers slowly over the 484M corpus (its exact-total tail scan),
+      // so server-side stays a manual, explicit toggle. Set to `DS === "full"` to re-enable.
       const AUTO_ROUTE_BYTES = 8 << 20;
-      const AUTO_ROUTE = DS === "full";
+      const AUTO_ROUTE = false;
       let autoRouted = false;   // this query was upgraded to the Lambda by cost (pageTo follows it)
       // Mode-1 query embedder (examples/embed-lambda): turns query text into an
       // EmbeddingGemma-300M vector matching a Gemma-embedded RRVI. null until the
@@ -1455,7 +1459,8 @@
           // Seamless paging: Prev/Next page the tail incrementally (only the buckets
           // each page spans). The exact total needs a full scan, offered as a subtle
           // link — hundreds of MB over the 484M corpus — not a "load the rest" button.
-          const exact =
+          // (Client cursor only: the server pages its own cursor per request.)
+          const exact = (serverMode || autoRouted) ? "" :
             ` · <button type="button" id="loadall" title="scans every match — can be 100s of MB" style="background:none;border:none;padding:0;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;text-decoration:underline;text-underline-offset:2px">exact count</button>`;
           els.resultcount.innerHTML = `${lead}${bound}${exact}`;
         } else {
@@ -1565,7 +1570,13 @@
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const text = await resp.text();
         const data = JSON.parse(text);
-        return { total: data.total || 0, ids: data.ids || [], facets: data.facets || null, bytes: new Blob([text]).size };
+        return {
+          total: data.total || 0,
+          more: !!data.more,                  // tail not exhausted: total is a lower bound ("N+")
+          bound: data.bound || null,          // page-0 header-derived count: { count, exact } or null
+          ids: data.ids || [], facets: data.facets || null,
+          bytes: new Blob([text]).size,
+        };
       }
 
       /* Server-mode counterpart to goPage: get the page IDs from the Lambda, then
@@ -1585,15 +1596,22 @@
         const lamMs = performance.now() - t0;
         if (seq !== searchSeq) return;
         if (offset === 0) {
-          serverTotal = res.total;   // exact only on page 0; cached for prev/next
           // Facet counts are computed in-region and returned on page 0; apply them to
           // the panel exactly as client mode applies the in-wasm counts. res.facets is
           // already the parsed [{field,cats:[{name,count}]}] array — applyFacetCounts
           // takes the array (or null) directly, not a JSON string.
           applyFacetCounts(res.facets || null);
+          // The header-derived count travels with page 0 too (exact for a
+          // single-trigram unfiltered query, else an upper bound) — same display
+          // as client mode's countBound.
+          if (res.bound) countBound = { count: Number(res.bound.count), exact: !!res.bound.exact };
         }
+        // The Lambda pages the tail incrementally exactly like the client cursor:
+        // total is the results materialized so far (a lower bound while `more`),
+        // rendered as "N+" through the same tailPending machinery.
+        serverTotal = res.total;
         lastTotal = serverTotal;
-        tailPending = false;
+        tailPending = res.more;
         const page = res.ids;
 
         const missing = page.filter((id) => !recCache.has(id));
@@ -1608,8 +1626,8 @@
         updateResultsHead();
         updatePager();
         syncUrl();
-        const summary = lastTotal
-          ? `${fmt(lastTotal)} result${lastTotal === 1 ? "" : "s"} in ${(lamMs + recMs).toFixed(0)} ms · server-side${autoRouted ? " (auto-routed by cost)" : ""}`
+        const summary = (lastTotal || tailPending)
+          ? `${fmt(lastTotal)}${tailPending ? "+" : ""} result${lastTotal === 1 && !tailPending ? "" : "s"} in ${(lamMs + recMs).toFixed(0)} ms · server-side${autoRouted ? " (auto-routed by cost)" : ""}`
           : "no results";
         setPerf({
           search: { ms: lamMs, reqs: 1, bytes: res.bytes },

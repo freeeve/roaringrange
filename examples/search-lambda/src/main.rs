@@ -245,7 +245,7 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
     };
 
     let body = if query.is_empty() {
-        r#"{"total":0,"offset":0,"ids":[],"facets":[]}"#.to_string()
+        r#"{"total":0,"more":false,"offset":0,"ids":[],"facets":[]}"#.to_string()
     } else {
         let cat = catalog().await?;
         // The intersection runs here, in-region; the browser only ever sees IDs +
@@ -260,29 +260,48 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
             .await
             .map_err(|e| Error::from(format!("search: {e}")))?;
 
-        // The exact total needs the full tail intersection, and facet counts are
-        // computed from the (tail-independent) head result. Both are stable across
-        // the query's pages, so compute them once on page 0; the client caches them
-        // and later pages stay cheap (just this page's IDs).
-        let (total, facets) = if offset == 0 {
-            cur.load_tail()
-                .await
-                .map_err(|e| Error::from(format!("load_tail: {e}")))?;
-            let total = cur.loaded();
-            let facets = match cat.facets() {
-                Some(f) => facets_value(f, &f.counts(cur.head_bitmap())),
-                None => serde_json::Value::Array(vec![]),
-            };
-            (total, facets)
-        } else {
-            (0, serde_json::Value::Array(vec![]))
-        };
+        // This page's ids first: the v3 cursor pages the tail incrementally (only
+        // the container buckets the page spans), so every request — any offset —
+        // stays well inside API Gateway's hard 30-second cap. The old design ran
+        // the FULL tail intersection on page 0 for an exact total, which the 484M
+        // corpus blew past that cap on common-trigram queries.
         let ids = cur
             .page(offset, limit)
             .await
             .map_err(|e| Error::from(format!("page: {e}")))?;
-        serde_json::json!({ "total": total, "offset": offset, "ids": ids, "facets": facets })
-            .to_string()
+        // total = results materialized so far (a lower bound while `more`), the
+        // same incremental contract the client-side cursor renders as "N+".
+        let total = cur.loaded();
+        let more = cur.pending_tail();
+
+        // Page 0 extras, all KB-scale: facet counts from the (tail-independent)
+        // head result, and the header-derived count — exact for a single-trigram
+        // unfiltered query, otherwise an upper bound (Σ per-container cardinalities
+        // from posting headers; not valid for fuzzy matching).
+        let (facets, bound) = if offset == 0 {
+            let facets = match cat.facets() {
+                Some(f) => facets_value(f, &f.counts(cur.head_bitmap())),
+                None => serde_json::Value::Array(vec![]),
+            };
+            let bound = if max_missing == 0 {
+                match cat.index().count_estimate(query).await {
+                    Ok((count, exact)) => {
+                        serde_json::json!({ "count": count, "exact": exact && filters.is_empty() })
+                    }
+                    Err(_) => serde_json::Value::Null,
+                }
+            } else {
+                serde_json::Value::Null
+            };
+            (facets, bound)
+        } else {
+            (serde_json::Value::Array(vec![]), serde_json::Value::Null)
+        };
+        serde_json::json!({
+            "total": total, "more": more, "offset": offset,
+            "ids": ids, "facets": facets, "bound": bound
+        })
+        .to_string()
     };
 
     Ok(Response::builder()
