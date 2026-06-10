@@ -49,8 +49,8 @@ use std::time::Instant;
 use tracing::{info, info_span, warn};
 
 use crate::{
-    build_source_range, concat_chunk_records, file_len, rank_rows, write_chunk_records, Source,
-    FACET_FIELDS, GRAM, KEY_SHARDS, ZSTD_DICT_SAMPLE_CAP,
+    build_source_range, check_stream_truncations, concat_chunk_records, file_len, rank_rows,
+    write_chunk_records, Source, FACET_FIELDS, GRAM, KEY_SHARDS, ZSTD_DICT_SAMPLE_CAP,
 };
 
 /// Per-chunk artifact kinds written by Phase A (one file each, per chunk).
@@ -195,6 +195,7 @@ fn run_phase_a(
             .par_iter()
             .map(|s| build_source_range(s, id_to_doc, lo, hi, &shards, abstract_cap))
             .collect();
+        check_stream_truncations("phase A chunk scan");
         let indexed: usize = per_file.iter().map(|v| v.recs.len()).sum();
 
         // Place this chunk's records at their chunk-local offset; gather its DOIs;

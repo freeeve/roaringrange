@@ -62,9 +62,10 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tracing::{info, info_span, warn};
+use tracing::{error, info, info_span, warn};
 
 /// Initializes structured logging: timestamped, leveled, key=value events with the
 /// active phase span as context. Level defaults to INFO; override with `RUST_LOG`
@@ -347,6 +348,7 @@ fn main() {
         .par_iter()
         .map(|s| build_source(s, &id_to_doc, &shards, abstract_cap))
         .collect();
+    check_stream_truncations("pass 2 (indexing)");
     let indexed: usize = per_file.iter().map(|v| v.recs.len()).sum();
     info!(
         works = indexed,
@@ -558,6 +560,34 @@ fn open_source(src: &Source) -> std::io::Result<Box<dyn BufRead>> {
     Ok(Box::new(BufReader::with_capacity(1 << 20, gz)))
 }
 
+/// Source streams that ended in a mid-body read error this pass. A transport or
+/// gzip failure mid-stream silently truncates the source's line iterator —
+/// every work after the failure is lost — so each one is counted and the pass
+/// must fail loudly via [`check_stream_truncations`] instead of building an
+/// index with silently missing docs.
+static STREAM_TRUNCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Records a mid-stream read failure for `label`: the rest of that source is
+/// unreadable and its remaining works are lost to this pass.
+fn note_stream_truncation(label: &str, err: &std::io::Error) {
+    STREAM_TRUNCATIONS.fetch_add(1, Ordering::Relaxed);
+    warn!(source = %label, error = %err, "mid-stream read error — source truncated");
+}
+
+/// Fails the build if any source stream was truncated since the last check.
+/// The phased build resumes cheaply from its chunk artifacts, so rerunning is
+/// far cheaper than shipping an index built over silently missing documents.
+pub(crate) fn check_stream_truncations(pass: &str) {
+    let n = STREAM_TRUNCATIONS.swap(0, Ordering::Relaxed);
+    if n > 0 {
+        error!(
+            sources = n,
+            pass, "source streams truncated by mid-stream read errors; rerun the build"
+        );
+        std::process::exit(1);
+    }
+}
+
 /// Streams one source for pass 1, returning `(wid, cited_by_count)` per indexable
 /// work (titled, with a parseable id).
 fn rank_source(src: &Source) -> Vec<(u64, i64)> {
@@ -572,7 +602,10 @@ fn rank_source(src: &Source) -> Vec<(u64, i64)> {
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
-            Err(_) => break,
+            Err(e) => {
+                note_stream_truncation(&src.label(), &e);
+                break;
+            }
         };
         if line.is_empty() {
             continue;
@@ -595,6 +628,7 @@ fn rank_source(src: &Source) -> Vec<(u64, i64)> {
 /// doc ID. Shared by the single-pass and phased builds.
 fn rank_rows(sources: &[Source], limit: usize, t0: Instant) -> Vec<(u64, i64)> {
     let mut rows: Vec<(u64, i64)> = sources.par_iter().flat_map_iter(rank_source).collect();
+    check_stream_truncations("pass 1 (ranking)");
     info!(
         rows = rows.len(),
         elapsed_s = t0.elapsed().as_secs_f64(),
@@ -783,7 +817,10 @@ fn build_split_set(
                 for line in reader.lines() {
                     let line = match line {
                         Ok(l) => l,
-                        Err(_) => break,
+                        Err(e) => {
+                            note_stream_truncation(&src.label(), &e);
+                            break;
+                        }
                     };
                     if line.is_empty() {
                         continue;
@@ -834,6 +871,7 @@ fn build_split_set(
                 out
             })
             .collect();
+        check_stream_truncations("split-set chunk scan");
 
         // Place into chunk-local doc order (gaps stay empty: a keyword-less, recordless doc).
         let mut text = vec![String::new(); span];
@@ -918,7 +956,10 @@ fn build_source(
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
-            Err(_) => break,
+            Err(e) => {
+                note_stream_truncation(&src.label(), &e);
+                break;
+            }
         };
         if line.is_empty() {
             continue;
@@ -1023,7 +1064,10 @@ fn build_source_range(
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
-            Err(_) => break,
+            Err(e) => {
+                note_stream_truncation(&src.label(), &e);
+                break;
+            }
         };
         if line.is_empty() {
             continue;

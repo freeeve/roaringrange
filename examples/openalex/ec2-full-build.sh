@@ -153,13 +153,14 @@ resolve_input() {
     return
   fi
   local dest="$WORKDIR/oa-works"
-  if [[ ! -d "$dest" ]]; then
-    ensure_aws >&2
-    log "syncing corpus $WORKS_SRC -> $dest (no-sign-request)" >&2
-    mkdir -p "$dest"
-    aws s3 sync "$WORKS_SRC/" "$dest/" --no-sign-request \
-      --exclude "*" --include "*.gz" >&2
-  fi
+  # Always sync: `aws s3 sync` is incremental, so a completed corpus costs one
+  # listing pass, while skipping on a mere [[ -d ]] would silently build from a
+  # partial corpus whenever an earlier sync was interrupted mid-transfer.
+  ensure_aws >&2
+  log "syncing corpus $WORKS_SRC -> $dest (no-sign-request, incremental)" >&2
+  mkdir -p "$dest"
+  aws s3 sync "$WORKS_SRC/" "$dest/" --no-sign-request \
+    --exclude "*" --include "*.gz" >&2
   echo "$dest/*/*.gz"
 }
 
