@@ -218,6 +218,59 @@ pub trait SplitFetcher {
     fn boot(&self, _split: &Split) -> Option<Vec<u8>> {
         None
     }
+
+    /// The data-file name of an optional **global term Bloom** sidecar covering the whole
+    /// set's vocabulary (the `bloom_build` layout), **range-probed** — `k` single-byte reads
+    /// per key — never downloaded. The tiered query paths consult it lazily, only after the
+    /// top tier yields nothing (the rare/absent-term signal), so a definite absence ends the
+    /// tier descent instead of opening every remaining split; present-term queries never pay
+    /// for it. The default `None` disables the probe.
+    fn global_bloom_name(&self) -> Option<String> {
+        None
+    }
+}
+
+/// A term Bloom filter probed over [`RangeFetch`] **without downloading it**: the 8-byte
+/// `[k u32][nbits u32]` header is read once at open, then each key costs `k` single-byte
+/// reads at its hash positions (issued as one concurrent wave). `false` answers are
+/// definitive — the Bloom-filter guarantee — which is what makes a multi-hundred-MB filter
+/// usable from a browser: an absent-term check is ~`k` tiny ranged reads, not a download.
+pub struct RemoteBloom<F: RangeFetch> {
+    fetch: F,
+    k: u32,
+    nbits: u64,
+}
+
+impl<F: RangeFetch> RemoteBloom<F> {
+    /// Reads and validates the 8-byte header.
+    pub async fn open(fetch: F) -> Result<Self, IndexError> {
+        let h = fetch.read(0, 8).await?;
+        let k = read_u32(&h, 0);
+        let nbits = read_u32(&h, 4) as u64;
+        if k == 0 || k > 64 || nbits == 0 {
+            return Err(IndexError::Malformed("bloom sidecar header invalid"));
+        }
+        Ok(Self { fetch, k, nbits })
+    }
+
+    /// Whether **every** key is possibly present — the strict-AND prune. All keys'
+    /// bit positions are read in one concurrent wave; any definitely-absent key
+    /// makes the whole conjunction `false`.
+    pub async fn contains_all(&self, keys: &[u64]) -> Result<bool, IndexError> {
+        let mut ranges: Vec<(u64, usize)> = Vec::with_capacity(keys.len() * self.k as usize);
+        let mut positions: Vec<u64> = Vec::with_capacity(ranges.capacity());
+        for &key in keys {
+            for p in bloom_positions(key, self.k, self.nbits) {
+                ranges.push((8 + p / 8, 1));
+                positions.push(p);
+            }
+        }
+        let bytes = crate::fetch::read_coalesced(&self.fetch, &ranges, 0).await?;
+        Ok(positions
+            .iter()
+            .zip(&bytes)
+            .all(|(&p, b)| b[0] & (1u8 << (p % 8)) != 0))
+    }
 }
 
 /// A parsed `RRSS` manifest. Holds the split entries, the optional stable-key sort-column
@@ -564,9 +617,17 @@ impl SplitSet {
         // each surviving split's filtered (rank-ordered) hits until the page is full.
         if self.delta_splits().is_empty() && self.policy == Policy::Tiered {
             let mut out: Vec<u32> = Vec::with_capacity(limit);
-            for split in self.base_splits() {
+            for (i, split) in self.base_splits().iter().enumerate() {
                 if out.len() >= limit {
                     break;
+                }
+                // Same lazy global-Bloom gate as the unfiltered tiered loop: an empty
+                // top tier + a definitively-absent term ends the descent.
+                if i == 1
+                    && out.is_empty()
+                    && !self.global_bloom_says_present(resolver, &keys).await
+                {
+                    return Ok(out);
                 }
                 if !survives(split)? {
                     continue;
@@ -705,9 +766,15 @@ impl SplitSet {
         limit: usize,
     ) -> Result<Vec<u32>, IndexError> {
         let mut out: Vec<u32> = Vec::with_capacity(limit);
-        for split in self.base_splits() {
+        for (i, split) in self.base_splits().iter().enumerate() {
             if out.len() >= limit {
                 break; // tiered short-circuit — the cold tiers leave the hot path
+            }
+            // An empty top tier is the rare/absent-term signal: consult the optional
+            // global Bloom once (k byte-probes per key) — a term absent from the whole
+            // set's vocabulary ends the descent here instead of opening every split.
+            if i == 1 && out.is_empty() && !self.global_bloom_says_present(resolver, keys).await {
+                return Ok(out);
             }
             if self.pruned_by_bloom(split, keys) {
                 continue; // the split's vocabulary can't contain a query n-gram — no fetch
@@ -719,6 +786,23 @@ impl SplitSet {
         }
         out.truncate(limit);
         Ok(out)
+    }
+
+    /// Probes the resolver's optional global term Bloom for `keys`: `false` only on a
+    /// **definitive** absence (every other outcome — no sidecar configured, the sidecar
+    /// unreadable, keys empty, all keys possibly present — answers `true`, so the probe can
+    /// only ever skip work that provably cannot match).
+    async fn global_bloom_says_present<R: SplitFetcher>(&self, resolver: &R, keys: &[u64]) -> bool {
+        if keys.is_empty() {
+            return true;
+        }
+        let Some(name) = resolver.global_bloom_name() else {
+            return true;
+        };
+        match RemoteBloom::open(resolver.fetch_named(&name)).await {
+            Ok(bloom) => bloom.contains_all(keys).await.unwrap_or(true),
+            Err(_) => true, // a missing/unreadable sidecar never breaks search
+        }
     }
 
     /// Stable-key top-K: rank is not the id order, so every surviving split must be searched
@@ -1038,9 +1122,11 @@ pub(crate) fn bloom_k(bits_per_key: u32) -> u32 {
 
 /// Builds a term Bloom filter over `keys` at roughly `bits_per_key` bits per key, serialized as
 /// `[k u32 LE][nbits u32 LE][ceil(nbits/8) bytes]`. Deterministic so the native builder and the
-/// Go builder produce identical bytes; a build-side helper, so it is excluded from the wasm reader.
+/// Go builder produce identical bytes; a build-side helper, so it is excluded from the wasm
+/// reader. The same layout serves a per-split summary, or a standalone **global** sidecar
+/// probed remotely by [`RemoteBloom`].
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn bloom_build(keys: &[u64], bits_per_key: u32) -> Vec<u8> {
+pub fn bloom_build(keys: &[u64], bits_per_key: u32) -> Vec<u8> {
     let n = (keys.len() as u64).max(1);
     // The serialized nbits field is u32: clamp to the largest 8-multiple that
     // fits, so a pathological vocabulary degrades to a higher false-positive
@@ -1552,6 +1638,108 @@ mod tests {
             self.opens.set(self.opens.get() + 1);
             MemoryFetch::new(self.files.get(name).cloned().unwrap_or_default())
         }
+    }
+
+    /// A [`SplitFetcher`] carrying an optional global-Bloom sidecar name.
+    struct GlobalBloomResolver {
+        files: HashMap<String, Vec<u8>>,
+        opens: std::cell::Cell<usize>,
+        bloom: Option<String>,
+    }
+
+    impl SplitFetcher for GlobalBloomResolver {
+        type Fetch = MemoryFetch;
+        fn fetch_named(&self, name: &str) -> MemoryFetch {
+            self.opens.set(self.opens.get() + 1);
+            MemoryFetch::new(self.files.get(name).cloned().unwrap_or_default())
+        }
+        fn global_bloom_name(&self) -> Option<String> {
+            self.bloom.clone()
+        }
+    }
+
+    #[test]
+    fn remote_bloom_probes_without_downloading() {
+        let keys: Vec<u64> = (0..500u64).map(|i| i * 7 + 3).collect();
+        let bloom = bloom_build(&keys, 10);
+        let r = RemoteBloom {
+            fetch: MemoryFetch::new(bloom.clone()),
+            k: read_u32(&bloom, 0),
+            nbits: read_u32(&bloom, 4) as u64,
+        };
+        assert!(block_on(r.contains_all(&[3, 10, 24])).unwrap());
+        // An inserted-keys-only conjunction is possibly-present; adding one
+        // definitely-absent key flips the whole strict AND to false.
+        assert!(!block_on(r.contains_all(&[3, 10, 1_000_003])).unwrap());
+        // open() round-trips the header.
+        let opened = block_on(RemoteBloom::open(MemoryFetch::new(bloom))).unwrap();
+        assert!(block_on(opened.contains_all(&keys)).unwrap());
+    }
+
+    #[test]
+    fn global_bloom_ends_the_descent_for_absent_terms() {
+        // A summary-less (stripped-manifest-style) set: no per-split Blooms, so
+        // an absent term would otherwise descend through every split.
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            policy: Policy::Tiered,
+            byte_cap: 4096,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 0,
+        });
+        let mut vocab = std::collections::BTreeSet::new();
+        for i in 0..200u32 {
+            let text = format!("abc tok{i:04}");
+            vocab.extend(ngram_keys(&text, 3));
+            b.add_text(&text).unwrap();
+        }
+        let built = b.finish().unwrap();
+        assert!(built.splits.len() > 2, "need several splits for a descent");
+        let ss = open_built(&built);
+        let keys: Vec<u64> = vocab.into_iter().collect();
+        let mut files: HashMap<String, Vec<u8>> = built.splits.iter().cloned().collect();
+        files.insert("global.bloom".to_string(), bloom_build(&keys, 10));
+        let resolver = |bloom: Option<&str>| GlobalBloomResolver {
+            files: files.clone(),
+            opens: std::cell::Cell::new(0),
+            bloom: bloom.map(String::from),
+        };
+
+        // Absent term, no global Bloom: every split opens before giving up.
+        let r = resolver(None);
+        assert!(block_on(ss.search(&r, "zzzqqq", 10)).unwrap().is_empty());
+        assert_eq!(r.opens.get(), ss.splits().len());
+
+        // Absent term, with the global Bloom: the top split opens, the probe answers
+        // definitively absent, and the descent ends — one split + one Bloom fetch.
+        let r = resolver(Some("global.bloom"));
+        assert!(block_on(ss.search(&r, "zzzqqq", 10)).unwrap().is_empty());
+        assert_eq!(
+            r.opens.get(),
+            2,
+            "first split + the Bloom probe, nothing else"
+        );
+
+        // A common present term fills from the top tiers: the probe never runs and
+        // results are identical to the no-Bloom path.
+        let want = block_on(ss.search(&resolver(None), "abc", 100)).unwrap();
+        let got = block_on(ss.search(&resolver(Some("global.bloom")), "abc", 100)).unwrap();
+        assert_eq!(got, want);
+
+        // A rare-but-present term (only in a deep split): the probe runs once (top
+        // tier empty), says possibly-present, and the descent continues to find it.
+        let want = block_on(ss.search(&resolver(None), "tok0199", 10)).unwrap();
+        assert_eq!(want.len(), 1);
+        let got = block_on(ss.search(&resolver(Some("global.bloom")), "tok0199", 10)).unwrap();
+        assert_eq!(got, want);
+
+        // A configured-but-missing sidecar must never break search.
+        let r = resolver(Some("nope.bloom"));
+        let got = block_on(ss.search(&r, "tok0199", 10)).unwrap();
+        assert_eq!(got, want);
     }
 
     #[test]

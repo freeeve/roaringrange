@@ -790,7 +790,10 @@
                   // dropped), split bodies are RRSI v3 (readable by the v3 wasm), records shared with the
                   // monolith's rank-ordered doc-ID space (records-full). The empty .rrhc makes openBundle
                   // fall back to a plain manifest open (29 KB, cheap).
-                  split: { rrss: "openalex-trigram-split/openalex.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full" } },
+                  // bloom: a GLOBAL term-Bloom sidecar (range-probed, never downloaded) restoring
+                  // the absent-term prune the 29 KB summary-stripped manifest gave up: a term
+                  // missing from the whole corpus ends the tier descent in ~k one-byte reads.
+                  split: { rrss: "openalex-trigram-split/openalex.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full", bloom: "openalex-global.bloom" } },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
         // ?ds=lite — the SAME deployed artifacts, searched through a 3.4 KB manifest listing
@@ -800,7 +803,7 @@
         // term/semantic stay full-corpus (their indexes aren't tiered).
         "lite": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrviGemma: null,
                   forceSplit: true,
-                  split: { rrss: "openalex-trigram-split/openalex-lite.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full" } },
+                  split: { rrss: "openalex-trigram-split/openalex-lite.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full", bloom: "openalex-global.bloom" } },
       };
       const dsParam = new URLSearchParams(location.search).get("ds");
       const DS = DATASETS[dsParam] ? dsParam : "full";
@@ -2153,6 +2156,10 @@
           } else {
             rrss = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL);
           }
+          // Global term-Bloom sidecar (optional): consulted lazily by the tiered query
+          // path — k one-byte probes per term, only after an empty top tier — so an
+          // absent/typo term stops the descent instead of opening all 389 splits.
+          if (SPLIT.bloom && typeof rrss.setGlobalBloom === "function") rrss.setGlobalBloom(SPLIT.bloom);
           // The split set's record store: when it declares the same basename as the
           // dataset's store (the trigram split set shares the monolith's rank-ordered
           // doc-ID space), reuse the already-open reader — it carries the zstd

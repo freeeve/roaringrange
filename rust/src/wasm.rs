@@ -1558,6 +1558,9 @@ impl RrtIndex {
 #[cfg(feature = "splits")]
 struct WasmSplitResolver {
     base: String,
+    /// Optional global term-Bloom sidecar name (resolved like any split file);
+    /// the tiered query path range-probes it after an empty top tier.
+    bloom: Option<String>,
     #[cfg(feature = "hotcache")]
     hc: Option<std::rc::Rc<crate::hotcache::Hotcache>>,
 }
@@ -1567,6 +1570,10 @@ impl crate::splitset::SplitFetcher for WasmSplitResolver {
     type Fetch = WasmFetch;
     fn fetch_named(&self, name: &str) -> WasmFetch {
         WasmFetch::new(format!("{}/{}", self.base.trim_end_matches('/'), name))
+    }
+
+    fn global_bloom_name(&self) -> Option<String> {
+        self.bloom.clone()
     }
 
     #[cfg(feature = "hotcache")]
@@ -1607,6 +1614,8 @@ fn field_counts_to_js(fields: &[crate::splitset::FieldCounts]) -> JsValue {
 pub struct RrssIndex {
     inner: crate::splitset::SplitSet,
     base: String,
+    /// Optional global term-Bloom sidecar name (see [`set_global_bloom`](Self::set_global_bloom)).
+    bloom: Option<String>,
     /// The boot bundle, when booted via [`open_bundle`](Self::open_bundle); its inlined split
     /// boots let the query path open splits with no per-split header fetch. `Rc` so the
     /// per-search resolver clones a handle, not the resident blob.
@@ -1628,9 +1637,21 @@ impl RrssIndex {
         Ok(RrssIndex {
             inner,
             base: base_url,
+            bloom: None,
             #[cfg(feature = "hotcache")]
             hc: None,
         })
+    }
+
+    /// Names a **global term-Bloom sidecar** (resolved as `base_url/<name>`, the
+    /// `build_global_bloom` layout) covering the whole set's vocabulary. It is never
+    /// downloaded: the tiered query path range-probes `k` byte positions per query
+    /// term, and only after the top tier yields nothing — so an absent/typo term ends
+    /// the tier descent in a handful of one-byte reads instead of opening every split,
+    /// while present-term queries never touch it.
+    #[wasm_bindgen(js_name = setGlobalBloom)]
+    pub fn set_global_bloom(&mut self, name: String) {
+        self.bloom = Some(name);
     }
 
     /// Boots the split set with an `RRHC` boot bundle: the manifest at `manifest_url` and the
@@ -1656,6 +1677,7 @@ impl RrssIndex {
         Ok(RrssIndex {
             inner,
             base: base_url,
+            bloom: None,
             hc: Some(std::rc::Rc::new(hc)),
         })
     }
@@ -1665,6 +1687,7 @@ impl RrssIndex {
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<u32>, JsError> {
         let resolver = WasmSplitResolver {
             base: self.base.clone(),
+            bloom: self.bloom.clone(),
             #[cfg(feature = "hotcache")]
             hc: self.hc.clone(),
         };
@@ -1690,6 +1713,7 @@ impl RrssIndex {
         let pairs = filter_pairs(&filters)?;
         let resolver = WasmSplitResolver {
             base: self.base.clone(),
+            bloom: self.bloom.clone(),
             #[cfg(feature = "hotcache")]
             hc: self.hc.clone(),
         };
@@ -1709,6 +1733,7 @@ impl RrssIndex {
     pub async fn facet_counts(&self, ids: Vec<u32>) -> Result<JsValue, JsError> {
         let resolver = WasmSplitResolver {
             base: self.base.clone(),
+            bloom: self.bloom.clone(),
             #[cfg(feature = "hotcache")]
             hc: self.hc.clone(),
         };

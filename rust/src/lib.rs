@@ -122,10 +122,12 @@ pub use hotcache::{Hotcache, Member, MemberTag};
 #[cfg(all(feature = "hotcache", not(target_arch = "wasm32")))]
 pub use hotcache_build::{write_hotcache, MemberSpec};
 
+#[cfg(all(feature = "splits", not(target_arch = "wasm32")))]
+pub use splitset::bloom_build;
 #[cfg(feature = "splits")]
 pub use splitset::{
-    FieldCounts, Policy, SortColDescriptor, Split, SplitFetcher, SplitSet, BODY_KIND_TERM,
-    BODY_KIND_TRIGRAM,
+    FieldCounts, Policy, RemoteBloom, SortColDescriptor, Split, SplitFetcher, SplitSet,
+    BODY_KIND_TERM, BODY_KIND_TRIGRAM,
 };
 #[cfg(all(feature = "splits", not(target_arch = "wasm32")))]
 pub use splitset_build::{
