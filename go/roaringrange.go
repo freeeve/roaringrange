@@ -20,6 +20,10 @@ var (
 	ErrSrcMagic = errors.New("source is not a roaringsearch (FTSR) index")
 	// ErrMagic is returned when an index does not start with the RRS magic.
 	ErrMagic = errors.New("bad RRS magic")
+	// ErrVersion is returned when an index's format version is unsupported. The RRS
+	// reader is v3-only, matching the Rust reference reader; a v2 file has a different
+	// header and dictionary layout and would otherwise misparse silently.
+	ErrVersion = errors.New("unsupported RRS format version")
 	// ErrTruncated is returned when an index ends before its declared structure.
 	ErrTruncated = errors.New("truncated index")
 )

@@ -37,6 +37,9 @@ func Open(r io.ReaderAt) (*Index, error) {
 	if string(header[0:4]) != Magic {
 		return nil, ErrMagic
 	}
+	if v := binary.LittleEndian.Uint16(header[4:6]); v != Version {
+		return nil, ErrVersion
+	}
 	gramSize := int(binary.LittleEndian.Uint16(header[6:8]))
 	ngrams := int(binary.LittleEndian.Uint32(header[8:12]))
 	stride := int(binary.LittleEndian.Uint32(header[12:16]))

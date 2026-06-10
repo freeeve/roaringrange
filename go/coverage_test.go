@@ -2,6 +2,7 @@ package roaringrange
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"testing"
 )
@@ -63,6 +64,21 @@ func TestOpenRejectsBadMagic(t *testing.T) {
 	copy(buf[0:4], "XXXX")
 	if _, err := Open(bytes.NewReader(buf)); err != ErrMagic {
 		t.Fatalf("got %v, want ErrMagic", err)
+	}
+}
+
+// TestOpenRejectsWrongVersion rejects any non-v3 header. A v2 file shares the
+// magic but has a 20-byte header and a 24-byte dictionary stride, so parsing it
+// as v3 would silently return garbage postings rather than an error.
+func TestOpenRejectsWrongVersion(t *testing.T) {
+	for _, v := range []uint16{0, 1, 2, 4} {
+		buf := make([]byte, headerSize)
+		copy(buf[0:4], Magic)
+		binary.LittleEndian.PutUint16(buf[4:6], v)
+		binary.LittleEndian.PutUint32(buf[12:16], 1) // valid stride so only the version trips
+		if _, err := Open(bytes.NewReader(buf)); err != ErrVersion {
+			t.Fatalf("version %d: got %v, want ErrVersion", v, err)
+		}
 	}
 }
 
