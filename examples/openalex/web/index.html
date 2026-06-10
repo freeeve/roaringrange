@@ -836,7 +836,7 @@
       let gemmaReady = false;       // rrviGemma opened + embed endpoint configured
       let rterm = null;             // RrtIndex — the FST term-index reader (whole-word/stemmed)
       let rrss = null;              // RrssIndex — the split-set reader (trigram backend alternative)
-      let splitRecords = null;      // the split set's own RRSR record store (raw; its own doc-ID space)
+      let splitRecords = null;      // the split set's RRSR record store (shared with the monolith when SPLIT.rec matches)
       let splitAvailable = false;   // the split set + its records opened OK (shows the toggle)
       let splitMode = false;        // the "Split-set index" toggle: swap the trigram backend to RrssIndex
       let trigramAvailable = true;  // the text .rrs opened (false while the full index is still uploading)
@@ -1037,8 +1037,8 @@
          Returns a Map<docID, recordObj>; unparseable/out-of-range entries are skipped. */
       async function fetchRecords(ids) {
         const map = new Map();
-        // Split-set mode reads from the split set's OWN record store (its doc IDs are the split
-        // set's, served by openalex-split/openalex-records.*); every other mode reads the monolith.
+        // Split-set mode reads via splitRecords — the monolith store itself when the split set
+        // shares its doc-ID space (the live config), or the split set's own store otherwise.
         const store = (splitMode && splitRecords) ? splitRecords : records;
         if (!store || !ids.length) return map;
         const blobs = await store.getMany(Uint32Array.from(ids));
@@ -1507,8 +1507,10 @@
         if (offset === 0) {
           serverTotal = res.total;   // exact only on page 0; cached for prev/next
           // Facet counts are computed in-region and returned on page 0; apply them to
-          // the panel exactly as client mode applies the in-wasm counts.
-          applyFacetCounts(res.facets ? JSON.stringify(res.facets) : null);
+          // the panel exactly as client mode applies the in-wasm counts. res.facets is
+          // already the parsed [{field,cats:[{name,count}]}] array — applyFacetCounts
+          // takes the array (or null) directly, not a JSON string.
+          applyFacetCounts(res.facets || null);
         }
         lastTotal = serverTotal;
         tailPending = false;
@@ -1551,7 +1553,9 @@
         const page = rankedIds.slice(offset, offset + PAGE);
         const recReq0 = reqs, recByte0 = bytes, recT0 = performance.now();
         const missing = page.filter((id) => !recCache.has(id));
-        const map = await fetchRecords(missing);
+        let map;
+        try { map = await fetchRecords(missing); }
+        catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
         const recMs = performance.now() - recT0, recReqs = reqs - recReq0, recBytes = bytes - recByte0;
         if (seq !== searchSeq) return;   // a newer query superseded this page
         for (const [id, rec] of map) recCache.set(id, rec);
@@ -1899,10 +1903,14 @@
           return;
         }
         if (serverMode) {
-          // The Lambda runs the intersection; no client cursor, tail, or facet counts.
+          // The Lambda runs the intersection; no client cursor or tail. The exact
+          // total and the facet counts come only with page 0 (the client caches
+          // them for Prev/Next), so every re-search — new query, fuzz, or filter
+          // change — starts at page 0; resuming at a deeper offset would render
+          // cards with a zero total (blank count, dead pager, stale facet panel).
           serverTotal = 0;
           setPerf({ tail: null, tailresults: null, facetcount: null });   // server mode: no client-side facet count
-          await goPageServer(resetPaging ? 0 : offset);
+          await goPageServer(0);
           return;
         }
         const mm = Number.parseInt(document.querySelector('input[name="fuzz"]:checked').value, 10) || 0;
@@ -1990,7 +1998,15 @@
             } else {
               rrss = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL);
             }
-            splitRecords = await RrsRecords.open(SPLIT_REC_IDX_URL, SPLIT_REC_BIN_URL);
+            // The split set's record store: when it declares the same basename as the
+            // dataset's store (the trigram split set shares the monolith's rank-ordered
+            // doc-ID space), reuse the already-open reader — it carries the zstd
+            // dictionary a compressed store needs; a dict-less re-open of the same
+            // files would error on every compressed record. Only a split set with its
+            // OWN store opens separately (raw; no dict ships for it).
+            splitRecords = (SPLIT.rec === DATASETS[DS].rec)
+              ? records
+              : await RrsRecords.open(SPLIT_REC_IDX_URL, SPLIT_REC_BIN_URL);
             splitAvailable = true;
           } catch (_) { rrss = null; splitRecords = null; splitAvailable = false; }
           mr = reqs; mb = bytes; mt = performance.now();   // re-baseline; split boot has no perf row
