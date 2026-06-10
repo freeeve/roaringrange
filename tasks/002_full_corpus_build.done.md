@@ -1,6 +1,24 @@
 # 002 — Full ~250M-work corpus build
 
-Status: **deferred** — hold until the 47.8M demo upgrade (upload + flip) is live.
+**Status: done** (completed 2026-06-07 as part of the full 484M OpenAlex build).
+
+## Execution Summary
+
+The full corpus build was executed as part of the 484M OpenAlex build infrastructure:
+
+| Artifact | Size | Status |
+|----------|------|--------|
+| `openalex-full.rrs` (trigram) | ~45 GiB | Deployed |
+| `openalex-484m.rrvi` (vectors) | ~120 GiB | Deployed |
+| `openalex-484m-stem.rrt` (term index) | ~53.8 GiB | Built, on S3 |
+| `openalex-split/` (term split-set) | ~65 GiB | Deployed |
+| `records-full.{bin,idx}` | ~50 GiB | Deployed |
+
+## Notes
+
+- Task 016 (RRS v3 format) changed the trigram index reader to v3-only; rebuild `.rrs` artifacts
+  before deploying if using this binary.
+- The full corpus is **unfiltered** (no length/min-DF filtering applied in the 484M run).
 
 ## Destination — MUST be separate
 The full build must NOT clobber the 47.8M demo. Use distinct outputs:

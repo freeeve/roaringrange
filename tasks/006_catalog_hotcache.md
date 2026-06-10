@@ -1,6 +1,10 @@
 # Task 006 — roaringrange catalog hotcache (RRHC)
 
-**Status:** scoping (pending). Planned 2026-06-04.
+**Status:** in progress — format module + split-set application SHIPPED (see Progress);
+the remaining work is the **catalog boot** (the OpenAlex demo's 4–5 cold opens → 1–2 RTs).
+*(2026-06-10: a duplicate task 027 was filed from the architecture review and folded back
+in here; its only addition — build + upload the catalog `.rrhc` in `deploy.sh` so the
+bundle ships with every deploy — joins the deferred list.)*
 
 A **new, additive** member of the roaringrange family — not another *index*, but a
 **cross-format boot accelerator**. Every roaringrange format already boots a tiny
