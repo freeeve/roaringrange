@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"sort"
@@ -55,6 +56,7 @@ func streamBuild(files []string, rrsPath, facetsPath, binP, idxP, ftsr, tmpRec s
 	}
 	tw := bufio.NewWriterSize(tf, 1<<20)
 	metas := make([]recMeta, 0, len(lookup))
+	seenDoc := make([]uint64, (len(lookup)+63)/64)
 	var off uint64
 	var seen int
 	err = streamLines(files, func(line []byte) bool {
@@ -70,6 +72,13 @@ func streamBuild(files []string, rrsPath, facetsPath, binP, idxP, ftsr, tmpRec s
 		if !ok {
 			return true // not in the pass-1 set
 		}
+		// A work can appear on more than one input line (pass 1 deduped the ids);
+		// only the first occurrence contributes — a second record for the same doc
+		// would shift every later record in the store.
+		if seenDoc[doc/64]&(1<<(doc%64)) != 0 {
+			return true
+		}
+		seenDoc[doc/64] |= 1 << (doc % 64)
 		idx.Add(doc, buildText(&w))
 		fa.add(doc, &w)
 		rec := buildRecord(&w)
@@ -166,7 +175,35 @@ func rankPass(files []string, limit int) ([]idDoc, error) {
 	if err != nil {
 		return nil, err
 	}
-	sort.SliceStable(entries, func(i, j int) bool { return entries[i].cited > entries[j].cited })
+	// Dedupe by work id BEFORE ranking: a snapshot can re-emit a work (e.g.
+	// overlapping updated_date partitions in a stale mirror), and a duplicate
+	// would consume two doc IDs that pass 2 both resolves to one doc — shifting
+	// every later record in the store. Keep the max-cited occurrence per id.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].id != entries[j].id {
+			return entries[i].id < entries[j].id
+		}
+		return entries[i].cited > entries[j].cited
+	})
+	dedup := entries[:0]
+	for _, e := range entries {
+		if len(dedup) > 0 && dedup[len(dedup)-1].id == e.id {
+			continue
+		}
+		dedup = append(dedup, e)
+	}
+	if dropped := len(entries) - len(dedup); dropped > 0 {
+		log.Printf("  pass1 dropped %d duplicate work ids", dropped)
+	}
+	entries = dedup
+	// Rank by citations descending, ties by ascending id — the same total order
+	// the Rust builder's rank_rows uses, so doc IDs agree across builders.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].cited != entries[j].cited {
+			return entries[i].cited > entries[j].cited
+		}
+		return entries[i].id < entries[j].id
+	})
 	lookup := make([]idDoc, len(entries))
 	for i, e := range entries {
 		lookup[i] = idDoc{id: e.id, doc: uint32(i)}
@@ -179,6 +216,14 @@ func rankPass(files []string, limit int) ([]idDoc, error) {
 // doc-ID-ordered record store (blob + uint64 offset index of length numDocs+1).
 func writeRecordsOrdered(tmpRec string, metas []recMeta, binP, idxP string) error {
 	sort.Slice(metas, func(i, j int) bool { return metas[i].doc < metas[j].doc })
+	// The store is positional: record i must belong to doc i. A gap or duplicate
+	// here means the ranking and the stream disagree — fail rather than write a
+	// store in which every record after the divergence renders the wrong work.
+	for i, m := range metas {
+		if m.doc != uint32(i) {
+			return fmt.Errorf("record store misaligned at slot %d (doc %d): duplicate or missing work", i, m.doc)
+		}
+	}
 	src, err := os.Open(tmpRec)
 	if err != nil {
 		return err
