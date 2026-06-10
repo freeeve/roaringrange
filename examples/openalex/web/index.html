@@ -753,7 +753,7 @@
     </main>
 
     <script type="module">
-      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex, RrssIndex, rangeCacheStats } from "./roaringrange.js";
+      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex, RrssIndex, rangeCacheStats, reciprocalRankFusion } from "./roaringrange.js";
 
       /* -------- byte/request accounting via fetch interception (from webtest) -------- */
       const realFetch = self.fetch.bind(self);
@@ -835,11 +835,9 @@
       let rrviGemma = null;         // RrviIndex over Gemma-embedded vectors (mode 1's search target)
       let gemmaReady = false;       // rrviGemma opened + embed endpoint configured
       let rterm = null;             // RrtIndex — the FST term-index reader (whole-word/stemmed)
-      let rrss = null;              // RrssIndex — the split-set reader (trigram backend alternative)
+      let rrss = null;              // RrssIndex — the split-set reader (non-null == available; shows the toggle)
       let splitRecords = null;      // the split set's RRSR record store (shared with the monolith when SPLIT.rec matches)
-      let splitAvailable = false;   // the split set + its records opened OK (shows the toggle)
       let splitMode = false;        // the "Split-set index" toggle: swap the trigram backend to RrssIndex
-      let trigramAvailable = true;  // the text .rrs opened (false while the full index is still uploading)
       let facetSrc = null;          // facet source: the text index, or a standalone .rrf when the .rrs isn't up yet
       const SEM_NPROBE = 8, SEM_K = 250, RRF_K = 60;  // vector probes (~1 MB/cluster over the 484M nlist=16384 index), ranked depth (≈10 pages), RRF constant
       // The ranked depth is the page-through ceiling, not a per-page cap: the nprobe
@@ -967,7 +965,7 @@
 
       let idx = null, cur = null, records = null, lookup = null;
       let offset = 0, lastPage = [], lastTotal = 0;
-      let tailLoaded = false, tailPending = false;   // lazy tail: defer the (large) tail intersection until the full set is asked for
+      let tailPending = false;   // lazy tail: the (large) tail intersection loads incrementally as pages need it
       // Ranked-list modes (semantic / term / hybrid) have no cursor: the search
       // returns the whole ranked list up front, so paging is a client-side slice of
       // it (no re-search, no extra index bytes). null in trigram/DOI mode.
@@ -1012,7 +1010,7 @@
         const triOnly = mode === "trigram";
         $("fuzzmode").style.display = triOnly ? "" : "none";
         const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = triOnly ? "" : "none";
-        els.splitmodeWrap.hidden = !(triOnly && splitAvailable);
+        els.splitmodeWrap.hidden = !(triOnly && rrss);
         if (!triOnly && splitMode) { splitMode = false; els.splitmode.checked = false; }
       }
 
@@ -1031,7 +1029,7 @@
           if (["term", "semantic", "hybrid"].includes(mode)) {
             const r = $(`mode-${mode}`);
             if (r) { r.checked = true; syncModeUi(mode); }
-          } else if (params.get("split") === "1" && splitAvailable) {
+          } else if (params.get("split") === "1" && rrss) {
             splitMode = true;
             els.splitmode.checked = true;
           }
@@ -1601,7 +1599,7 @@
         const recMs = performance.now() - recT0, recReqs = reqs - recReq0, recBytes = bytes - recByte0;
         if (seq !== searchSeq) return;   // a newer query superseded this page
         for (const [id, rec] of map) recCache.set(id, rec);
-        lastPage = page; lastTotal = rankedIds.length; tailLoaded = true; tailPending = false;
+        lastPage = page; lastTotal = rankedIds.length; tailPending = false;
         renderCards(recCache); updateResultsHead(); updatePager(); syncUrl();
         setPerf({ results: { ms: recMs, reqs: recReqs, bytes: recBytes }, summary: `${rankedSummary} · ${recMs.toFixed(0)} ms` });
       }
@@ -1641,7 +1639,7 @@
          bypassing the trigram cursor. */
       async function showDocs(ids, seq, summary, keepFacets = false) {
         skeletons(Math.min(ids.length, 8));
-        offset = 0; tailLoaded = true; tailPending = false;
+        offset = 0; tailPending = false;
         if (!keepFacets) applyFacetCounts(null);   // semantic/hybrid set their own (filtered) counts first
         const r0 = reqs, b0 = bytes, t0 = performance.now();
         const map = await fetchRecords(ids);
@@ -1750,14 +1748,6 @@
         return { ids: Array.from(hits.ids), embedMs, embedReqs, embedBytes, searchMs: performance.now() - s0, reqs: reqs - r0, bytes: bytes - b0 };
       }
 
-      /* Reciprocal-rank fusion of two ranked lists (k≈60): each adds 1/(k+rank), so a
-         doc near the top of either ranks high without needing comparable scores. */
-      function rrfFuse(a, b) {
-        const s = new Map();
-        for (const list of [a, b]) list.forEach((id, i) => s.set(id, (s.get(id) || 0) + 1 / (RRF_K + i + 1)));
-        return [...s.entries()].sort((x, y) => y[1] - x[1] || x[0] - y[0]).map(([id]) => id);
-      }
-
       /* Apply the active facets to a ranked doc-ID list. Because vector_id == doc_id,
          the trigram facet sidecar (.rrf) applies unchanged: the reader fetches the
          selected categories' postings, ANDs them, and keeps the candidate IDs that
@@ -1797,7 +1787,6 @@
         reqs = 0; bytes = 0;
         recCache.clear();
         rankedIds = null;     // a ranked mode (semantic/term/hybrid) sets this; trigram/DOI leave it null
-        tailLoaded = false;   // a new query starts from the popular head; the tail loads on demand
         // DOI exact-lookup fast path: a DOI-shaped query resolves to the exact work
         // via the lookup sidecar, independent of client/server search mode.
         const bareDoi = lookup ? doiOf(q) : null;
@@ -1872,7 +1861,11 @@
             await goPageRanked(resetPaging ? 0 : offset);
             return;
           }
-          // hybrid: fuse the trigram and semantic result lists by reciprocal rank
+          // hybrid: fuse the trigram and semantic result lists by reciprocal rank.
+          // The two arms run sequentially ON PURPOSE: the perf bar's per-phase
+          // reqs/bytes come from global fetch counters, so overlapping the vector
+          // probe with the trigram intersection would scramble each arm's
+          // attribution — the instrument this demo exists to show.
           const t0 = performance.now();
           let sem = null, tri = [];
           if (ok) { try { sem = await semanticIds(q, depth); } catch (_) {} }
@@ -1883,7 +1876,10 @@
             triMs = performance.now() - tt0; triReqs = reqs - tr0; triBytes = bytes - tb0;
           }
           if (mySeq !== searchSeq) return;
-          const fused = rrfFuse(tri, sem ? sem.ids : []);
+          // Fusion runs in the wasm reader (the same reciprocal_rank_fusion every
+          // native consumer uses), so the demo can't drift from the library's ranking.
+          const fused = Array.from(reciprocalRankFusion(
+            Uint32Array.from(sem ? sem.ids : []), Uint32Array.from(tri), RRF_K));
           const ff = await facetFilter(fused, filters);
           if (mySeq !== searchSeq) return;
           cur = null;
@@ -1993,8 +1989,8 @@
         // The text index is optional at boot: a dataset whose `.rrs` is still
         // uploading (the full index) boots with trigram disabled but semantic live.
         try { idx = await RrsIndex.open(RRS_URL); }
-        catch (_) { idx = null; trigramAvailable = false; mr = reqs; mb = bytes; mt = performance.now(); }
-        const index = trigramAvailable ? seg() : null;
+        catch (_) { idx = null; mr = reqs; mb = bytes; mt = performance.now(); }
+        const index = idx ? seg() : null;
 
         let facets = null;
         if (idx) {
@@ -2028,43 +2024,22 @@
         try { lookup = await RrsLookup.open(LOOKUP_URL); lookupSeg = seg(); }
         catch (_) { lookup = null; mr = reqs; mb = bytes; mt = performance.now(); }
 
-        // Split-set backend (optional): boot the RRSS manifest + its `.rrhc` boot bundle in one
-        // parallel wave (openBundle), falling back to a plain open if only the bundle is absent,
-        // plus the split set's own raw record store. Absent/uploading → the toggle stays hidden
-        // and the demo runs monolith-only. Independent of the monolith, so it never blocks boot.
-        if (SPLIT_RRSS_URL) {
-          try {
-            if (typeof RrssIndex.openBundle === "function" && SPLIT_RRHC_URL) {
-              try { rrss = await RrssIndex.openBundle(SPLIT_RRSS_URL, SPLIT_BASE_URL, SPLIT_RRHC_URL); }
-              catch (_) { rrss = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL); }
-            } else {
-              rrss = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL);
-            }
-            // The split set's record store: when it declares the same basename as the
-            // dataset's store (the trigram split set shares the monolith's rank-ordered
-            // doc-ID space), reuse the already-open reader — it carries the zstd
-            // dictionary a compressed store needs; a dict-less re-open of the same
-            // files would error on every compressed record. Only a split set with its
-            // OWN store opens separately (raw; no dict ships for it).
-            splitRecords = (SPLIT.rec === DATASETS[DS].rec)
-              ? records
-              : await RrsRecords.open(SPLIT_REC_IDX_URL, SPLIT_REC_BIN_URL);
-            splitAvailable = true;
-          } catch (_) { rrss = null; splitRecords = null; splitAvailable = false; }
-          mr = reqs; mb = bytes; mt = performance.now();   // re-baseline; split boot has no perf row
-        }
-
         setPerf({ index, facets, recstore, lookup: lookupSeg, summary: "ready" });
         loadDatasetStats();   // fire-and-forget; fills the header line, off the search path
         renderFacets();
 
         // If the text index isn't up yet (the full set is still uploading) but the
         // vector index is, default the UI to semantic so the demo works on load.
-        if (!trigramAvailable && RRVI_URL) {
+        if (!idx && RRVI_URL) {
           searchMode = "semantic";
           const r = $("mode-semantic"); if (r) r.checked = true;
         }
         syncModeUi(searchMode);
+
+        // The split set is off the boot critical path — its boot reveals the toggle
+        // when it lands — EXCEPT when the URL restores split=1: that search needs the
+        // split set open before it replays.
+        if (new URLSearchParams(location.search).get("split") === "1") await bootSplitSet();
 
         const restored = applyUrlState();
         if (restored) {
@@ -2073,6 +2048,36 @@
         } else {
           await runSearch(true);
         }
+        bootSplitSet();   // deferred (no-op if the URL path already booted it)
+      }
+
+      /* Split-set backend boot (optional): the RRSS manifest + its `.rrhc` boot bundle in one
+         parallel wave (openBundle), falling back to a plain open if only the bundle is absent,
+         plus the split set's record store. Absent/uploading → the toggle stays hidden and the
+         demo runs monolith-only. Runs after the first search (its few small fetches are not on
+         any perf row; a query fired inside that short window would absorb them into its
+         counters — accepted). */
+      async function bootSplitSet() {
+        if (!SPLIT_RRSS_URL || rrss) return;
+        try {
+          if (typeof RrssIndex.openBundle === "function" && SPLIT_RRHC_URL) {
+            try { rrss = await RrssIndex.openBundle(SPLIT_RRSS_URL, SPLIT_BASE_URL, SPLIT_RRHC_URL); }
+            catch (_) { rrss = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL); }
+          } else {
+            rrss = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL);
+          }
+          // The split set's record store: when it declares the same basename as the
+          // dataset's store (the trigram split set shares the monolith's rank-ordered
+          // doc-ID space), reuse the already-open reader — it carries the zstd
+          // dictionary a compressed store needs; a dict-less re-open of the same
+          // files would error on every compressed record. Only a split set with its
+          // OWN store opens separately (raw; no dict ships for it).
+          splitRecords = (SPLIT.rec === DATASETS[DS].rec)
+            ? records
+            : await RrsRecords.open(SPLIT_REC_IDX_URL, SPLIT_REC_BIN_URL);
+        } catch (_) { rrss = null; splitRecords = null; return; }
+        // Reveal the toggle (trigram mode only — syncModeUi recomputes from rrss).
+        syncModeUi(document.querySelector('input[name="mode"]:checked')?.value || "trigram");
       }
 
       /* -------- events -------- */
