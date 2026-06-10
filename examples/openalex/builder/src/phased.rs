@@ -46,7 +46,7 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
-use tracing::{info, info_span, warn};
+use tracing::{error, info, info_span, warn};
 
 use crate::{
     build_source_range, check_stream_truncations, concat_chunk_records, file_len, rank_rows,
@@ -81,6 +81,7 @@ pub struct Opts<'a> {
 pub fn build(sources: &[Source], opts: Opts, t0: Instant) {
     let work = work_dir(&opts);
     std::fs::create_dir_all(&work).expect("create work dir");
+    check_params(&work, sources, &opts);
     let chunks = opts.chunks;
 
     // Ranking: reuse a persisted ranking on resume; otherwise rank now and persist
@@ -291,7 +292,8 @@ fn finalize_text(active: &[usize], work: &Path, rrs_path: &str) {
     let tmp = tmp_path(Path::new(rrs_path));
     {
         let mut f = File::create(&tmp).expect("create rrs tmp");
-        merge_partials_to_rrs(&partials, GRAM as u16, DEFAULT_STRIDE, &mut f).expect("merge partials");
+        merge_partials_to_rrs(&partials, GRAM as u16, DEFAULT_STRIDE, &mut f)
+            .expect("merge partials");
         f.flush().expect("flush rrs");
     }
     std::fs::rename(&tmp, rrs_path).expect("rename rrs");
@@ -459,6 +461,51 @@ fn chunk_done(work: &Path, c: usize) -> bool {
     ARTIFACTS
         .iter()
         .all(|kind| chunk_path(work, c, kind).exists())
+}
+
+/// Renders the parameters that shape the work-dir artifacts, one per line:
+/// `ranking.bin` depends on the input set and `-limit`; the `chunk_N` temps on
+/// `-chunks` (their doc ranges are recomputed from the current count) and
+/// `-abstract-cap`; the record finalizer on the zstd settings.
+fn params_fingerprint(sources: &[Source], opts: &Opts) -> String {
+    let mut labels: Vec<String> = sources.iter().map(Source::label).collect();
+    labels.sort();
+    let mut s = format!(
+        "chunks={}\nlimit={}\nabstract_cap={}\nzstd={:?}\nsources={}\n",
+        opts.chunks,
+        opts.limit,
+        opts.abstract_cap,
+        opts.zstd.map(|(_, size, level)| (size, level)),
+        labels.len(),
+    );
+    for l in &labels {
+        s.push_str(l);
+        s.push('\n');
+    }
+    s
+}
+
+/// Persists the parameter fingerprint on the first run; a resume whose
+/// parameters differ refuses to proceed. `chunk_done` is existence-only and the
+/// ranking is reused on bare presence, so artifacts from a run with different
+/// parameters (e.g. a changed `-chunks` after an OOM) would otherwise be merged
+/// silently into a misaligned index.
+fn check_params(work: &Path, sources: &[Source], opts: &Opts) {
+    let path = work.join("params.txt");
+    let current = params_fingerprint(sources, opts);
+    match std::fs::read_to_string(&path) {
+        Ok(prev) if prev != current => {
+            error!(
+                params = %path.display(),
+                "work dir holds artifacts built with different parameters; rerun with the \
+                 original -chunks/-limit/-in/-abstract-cap/zstd settings, or remove the \
+                 work dir to rebuild from scratch"
+            );
+            std::process::exit(1);
+        }
+        Ok(_) => {}
+        Err(_) => std::fs::write(&path, current).expect("persist build params"),
+    }
 }
 
 /// `<path>.tmp` sibling used for atomic writes.

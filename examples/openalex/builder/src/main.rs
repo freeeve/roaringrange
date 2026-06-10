@@ -53,8 +53,8 @@ use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use roaringrange::build::{
     serialize_posting, split_posting, train_record_dict, write_facets, write_index, write_lookup,
-    write_records, write_records_zstd, FacetCategory, FacetField, RecordWriter, DEFAULT_HEAD_BOUNDARY,
-    DEFAULT_STRIDE,
+    write_records, write_records_zstd, FacetCategory, FacetField, RecordWriter,
+    DEFAULT_HEAD_BOUNDARY, DEFAULT_STRIDE,
 };
 use roaringrange::ngram_keys;
 use serde::Deserialize;
@@ -1210,6 +1210,16 @@ fn concat_chunk_records(
                     writer.write(&bytes)?;
                 }
             }
+            if writer.written() != n as u32 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "record store holds {} records but the ranking expects {n} — \
+                         chunk temps are stale or incomplete",
+                        writer.written()
+                    ),
+                ));
+            }
             return writer.flush();
         }
     };
@@ -1257,6 +1267,7 @@ fn concat_zstd_parallel(
 
     let mut reader = RecordTempReader::new(paths);
     let mut global_base: u64 = 0;
+    let mut total_records: usize = 0;
 
     loop {
         // Read a wave of raw records (bounded), then split into batches.
@@ -1270,6 +1281,7 @@ fn concat_zstd_parallel(
         if wave.is_empty() {
             break;
         }
+        total_records += wave.len();
         let batches: Vec<&[Vec<u8>]> = wave.chunks(batch_size).collect();
 
         // Frame each batch in parallel via its own in-memory RecordWriter.
@@ -1301,6 +1313,15 @@ fn concat_zstd_parallel(
         }
     }
 
+    if total_records != n {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "record store holds {total_records} records but the ranking expects {n} — \
+                 chunk temps are stale or incomplete"
+            ),
+        ));
+    }
     bin_w.flush()?;
     idx_w.flush()
 }
