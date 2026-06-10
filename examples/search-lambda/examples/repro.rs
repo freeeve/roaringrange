@@ -42,9 +42,18 @@ impl RangeFetch for FileFetch {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let rrs = a.get(1).cloned().unwrap_or_else(|| "/tmp/oarust.rrs".into());
-    let rrf = a.get(2).cloned().unwrap_or_else(|| "/tmp/oarust.rrf".into());
-    let query = a.get(3).cloned().unwrap_or_else(|| "machine learning".into());
+    let rrs = a
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "/tmp/oarust.rrs".into());
+    let rrf = a
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "/tmp/oarust.rrf".into());
+    let query = a
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| "machine learning".into());
     let offset: usize = 0;
     let limit: usize = 3;
     let max_missing: usize = 0;
@@ -75,7 +84,12 @@ async fn main() {
         eprintln!("facet count groups = {}", counts.len());
         for (field, fc) in cat.fields().iter().zip(&counts) {
             let nz = fc.iter().filter(|&&n| n > 0).count();
-            eprintln!("  field {:?}: {} categories, {} non-zero", field.name, fc.len(), nz);
+            eprintln!(
+                "  field {:?}: {} categories, {} non-zero",
+                field.name,
+                fc.len(),
+                nz
+            );
         }
     }
 

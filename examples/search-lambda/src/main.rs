@@ -222,10 +222,27 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(25)
         .min(500);
-    let filters: Vec<(String, String)> = params
-        .first("filters")
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
+    // Malformed filters are a hard 400: silently dropping them would serve the
+    // full unfiltered result set (ids, total, AND facet counts) labeled as the
+    // client's filtered query, with no signal anywhere.
+    let filters: Vec<(String, String)> = match params.first("filters") {
+        Some(s) => match serde_json::from_str(s) {
+            Ok(f) => f,
+            Err(e) => {
+                return Ok(Response::builder()
+                    .status(400)
+                    .header("content-type", "application/json")
+                    .header("access-control-allow-origin", "*")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "error": format!("filters must be a JSON array of [field, category] pairs: {e}")
+                        })
+                        .to_string(),
+                    ))?)
+            }
+        },
+        None => Vec::new(),
+    };
 
     let body = if query.is_empty() {
         r#"{"total":0,"offset":0,"ids":[],"facets":[]}"#.to_string()
