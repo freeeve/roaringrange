@@ -1456,6 +1456,20 @@
         let ids;
         try { ids = await c.page(offset, PAGE); }
         catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
+        // Past the real end: while the tail is pending, Next stays enabled on what
+        // turns out to be the last page, so the page that exhausts the tail can come
+        // back empty. Step back to the last real page instead of rendering the
+        // no-results empty state under a pager reading "51–50 of 50" (and persisting
+        // the out-of-range p in the URL).
+        if (ids.length === 0 && offset > 0) {
+          const total = c.loaded();
+          const lastStart = Math.max(0, Math.floor(Math.max(0, total - 1) / PAGE) * PAGE);
+          if (lastStart < offset) {
+            offset = lastStart;
+            try { ids = await c.page(offset, PAGE); }
+            catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
+          }
+        }
         const idxMs = extraMs + (performance.now() - t0);   // index work this call: head search, or this page's tail buckets
         const idxReqs = openReqs + (reqs - pgReq0);
         const idxBytes = openBytes + (bytes - pgByte0);
