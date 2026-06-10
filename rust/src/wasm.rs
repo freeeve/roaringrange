@@ -20,9 +20,9 @@ use crate::facet::{FacetIndex, Field};
 use crate::fetch::{FetchError, RangeFetch};
 use crate::index::{Cursor, Index};
 use crate::lookup::Lookup;
+use crate::range_cache::RangeCache;
 use crate::records::RecordStore;
 use crate::secondary::{SecondaryCursor, SecondaryIndex};
-use crate::range_cache::RangeCache;
 use crate::sortcols::SortCols;
 #[cfg(feature = "terms")]
 use crate::terms::TermIndex;
@@ -239,7 +239,9 @@ impl RangeFetch for WasmFetch {
         }
         // Populate the cache (clone is a memcpy, far cheaper than the network read it spares).
         if let Some(cache) = &cache {
-            cache.borrow_mut().insert(&self.url, offset, len, bytes.clone());
+            cache
+                .borrow_mut()
+                .insert(&self.url, offset, len, bytes.clone());
         }
         Ok(bytes)
     }

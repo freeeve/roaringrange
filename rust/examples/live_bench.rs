@@ -70,7 +70,9 @@ impl RangeFetch for CurlFetch {
             )));
         }
         self.c.reqs.fetch_add(1, Ordering::Relaxed);
-        self.c.bytes.fetch_add(out.stdout.len() as u64, Ordering::Relaxed);
+        self.c
+            .bytes
+            .fetch_add(out.stdout.len() as u64, Ordering::Relaxed);
         Ok(out.stdout)
     }
 }
@@ -168,13 +170,22 @@ fn main() {
                 Some(r)
             }
             Err(e) => {
-                eprintln!("  {:<14} SKIPPED — {e:?} (monolith not v3 yet)", "trigram .rrs");
+                eprintln!(
+                    "  {:<14} SKIPPED — {e:?} (monolith not v3 yet)",
+                    "trigram .rrs"
+                );
                 None
             }
         }
     };
-    let term = boot!("term .rrt", TermIndex::open(fetch("openalex-484m-stem.rrt")));
-    let vidx = boot!("vector .rrvi", VectorIndex::open(fetch("openalex-484m.rrvi")));
+    let term = boot!(
+        "term .rrt",
+        TermIndex::open(fetch("openalex-484m-stem.rrt"))
+    );
+    let vidx = boot!(
+        "vector .rrvi",
+        VectorIndex::open(fetch("openalex-484m.rrvi"))
+    );
     let facets = boot!("facets .rrf", FacetIndex::open(fetch("openalex-full.rrf")));
     // The trigram split manifest is ~727 MB (Bloom-dominated), so opening it pulls that whole
     // blob resident — opt in with SPLIT_BENCH=1 only.
@@ -214,7 +225,10 @@ fn main() {
             return ids.to_vec();
         }
         let mask = block_on(rf.full_bitmap()).expect("facet bitmap");
-        ids.iter().copied().filter(|id| mask.contains(*id)).collect()
+        ids.iter()
+            .copied()
+            .filter(|id| mask.contains(*id))
+            .collect()
     };
 
     println!(

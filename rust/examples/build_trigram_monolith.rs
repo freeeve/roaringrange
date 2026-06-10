@@ -95,7 +95,10 @@ impl RangeFetch for FileFetch {
         let mut buf = vec![0u8; len];
         let mut filled = 0;
         while filled < len {
-            match self.file.read_at(&mut buf[filled..], offset + filled as u64) {
+            match self
+                .file
+                .read_at(&mut buf[filled..], offset + filled as u64)
+            {
                 Ok(0) => {
                     return Err(FetchError::Transport(format!(
                         "unexpected EOF at offset {offset} (+{filled})"
@@ -238,7 +241,10 @@ fn main() {
         partials.push(partial_path.clone());
 
         // Resume: a whole partial from a prior run is trusted as-is.
-        if std::fs::metadata(&partial_path).map(|m| m.len() > 0).unwrap_or(false) {
+        if std::fs::metadata(&partial_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+        {
             eprintln!("  chunk {c}/{chunks} [{lo}..{hi}) cached, skip");
             continue;
         }
@@ -257,10 +263,15 @@ fn main() {
 
     // Merge the disjoint per-chunk partials into one v3 `.rrs`. Streams by key (peak = one key's
     // postings + the key dictionary), so the merge stays bounded regardless of corpus size.
-    eprintln!("merging {} partials -> {}", partials.len(), out_rrs.display());
+    eprintln!(
+        "merging {} partials -> {}",
+        partials.len(),
+        out_rrs.display()
+    );
     let tm = Instant::now();
     let mut out = File::create(&out_rrs).expect("create out rrs");
-    merge_partials_to_rrs(&partials, GRAM as u16, DEFAULT_STRIDE, &mut out).expect("merge partials");
+    merge_partials_to_rrs(&partials, GRAM as u16, DEFAULT_STRIDE, &mut out)
+        .expect("merge partials");
     out.flush().expect("flush rrs");
     let bytes = out.metadata().map(|m| m.len()).unwrap_or(0);
 

@@ -24,7 +24,10 @@ impl RangeFetch for FileFetch {
         let mut buf = vec![0u8; len];
         let mut filled = 0;
         while filled < len {
-            match self.file.read_at(&mut buf[filled..], offset + filled as u64) {
+            match self
+                .file
+                .read_at(&mut buf[filled..], offset + filled as u64)
+            {
                 Ok(0) => {
                     return Err(FetchError::Transport(format!(
                         "unexpected EOF at offset {offset} (+{filled})"
