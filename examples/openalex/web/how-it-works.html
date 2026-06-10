@@ -224,12 +224,22 @@
   .foot-meta .dot{opacity:.5;}
   .foot-links{display:flex;gap:18px;font-size:13.5px;font-weight:600;}
 
+  .costs{width:100%;border-collapse:collapse;margin:18px 0 6px;font-size:13.5px;}
+  .costs th{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);font-weight:600;text-align:left;padding:8px 14px;border-bottom:1px solid var(--line);}
+  .costs td{padding:9px 14px;border-bottom:1px solid var(--line);color:var(--ink-soft);}
+  .costs td:first-child{color:var(--ink);font-weight:600;}
+  .costs td b{color:var(--accent-ink);}
+  .costs tr:last-child td{border-bottom:none;}
+  .costs .win{background:var(--accent-soft);border-radius:4px;}
+
   @media (max-width:720px){
     .wrap{padding:0 20px;}
     .hero{padding:48px 0 8px;}
     .layout{padding:44px 0 28px;}
     .fig-canvas{padding:16px 14px 12px;}
     figcaption{padding:0 16px 16px;}
+    .costs{font-size:12px;}
+    .costs th,.costs td{padding:7px 8px;}
   }
 </style>
 </head>
@@ -289,6 +299,7 @@
         <li><a href="#search"><span class="tn">02</span><span>Searching in the browser</span></a></li>
         <li><a href="#semantic"><span class="tn">03</span><span>Semantic &amp; hybrid search</span></a></li>
         <li><a href="#formats"><span class="tn">04</span><span>The file formats</span></a></li>
+        <li><a href="#economics"><span class="tn">05</span><span>The economics</span></a></li>
       </ol>
     </aside>
 
@@ -1364,6 +1375,66 @@
 </svg></div>
           <figcaption>The split set replaces nothing: each split is a vanilla <code>.rrs</code> (or <code>.rrt</code>) — one split is exactly today&rsquo;s monolith — and only the <b>manifest</b> (<code>.rrss</code>) is new, carrying the cross-split pruning metadata (rank tier, doc-ID range, byte size, and optional term-Bloom / facet-presence / tombstone summaries). The bandwidth win is <b>pruning</b>, not log-structuredness: because doc IDs are rank-ordered, a top-K query reads only the top tier and leaves the cold tail in S3. A <code>.rrhc</code> boot bundle inlines the manifest plus the top tier&rsquo;s split boots so N splits still boot in 1–2 round trips, and a small base&nbsp;+&nbsp;delta lifecycle absorbs freshly-added docs without a full rebuild. The demo publishes both a 389-split trigram set and a 243-split term set.</figcaption>
         </figure>
+      </section>
+
+      <!-- ====================== 05 ====================== -->
+      <section class="sect" id="economics">
+        <div class="sect-head">
+          <div class="sect-kicker"><span class="sect-num">05</span><span class="sect-tag">What it costs &mdash; honestly</span></div>
+          <h2 class="sect-title">The economics</h2>
+          <p class="sect-intro">
+            The unit of cost here is <b>bytes egressed per query</b>. Storage is nearly free &mdash; the entire 484M
+            index family on this page (trigram + term + vector + split set + records + sidecars, ~360&nbsp;GB) costs
+            about <b>$9/month</b> on S3 &mdash; and there is <b>no idle cost</b>: nothing runs when nobody searches.
+          </p>
+        </div>
+
+        <h3 class="sub">What one query moves</h3>
+        <p class="body">
+          What grows with the corpus is the <em>density of common postings</em> — a trigram like <code>ing</code>
+          appears in a constant fraction of documents, so its bitmap grows linearly with the corpus. Per-query bytes
+          by mode, at full scale and at a tenth of it:
+        </p>
+        <table class="costs">
+          <tr><th>per query (warm boot)</th><th>484M works</th><th>at 1/10th scale</th></tr>
+          <tr><td>term mode (<code>.rrt</code>)</td><td>~0.1&ndash;0.5 MB</td><td>~10&ndash;50 KB</td></tr>
+          <tr><td>trigram</td><td>~1&ndash;10 MB</td><td>~0.1&ndash;1 MB</td></tr>
+          <tr><td>semantic (8 IVFPQ cluster probes)</td><td>~8&ndash;10 MB</td><td>~1 MB</td></tr>
+          <tr><td>records page (25 cards)</td><td>~25&ndash;50 KB</td><td>same</td></tr>
+          <tr><td>worst case (broad facet filter, exact count)</td><td>~90 MB+</td><td>~9 MB</td></tr>
+        </table>
+        <p class="body">
+          That last column is the point: at a tenth of this corpus, an average query is ~0.4&nbsp;MB &mdash; under
+          200&nbsp;ms of transfer on a modest mobile connection &mdash; and <em>millions</em> of monthly queries fit
+          inside a CDN free tier. The architecture&rsquo;s sweet spot is <b>large corpus &times; modest traffic</b>,
+          and it widens fast as the corpus shrinks.
+        </p>
+
+        <h3 class="sub">The monthly bill, vs a backend</h3>
+        <p class="body">
+          Behind CloudFront (1&nbsp;TB + 10M requests/month free), assuming a ~4&nbsp;MB / ~12 range-GET average query
+          at full 484M scale. The Lambda column is this demo&rsquo;s own server-side toggle: the <em>same intersection
+          over the same files</em>, run in-region where S3 bandwidth is free, returning only result IDs.
+        </p>
+        <table class="costs">
+          <tr><th>queries / month</th><th>client-side (this page)</th><th>+ search Lambda</th><th>always-on server</th><th>managed search</th></tr>
+          <tr><td>10k &ndash; 100k</td><td class="win"><b>~$9</b> (inside free tier)</td><td>~$9</td><td>~$100&ndash;150 flat</td><td>$700+</td></tr>
+          <tr><td>1M</td><td>~$265</td><td class="win"><b>~$20</b></td><td>~$100&ndash;150</td><td>$700+</td></tr>
+          <tr><td>10M</td><td>~$3,400</td><td class="win"><b>~$110&ndash;150</b></td><td>~$150+</td><td>$1,500+</td></tr>
+        </table>
+
+        <div class="rule">
+          <span class="rk">Trade</span>
+          <span class="rt">Below a few hundred thousand queries a month, nothing is cheaper or lower-ops than static files — no server to patch or scale, and in the in-browser semantic mode the query text <b>never leaves the browser</b>. Past that, egress costs 1&ndash;2 orders of magnitude more per query than the in-region Lambda. The two compose: the same artifacts serve both.</span>
+        </div>
+
+        <p class="body">
+          So the production shape is client-side by default with the Lambda as an <b>escape valve</b> for the
+          expensive tail (very common terms, broad facet filters, exact counts). And because the dictionary records
+          every posting&rsquo;s byte size, the client can estimate a query&rsquo;s cost <em>before fetching anything</em>
+          and route the expensive ones automatically &mdash; the &ldquo;server-side search&rdquo; toggle above is that
+          escape valve operated by hand.
+        </p>
       </section>
     </main>
   </div>

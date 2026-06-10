@@ -24,9 +24,10 @@ writer — both emit the same files the Rust/WASM (or Go) reader reads.
 
 ## Live demos
 
-- **OpenAlex** — [openalex.evefreeman.com](https://openalex.evefreeman.com): ~47.8M
+- **OpenAlex** — [openalex.evefreeman.com](https://openalex.evefreeman.com): **484M**
   scholarly works, citation-ranked, faceted (year/type/open-access/language/topic),
-  searched entirely client-side. (Reproducible — see [`examples/openalex/`](examples/openalex).)
+  with trigram, whole-word (term), semantic (IVFPQ), and hybrid search — all
+  client-side. (Reproducible — see [`examples/openalex/`](examples/openalex).)
 
 ## How it fits together
 
@@ -186,13 +187,63 @@ Boot and per-query cost stay ~constant as the corpus grows; size lives in the
 postings (≈0.4 bytes per trigram-document incidence — roaring is near-optimal),
 so the lever for a smaller index is indexing less text per doc, not the encoding.
 
-The Rust builder reaches the **47.8M-work** OpenAlex corpus that backs the live
-demo: an 11.5 GB index of 30.3M unique trigrams, built in ~57 min at ~52 GB peak
-RAM with no swap — and **sublinearly** (≈half the naive linear projection), as the
-trigram vocabulary saturates and roaring absorbs the added postings. With facets
-and records attached, the demo's full boot is ~3 MB: the index sparse, the facet
-metadata + top-category heads (the facet *tails* stay range-fetched, not loaded
-up front), and the record-store header.
+The Rust builder reaches the **47.8M-work** OpenAlex corpus that backed the
+earlier demo — an 11.5 GB index of 30.3M unique trigrams, built in ~57 min at
+~52 GB peak RAM with no swap — and **sublinearly** (≈half the naive linear
+projection), as the trigram vocabulary saturates and roaring absorbs the added
+postings. The current **484M**-work demo index is 113 GB over 114.6M trigrams,
+built by the chunked/phased builder. With facets and records attached, a full
+boot is a few MB: the index sparse, the facet metadata + top-category heads
+(the facet *tails* stay range-fetched, not loaded up front), and the
+record-store header.
+
+## Costs — client-side search vs a backend
+
+The unit of cost in this architecture is **bytes egressed per query**. Storage
+is nearly free (the entire 484M index family — trigram + term + vector + split
+set + records + sidecars, ~360 GB — is ~$9/month on S3), and there is **no idle
+cost**: nothing runs when nobody searches. What grows with the corpus is the
+density of common postings, so per-query bytes scale roughly linearly with doc
+count for common terms:
+
+| per query (warm boot) | OpenAlex 484M | at 1/10th scale |
+|---|---|---|
+| term mode (`.rrt`) | ~0.1–0.5 MB | ~10–50 KB |
+| trigram | ~1–10 MB | ~0.1–1 MB |
+| semantic (8 IVFPQ cluster probes) | ~8–10 MB | ~1 MB |
+| records page (25 cards) | ~25–50 KB | same |
+| worst case (broad facet filter / exact count) | ~90 MB+ | ~9 MB |
+
+Behind a CDN with a meaningful free tier (CloudFront: 1 TB + 10M requests/mo),
+the monthly bill at a ~4 MB / ~12 range-GET average query:
+
+| queries/mo | client-side (this) | + in-region search Lambda | always-on box | managed search |
+|---|---|---|---|---|
+| 10k–100k | **~$9** (inside free tier) | ~$9 | ~$100–150 flat | $700+ |
+| 1M | ~$265 | **~$20** | ~$100–150 | $700+ |
+| 10M | ~$3,400 | **~$110–150** | ~$150+ | $1,500+ |
+
+Three honest conclusions fall out:
+
+- **Below a few hundred thousand queries a month, nothing is cheaper — or
+  lower-ops.** No server to patch, scale, or babysit; the artifacts are
+  immutable and the demo still works untouched years later. In the in-browser
+  semantic mode the query text never leaves the browser at all.
+- **At traffic scale the economics invert.** Client-side egress costs 1–2
+  orders of magnitude more per query than an in-region Lambda running the
+  *same intersection over the same files*
+  ([`examples/search-lambda`](examples/search-lambda), the demo's server-side
+  toggle): S3→Lambda bandwidth is free, so only result IDs cross the wire.
+- **At 1/10th the corpus both pressures vanish**: ~0.4 MB average queries fit
+  millions of queries/month inside the CDN free tier, and mobile transfer time
+  drops under ~200 ms. The sweet spot is *large corpus × modest traffic*, and
+  it widens fast as the corpus shrinks.
+
+The two paths compose — the same artifacts serve both — so the production shape
+is client-side by default with the Lambda as an **escape valve** for the
+expensive tail. The dictionary records every posting's byte size, so a client
+can estimate a query's cost *before fetching anything* and route the expensive
+ones automatically.
 
 ## Tried and shelved
 
