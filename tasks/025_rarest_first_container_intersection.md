@@ -1,6 +1,19 @@
 # 025 — Rarest-first intersection with container probing
 
-**Status:** pending
+**Status:** pending — **RE-SCOPED 2026-06-10**: the v3 reader already implements most of
+this. `posting.rs::tail_intersect_and` seeds from the smallest tail posting and probes the
+larger ones at container granularity (smallest-first, span-coalesced), and head reads are
+bounded eager prefixes (16 buckets/term), not whole postings. What remains:
+
+1. **Measure** the live per-query bytes for dense queries (perf bar / `live_bench`) to see
+   how far the current path already is from the naive whole-posting cost — the task's
+   original ≥5× target may already be met.
+2. Audit the **cursor** path (`search_cursor*` / `TailScan`) for the same property — the
+   one-shot `search` uses `tail_intersect_and`, but paged tail loads may differ.
+3. The eager prefixes are still fetched for every term including the densest (~128 KB/term
+   worst case — modest); skipping the densest term's prefix when the others' intersection
+   is already tiny is the only remaining fetch to shave.
+4. Fuzzy (max_missing > 0) phase as originally scoped.
 
 The principled version of the shelved "candidates" experiment (see README §Tried and
 shelved): cut a dense query's egress by never fetching the common trigrams' postings whole.
