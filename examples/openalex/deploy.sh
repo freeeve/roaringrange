@@ -9,6 +9,8 @@
 #   ./deploy.sh --splits DIR     ALSO upload a split set (.rrss + per-split .rrs/.rrf) from DIR
 #   ./deploy.sh --splits-prefix P  S3 prefix for --splits (default openalex-trigram-split,
 #                                  what index.html's `split` config reads)
+#   ./deploy.sh --rrhc FILE      ALSO upload the catalog boot bundle, content-hashed +
+#                                immutable, and rewrite the HTML to reference it
 #   BUCKET=… DISTRIBUTION=… ./deploy.sh   override the defaults below
 #
 # The wasm reader (roaringrange.js + roaringrange_bg.wasm) is a build artifact, not
@@ -36,6 +38,7 @@ WEB="$HERE/web"
 DATA_DIR=""
 SPLITS_DIR=""
 SPLITS_PREFIX="openalex-trigram-split"
+RRHC_FILE=""
 NO_BUILD=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,7 +46,8 @@ while [[ $# -gt 0 ]]; do
     --data) DATA_DIR="${2:?--data needs a directory}"; shift 2 ;;
     --splits) SPLITS_DIR="${2:?--splits needs a directory}"; shift 2 ;;
     --splits-prefix) SPLITS_PREFIX="${2:?--splits-prefix needs a prefix}"; shift 2 ;;
-    -h|--help) sed -n '3,14p' "$0"; exit 0 ;;
+    --rrhc) RRHC_FILE="${2:?--rrhc needs a file}"; shift 2 ;;
+    -h|--help) sed -n '3,16p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -85,13 +89,28 @@ aws s3 cp "$WEB/roaringrange.js" "s3://$BUCKET/roaringrange.$ASSET_HASH.js" \
 aws s3 cp "$WEB/roaringrange_bg.wasm" "s3://$BUCKET/roaringrange.${ASSET_HASH}_bg.wasm" \
   --content-type "application/wasm" --cache-control "$ASSETCACHE"
 
-# Rewrite each HTML page to reference the hashed reader, then upload it no-cache so
-# the browser always picks up the current build (and its matching reader).
+# Catalog boot bundle: uploaded under a content-hashed immutable name; the HTML
+# rewrite below points the demo at it. A rebuilt bundle gets a fresh URL, so a
+# stale cached bundle can never pair with freshly rebuilt artifacts — and warm
+# visits boot from the browser cache with zero network.
+RRHC_NAME=""
+if [[ -n "$RRHC_FILE" ]]; then
+  RRHC_HASH="$(shasum -a 256 "$RRHC_FILE" | cut -c1-10)"
+  RRHC_NAME="openalex-full.$RRHC_HASH.rrhc"
+  echo "==> catalog boot bundle -> s3://$BUCKET/$RRHC_NAME"
+  aws s3 cp "$RRHC_FILE" "s3://$BUCKET/$RRHC_NAME" \
+    --content-type "application/octet-stream" --cache-control "$ASSETCACHE"
+fi
+
+# Rewrite each HTML page to reference the hashed reader (and bundle), then upload
+# it no-cache so the browser always picks up the current build (and its matching
+# reader).
 for h in index.html how-it-works.html; do
   [[ -f "$WEB/$h" ]] || continue
   tmp_html="$(mktemp)"
   sed -e "s|\./roaringrange\.js|./roaringrange.$ASSET_HASH.js|g" \
       -e "s|roaringrange_bg\.wasm|roaringrange.${ASSET_HASH}_bg.wasm|g" \
+      ${RRHC_NAME:+-e "s|\"openalex-full\.rrhc\"|\"$RRHC_NAME\"|g"} \
       "$WEB/$h" > "$tmp_html"
   aws s3 cp "$tmp_html" "s3://$BUCKET/$h" \
     --content-type "text/html; charset=utf-8" --cache-control "$HTMLCACHE"

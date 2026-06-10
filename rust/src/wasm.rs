@@ -375,6 +375,20 @@ impl RrsIndex {
         })
     }
 
+    /// Boots from a **resident** boot region (header + sparse index, an `RRHC`
+    /// bundle member) — zero fetches; per-query dict/posting reads still go to
+    /// `url`. Facets attach via [`openFacets`](Self::open_facets) or
+    /// [`openFacetsFromBoot`](Self::open_facets_from_boot).
+    #[wasm_bindgen(js_name = fromBoot)]
+    pub fn from_boot(boot: Vec<u8>, url: String) -> Result<RrsIndex, JsError> {
+        let inner = Index::from_boot(&boot, WasmFetch::new(url))
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrsIndex {
+            inner,
+            facets: None,
+        })
+    }
+
     /// Boots the optional facet sidecar at `url` and attaches it to this index,
     /// enabling [`RrsIndex::facets_json`] and filtered search.
     #[wasm_bindgen(js_name = openFacets)]
@@ -383,6 +397,34 @@ impl RrsIndex {
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         self.facets = Some(facets);
+        Ok(())
+    }
+
+    /// Like [`openFacets`](Self::open_facets) but booting from a **resident**
+    /// meta region (an `RRHC` bundle member) — zero fetches: full-corpus counts
+    /// and filtering work immediately. Call
+    /// [`loadFacetHeads`](Self::load_facet_heads) (off the boot critical path)
+    /// before search-filtered counts report non-zero.
+    #[wasm_bindgen(js_name = openFacetsFromBoot)]
+    pub fn open_facets_from_boot(&mut self, meta: Vec<u8>, url: String) -> Result<(), JsError> {
+        let facets = crate::facet::FacetMeta::parse(meta)
+            .map_err(|e| JsError::new(&e.to_string()))?
+            .attach(WasmFetch::new(url));
+        self.facets = Some(facets);
+        Ok(())
+    }
+
+    /// Loads the facet category heads that search-filtered counts intersect
+    /// against — on a large sidecar a wave of hundreds of scattered small reads,
+    /// which is why a bundle boot defers it here instead of blocking first
+    /// paint. A no-op without an open sidecar.
+    #[wasm_bindgen(js_name = loadFacetHeads)]
+    pub async fn load_facet_heads(&mut self) -> Result<(), JsError> {
+        if let Some(f) = self.facets.as_mut() {
+            f.load_heads()
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+        }
         Ok(())
     }
 
@@ -698,6 +740,23 @@ impl RrsRecords {
             RecordStore::open_with_dict(WasmFetch::new(idx_url), WasmFetch::new(bin_url), dict)
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrsRecords { inner })
+    }
+
+    /// Boots from a **resident** copy of the 16-byte `RRSR` header (an `RRHC`
+    /// bundle member) plus the dictionary bytes — zero fetches; per-record reads
+    /// still go to `idx_url`/`bin_url`.
+    #[wasm_bindgen(js_name = fromBootWithDict)]
+    pub fn from_boot_with_dict(
+        header: Vec<u8>,
+        dict: Vec<u8>,
+        idx_url: String,
+        bin_url: String,
+    ) -> Result<RrsRecords, JsError> {
+        let inner =
+            RecordStore::from_boot(&header, WasmFetch::new(idx_url), WasmFetch::new(bin_url))
+                .map_err(|e| JsError::new(&e.to_string()))?
+                .with_dict(dict);
         Ok(RrsRecords { inner })
     }
 
@@ -1021,6 +1080,15 @@ impl RrsLookup {
     pub async fn open(url: String) -> Result<RrsLookup, JsError> {
         let inner = Lookup::open(WasmFetch::new(url))
             .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrsLookup { inner })
+    }
+
+    /// Boots from a **resident** copy of the 16-byte header (an `RRHC` bundle
+    /// member) — zero fetches; per-query probes still go to `url`.
+    #[wasm_bindgen(js_name = fromBoot)]
+    pub fn from_boot(header: Vec<u8>, url: String) -> Result<RrsLookup, JsError> {
+        let inner = Lookup::from_boot(&header, WasmFetch::new(url))
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(RrsLookup { inner })
     }
@@ -1605,6 +1673,37 @@ fn field_counts_to_js(fields: &[crate::splitset::FieldCounts]) -> JsValue {
         out.set(fi as u32, obj.into());
     }
     out.into()
+}
+
+/// A resident `RRHC` boot bundle exposed to JavaScript: **one GET** fetches every
+/// member's boot region (index sparse, facet meta, record header, dict, lookup
+/// header); [`inlined`](Self::inlined) hands each reader its bytes for the
+/// `fromBoot` constructors, so a whole catalog boots in a single round trip
+/// instead of one cold open per member. Content-hash the URL (immutable) and warm
+/// visits boot from the browser cache with zero network.
+#[cfg(feature = "hotcache")]
+#[wasm_bindgen]
+pub struct RrhcBundle {
+    inner: crate::hotcache::Hotcache,
+}
+
+#[cfg(feature = "hotcache")]
+#[wasm_bindgen]
+impl RrhcBundle {
+    /// Fetches and parses the bundle at `url`. Returns a `Promise<RrhcBundle>`.
+    pub async fn open(url: String) -> Result<RrhcBundle, JsError> {
+        let inner = crate::hotcache::Hotcache::open(WasmFetch::new(url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrhcBundle { inner })
+    }
+
+    /// The inlined boot bytes for the member whose data-file name is `name` (a
+    /// `Uint8Array`), or `undefined` when the bundle carries it by range
+    /// reference only — the caller falls back to that member's cold open.
+    pub fn inlined(&self, name: &str) -> Option<Vec<u8>> {
+        self.inner.inlined_by_name(name).map(<[u8]>::to_vec)
+    }
 }
 
 /// A range-fetchable `RRSS` split set exposed to JavaScript. Boots the manifest in two ranged

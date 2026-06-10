@@ -443,3 +443,23 @@ own GET; the bundle serves only the split boots), full vertical slice.
 - **STILL DEFERRED**: `Catalog::open_hotcache` + the other members' `from_boot` (the OpenAlex
   6-cold-open demo — the bigger, more visible application), true 1-RT (inline the manifest +
   `SplitSet::from_bytes`), and Tier-2 `.rrsplit`.
+
+### 2026-06-10 — CATALOG BOOT SHIPPED (the deferred step 2): 4–5 cold opens → one GET
+- **`from_boot` constructors landed across the family**: `FacetMeta::parse` + `attach` +
+  `FacetIndex::load_heads` (meta parses fetchless; the head wave is a separate call),
+  `RecordStore::from_boot`, `Lookup::from_boot` (`Index::from_boot` already existed);
+  `facet::rrsf_boot_len` computes the RRSF boot extent for builders.
+- **`build_catalog_rrhc` example** slices + inlines all five members (rrs sparse 1.8 MB,
+  rrf meta 2.96 MB, rrsr header, dict 115 KB, rril header → 4.64 MB bundle); accepts
+  prefix files (ranged curl of deployed objects) so non-local artifacts work.
+- **wasm**: `RrhcBundle.open/inlined`, `RrsIndex.fromBoot/openFacetsFromBoot/loadFacetHeads`,
+  `RrsRecords.fromBootWithDict`, `RrsLookup.fromBoot`. Demo boots bundle-first with
+  per-member fallback; `deploy.sh --rrhc FILE` uploads it content-hashed + immutable and
+  rewrites the HTML (the §2.2 warm-visit zero-network property).
+- **Found en route**: the facet head load was the hidden boot hog since the 484M migration
+  — ~400 scattered small reads (~19.6 s in a browser; lazy top-N heads sort by count, not
+  offset, so coalescing cannot merge them). It now streams in the BACKGROUND after first
+  paint; search-filtered counts read full-corpus until it lands (`facetHeadsReady` gate).
+- **Measured live (headless Chrome, cold)**: startup 8 MB · 20,276 ms → **5 MB · 352 ms**;
+  first paint 26 s → **4 s**; split-toggle reveal 25 s → **4 s**.
+- Tier 2 (`.rrsplit` single-object concatenation) remains the optional endgame.

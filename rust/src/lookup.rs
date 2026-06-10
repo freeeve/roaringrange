@@ -61,16 +61,26 @@ impl<F: RangeFetch> Lookup<F> {
     /// Boots the index: reads and validates the 16-byte `RRIL` header.
     pub async fn open(f: F) -> Result<Self, IndexError> {
         let header = f.read(0, HEADER_SIZE).await?;
+        Self::from_boot(&header, f)
+    }
+
+    /// Boots from a **resident** copy of the 16-byte header instead of fetching
+    /// it — the boot-bundle path (`RRHC`). Equivalent to [`open`](Self::open)
+    /// with no read; per-query probes still go through `f`.
+    pub fn from_boot(header: &[u8], f: F) -> Result<Self, IndexError> {
+        if header.len() < HEADER_SIZE {
+            return Err(IndexError::Malformed("short RRIL header"));
+        }
         if &header[0..4] != MAGIC {
             let mut m = [0u8; 4];
             m.copy_from_slice(&header[0..4]);
             return Err(IndexError::BadMagic(m));
         }
-        let version = read_u16(&header, 4);
+        let version = read_u16(header, 4);
         if version != 1 {
             return Err(IndexError::BadVersion(version));
         }
-        let count = read_u32(&header, 8);
+        let count = read_u32(header, 8);
         Ok(Self { f, count })
     }
 

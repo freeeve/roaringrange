@@ -87,6 +87,33 @@ pub struct FacetIndex<F: RangeFetch> {
     pub fields: Vec<Field>,
 }
 
+/// A parsed, fetchless `RRSF` meta region — the bundle-boot intermediate:
+/// [`FacetIndex::from_boot`] produces it with zero fetches, and
+/// [`attach`](Self::attach) binds the per-query fetcher.
+pub struct FacetMeta {
+    fields: Vec<Field>,
+}
+
+impl FacetMeta {
+    /// Parses a **resident** meta region (the `[0, rrsf_boot_len)` bytes: header +
+    /// field/category tables + string blob, e.g. an `RRHC` bundle member) with
+    /// zero fetches — the boot-bundle path. Full-corpus counts and filtering work
+    /// from this alone; call [`FacetIndex::load_heads`] (typically off the boot
+    /// critical path) before search-filtered counts report non-zero.
+    pub fn parse(meta: Vec<u8>) -> Result<FacetMeta, IndexError> {
+        from_meta(meta)
+    }
+
+    /// Binds the per-query fetcher, producing a working [`FacetIndex`] (heads
+    /// still empty until [`FacetIndex::load_heads`]).
+    pub fn attach<F: RangeFetch>(self, fetch: F) -> FacetIndex<F> {
+        FacetIndex {
+            fetch,
+            fields: self.fields,
+        }
+    }
+}
+
 impl<F: RangeFetch> FacetIndex<F> {
     /// Boots the facet index: reads the header + meta region (field/category
     /// tables + string blob), then loads the head postings that filtered counts
@@ -108,99 +135,124 @@ impl<F: RangeFetch> FacetIndex<F> {
         top_n: usize,
     ) -> Result<Self, IndexError> {
         let header = fetch.read(0, HEADER_SIZE).await?;
-        if &header[0..4] != MAGIC {
-            let mut m = [0u8; 4];
-            m.copy_from_slice(&header[0..4]);
-            return Err(IndexError::BadMagic(m));
-        }
-        let version = read_u16(&header, 4);
-        if version != 1 {
-            return Err(IndexError::BadVersion(version));
-        }
-        let fields_n = read_u32(&header, 8) as usize;
-        let cats_n = read_u32(&header, 12) as usize;
-        let str_bytes = read_u32(&header, 16) as usize;
-
-        // Lay out the meta region with checked arithmetic: on wasm32 (usize =
-        // 32-bit) attacker-controlled counts could otherwise overflow and wrap to
-        // a short read, then drive out-of-bounds indexing below.
-        let field_tab = HEADER_SIZE;
-        let cat_tab = fields_n
-            .checked_mul(FIELD_ENTRY)
-            .and_then(|x| x.checked_add(field_tab))
-            .ok_or(IndexError::Malformed("facet field table size overflow"))?;
-        let str_blob = cats_n
-            .checked_mul(CAT_ENTRY)
-            .and_then(|x| x.checked_add(cat_tab))
-            .ok_or(IndexError::Malformed("facet category table size overflow"))?;
-        let meta_len = str_blob
-            .checked_add(str_bytes)
-            .ok_or(IndexError::Malformed("facet meta size overflow"))?;
+        let meta_len = rrsf_boot_len(&header)?;
         let buf = fetch.read(0, meta_len).await?;
-        if buf.len() < meta_len {
-            return Err(IndexError::Malformed("facet meta region truncated"));
-        }
+        let mut fi = FacetMeta::parse(buf)?.attach(fetch);
+        fi.load_heads_tuned(eager_limit, top_n).await?;
+        Ok(fi)
+    }
+}
 
-        // Reads a display name from the string blob, rejecting an out-of-range
-        // (off, len) instead of panicking on the slice.
-        let read_name = |off: usize, len: usize| -> Result<String, IndexError> {
-            let end = off
-                .checked_add(len)
-                .filter(|&e| e <= str_bytes)
-                .ok_or(IndexError::Malformed("facet name out of string blob"))?;
-            Ok(String::from_utf8_lossy(&buf[str_blob + off..str_blob + end]).into_owned())
-        };
+/// Parses the resident meta region from `buf` (validating it from scratch — the
+/// bytes may come from a bundle rather than this file) into a fetchless
+/// [`FacetMeta`]; heads are empty until [`FacetIndex::load_heads`].
+fn from_meta(buf: Vec<u8>) -> Result<FacetMeta, IndexError> {
+    if buf.len() < HEADER_SIZE {
+        return Err(IndexError::Malformed("facet meta region truncated"));
+    }
+    let meta_len = rrsf_boot_len(&buf[..HEADER_SIZE])?;
+    if buf.len() < meta_len {
+        return Err(IndexError::Malformed("facet meta region truncated"));
+    }
+    let fields_n = read_u32(&buf, 8) as usize;
+    let cats_n = read_u32(&buf, 12) as usize;
+    let str_bytes = read_u32(&buf, 16) as usize;
+    let field_tab = HEADER_SIZE;
+    let cat_tab = field_tab + fields_n * FIELD_ENTRY; // checked in rrsf_boot_len
+    let str_blob = cat_tab + cats_n * CAT_ENTRY;
 
-        let mut cats: Vec<Category> = Vec::with_capacity(cats_n);
-        for i in 0..cats_n {
-            let b = cat_tab + i * CAT_ENTRY;
-            let head_off = read_u64(&buf, b + 8);
-            let head_size = read_u32(&buf, b + 16);
-            let tail_size = read_u32(&buf, b + 20);
-            let count = read_u32(&buf, b + 24);
-            let name_off = read_u32(&buf, b + 28) as usize;
-            let name_len = read_u16(&buf, b + 32) as usize;
-            cats.push(Category {
-                name: read_name(name_off, name_len)?,
-                count,
-                range: CatRange {
-                    head_off,
-                    head_size,
-                    tail_off: head_off.saturating_add(head_size as u64),
-                    tail_size,
-                },
-                head: RoaringBitmap::new(),
-            });
-        }
+    // Reads a display name from the string blob, rejecting an out-of-range
+    // (off, len) instead of panicking on the slice.
+    let read_name = |off: usize, len: usize| -> Result<String, IndexError> {
+        let end = off
+            .checked_add(len)
+            .filter(|&e| e <= str_bytes)
+            .ok_or(IndexError::Malformed("facet name out of string blob"))?;
+        Ok(String::from_utf8_lossy(&buf[str_blob + off..str_blob + end]).into_owned())
+    };
 
-        // Parse the field table up front; its per-field category ranges drive the
-        // top-N head selection when a large sidecar is loaded.
-        let mut field_spans: Vec<(String, usize, usize)> = Vec::with_capacity(fields_n);
-        for i in 0..fields_n {
-            let b = field_tab + i * FIELD_ENTRY;
-            let name_off = read_u32(&buf, b) as usize;
-            let name_len = read_u16(&buf, b + 4) as usize;
-            let cat_start = read_u32(&buf, b + 8) as usize;
-            let cat_count = read_u32(&buf, b + 12) as usize;
-            let cat_end = cat_start
-                .checked_add(cat_count)
-                .filter(|&e| e <= cats_n)
-                .ok_or(IndexError::Malformed(
-                    "facet field category range out of bounds",
-                ))?;
-            field_spans.push((read_name(name_off, name_len)?, cat_start, cat_end));
-        }
+    let mut cats: Vec<Category> = Vec::with_capacity(cats_n);
+    for i in 0..cats_n {
+        let b = cat_tab + i * CAT_ENTRY;
+        let head_off = read_u64(&buf, b + 8);
+        let head_size = read_u32(&buf, b + 16);
+        let tail_size = read_u32(&buf, b + 20);
+        let count = read_u32(&buf, b + 24);
+        let name_off = read_u32(&buf, b + 28) as usize;
+        let name_len = read_u16(&buf, b + 32) as usize;
+        cats.push(Category {
+            name: read_name(name_off, name_len)?,
+            count,
+            range: CatRange {
+                head_off,
+                head_size,
+                tail_off: head_off.saturating_add(head_size as u64),
+                tail_size,
+            },
+            head: RoaringBitmap::new(),
+        });
+    }
 
-        // Load the head postings filtered counts intersect against. Heads are a
-        // small fraction of the file; the tails dominate and are fetched later
-        // only for filtered tail pagination. A small sidecar's whole region is
-        // read once; a large one would pull hundreds of MB of unused tails that
-        // way, so fetch only the top-N heads per field instead. Offsets are
-        // untrusted, so derive every slice bound with checked math.
+    // Parse the field table up front; its per-field category ranges drive the
+    // top-N head selection when a large sidecar is loaded.
+    let mut field_spans: Vec<(String, usize, usize)> = Vec::with_capacity(fields_n);
+    for i in 0..fields_n {
+        let b = field_tab + i * FIELD_ENTRY;
+        let name_off = read_u32(&buf, b) as usize;
+        let name_len = read_u16(&buf, b + 4) as usize;
+        let cat_start = read_u32(&buf, b + 8) as usize;
+        let cat_count = read_u32(&buf, b + 12) as usize;
+        let cat_end = cat_start
+            .checked_add(cat_count)
+            .filter(|&e| e <= cats_n)
+            .ok_or(IndexError::Malformed(
+                "facet field category range out of bounds",
+            ))?;
+        field_spans.push((read_name(name_off, name_len)?, cat_start, cat_end));
+    }
+
+    let fields = field_spans
+        .into_iter()
+        .map(|(name, start, end)| Field {
+            name,
+            categories: cats[start..end].to_vec(),
+        })
+        .collect();
+
+    Ok(FacetMeta { fields })
+}
+
+impl<F: RangeFetch> FacetIndex<F> {
+    /// Loads the head postings that **search-filtered** counts intersect against
+    /// ([`counts`](Self::counts)); until it runs those counts read as zero, while
+    /// full-corpus counts and filtering work from the meta alone. A small
+    /// sidecar's whole postings region is read once; a large one fetches only the
+    /// `top_n` highest-count heads per field — on the 484M sidecar that is
+    /// hundreds of scattered small reads, which is why a bundle boot runs this
+    /// off the critical path. Offsets are untrusted, so every slice bound uses
+    /// checked math.
+    pub async fn load_heads(&mut self) -> Result<(), IndexError> {
+        self.load_heads_tuned(EAGER_REGION_LIMIT, LAZY_TOP_N).await
+    }
+
+    /// [`load_heads`](Self::load_heads) with explicit tuning (see
+    /// [`open_tuned`](Self::open_tuned)).
+    pub(crate) async fn load_heads_tuned(
+        &mut self,
+        eager_limit: usize,
+        top_n: usize,
+    ) -> Result<(), IndexError> {
+        let first = self.fields.iter().flat_map(|f| f.categories.first()).next();
+        let last = self
+            .fields
+            .iter()
+            .rev()
+            .flat_map(|f| f.categories.last())
+            .next();
         // The region length stays u64 until the eager branch: casting first would
         // truncate a >4 GiB region on wasm32 and route it down the eager path with
         // a wrapped length — a valid oversized sidecar is simply "large" (lazy).
-        let region_len: u64 = match (cats.first(), cats.last()) {
+        let region_len: u64 = match (first, last) {
             (Some(first), Some(last)) => last
                 .range
                 .tail_off
@@ -212,53 +264,47 @@ impl<F: RangeFetch> FacetIndex<F> {
             _ => 0,
         };
         if region_len == 0 {
-            // Empty sidecar; nothing to load.
-        } else if region_len <= eager_limit as u64 {
-            let blob_start = cats[0].range.head_off;
-            let blob = fetch.read(blob_start, region_len as usize).await?;
-            for c in &mut cats {
-                let s = c
-                    .range
-                    .head_off
-                    .checked_sub(blob_start)
-                    .ok_or(IndexError::Malformed("facet head offset precedes region"))?
-                    as usize;
-                let e = s
-                    .checked_add(c.range.head_size as usize)
-                    .filter(|&e| e <= blob.len())
-                    .ok_or(IndexError::Malformed("facet head posting out of region"))?;
-                c.head = RoaringBitmap::deserialize_from(&blob[s..e])
-                    .map_err(|err| IndexError::Roaring(err.to_string()))?;
-            }
-        } else {
-            let mut reqs: Vec<(usize, u64, usize)> = Vec::new();
-            for (_, start, end) in &field_spans {
-                let mut idxs: Vec<usize> = (*start..*end).collect();
-                idxs.sort_by(|&a, &b| cats[b].count.cmp(&cats[a].count));
-                for &j in idxs.iter().take(top_n) {
-                    reqs.push((j, cats[j].range.head_off, cats[j].range.head_size as usize));
+            return Ok(()); // empty sidecar; nothing to load
+        }
+        if region_len <= eager_limit as u64 {
+            let blob_start = first.unwrap().range.head_off;
+            let blob = self.fetch.read(blob_start, region_len as usize).await?;
+            for f in &mut self.fields {
+                for c in &mut f.categories {
+                    let s = c
+                        .range
+                        .head_off
+                        .checked_sub(blob_start)
+                        .ok_or(IndexError::Malformed("facet head offset precedes region"))?
+                        as usize;
+                    let e = s
+                        .checked_add(c.range.head_size as usize)
+                        .filter(|&e| e <= blob.len())
+                        .ok_or(IndexError::Malformed("facet head posting out of region"))?;
+                    c.head = RoaringBitmap::deserialize_from(&blob[s..e])
+                        .map_err(|err| IndexError::Roaring(err.to_string()))?;
                 }
             }
-            // Coalesced: the top heads cluster near each field's region start,
-            // so the wave collapses to roughly one request per field.
-            let ranges: Vec<(u64, usize)> = reqs.iter().map(|&(_, off, len)| (off, len)).collect();
-            let datas =
-                crate::fetch::read_coalesced(&fetch, &ranges, crate::fetch::COALESCE_GAP).await?;
-            for (&(j, _, _), bytes) in reqs.iter().zip(datas) {
-                cats[j].head = RoaringBitmap::deserialize_from(&bytes[..])
-                    .map_err(|err| IndexError::Roaring(err.to_string()))?;
+            return Ok(());
+        }
+        // Lazy top-N: per field, the highest-count heads only.
+        let mut reqs: Vec<(usize, usize, u64, usize)> = Vec::new();
+        for (fi, f) in self.fields.iter().enumerate() {
+            let mut idxs: Vec<usize> = (0..f.categories.len()).collect();
+            idxs.sort_by(|&a, &b| f.categories[b].count.cmp(&f.categories[a].count));
+            for &ci in idxs.iter().take(top_n) {
+                let r = &f.categories[ci].range;
+                reqs.push((fi, ci, r.head_off, r.head_size as usize));
             }
         }
-
-        let fields = field_spans
-            .into_iter()
-            .map(|(name, start, end)| Field {
-                name,
-                categories: cats[start..end].to_vec(),
-            })
-            .collect();
-
-        Ok(FacetIndex { fetch, fields })
+        let ranges: Vec<(u64, usize)> = reqs.iter().map(|&(_, _, off, len)| (off, len)).collect();
+        let datas =
+            crate::fetch::read_coalesced(&self.fetch, &ranges, crate::fetch::COALESCE_GAP).await?;
+        for (&(fi, ci, _, _), bytes) in reqs.iter().zip(datas) {
+            self.fields[fi].categories[ci].head = RoaringBitmap::deserialize_from(&bytes[..])
+                .map_err(|err| IndexError::Roaring(err.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Resolves `(field, category)` selections into a [`ResolvedFilter`].
@@ -336,4 +382,38 @@ impl<F: RangeFetch> FacetIndex<F> {
             })
             .collect()
     }
+}
+
+/// The byte length of an `RRSF` sidecar's **boot region** — the resident meta
+/// region (`[0, metaLen)`: header + field table + category table + string blob)
+/// that [`FacetIndex::from_boot`] consumes. Validates the 24-byte header and
+/// computes the extent with checked arithmetic (attacker-controlled counts on
+/// wasm32 could otherwise wrap to a short read). A bundle builder calls this to
+/// slice the boot region without opening the sidecar.
+pub fn rrsf_boot_len(header: &[u8]) -> Result<usize, IndexError> {
+    if header.len() < HEADER_SIZE {
+        return Err(IndexError::Malformed("short RRSF header"));
+    }
+    if &header[0..4] != MAGIC {
+        let mut m = [0u8; 4];
+        m.copy_from_slice(&header[0..4]);
+        return Err(IndexError::BadMagic(m));
+    }
+    let version = read_u16(header, 4);
+    if version != 1 {
+        return Err(IndexError::BadVersion(version));
+    }
+    let fields_n = read_u32(header, 8) as usize;
+    let cats_n = read_u32(header, 12) as usize;
+    let str_bytes = read_u32(header, 16) as usize;
+    fields_n
+        .checked_mul(FIELD_ENTRY)
+        .and_then(|x| x.checked_add(HEADER_SIZE))
+        .and_then(|ft| {
+            cats_n
+                .checked_mul(CAT_ENTRY)
+                .and_then(|c| c.checked_add(ft))
+        })
+        .and_then(|sb| sb.checked_add(str_bytes))
+        .ok_or(IndexError::Malformed("facet meta size overflow"))
 }

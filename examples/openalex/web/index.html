@@ -758,7 +758,7 @@
     </main>
 
     <script type="module">
-      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex, RrssIndex, rangeCacheStats, reciprocalRankFusion } from "./roaringrange.js";
+      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex, RrssIndex, RrhcBundle, rangeCacheStats, reciprocalRankFusion } from "./roaringrange.js";
 
       /* -------- byte/request accounting via fetch interception (from webtest) -------- */
       const realFetch = self.fetch.bind(self);
@@ -831,6 +831,22 @@
       const SPLIT_REC_IDX_URL = SPLIT ? new URL(`${SPLIT.rec}.idx`, location.href).href : null;
       const SPLIT_REC_BIN_URL = SPLIT ? new URL(`${SPLIT.rec}.bin`, location.href).href : null;
       const PAGE = 25;
+      // Catalog boot bundle (RRHC): ONE content-hashed GET carrying every member's
+      // boot region (index sparse, facet meta, record header, zstd dict, lookup
+      // header) — the 4–5 sequential cold opens collapse to a single round trip,
+      // and a warm visit boots from the browser cache with zero network. The name
+      // is rewritten to its content-hashed form at deploy (like the reader
+      // assets); absent or failed → the per-member cold opens below.
+      const RRHC_URL = (DS === "full" || DS === "lite")
+        ? new URL("openalex-full.rrhc", location.href).href
+        : null;
+      let bundleBoot = false;   // the catalog booted from the bundle (perf-row label)
+      // Search-filtered facet counts need the category HEAD postings resident — on
+      // the 484M sidecar that's hundreds of scattered small reads, so a bundle boot
+      // streams them in the background after first paint. Until then filtered
+      // counts would read zero; the panel keeps full-corpus counts (from the meta,
+      // free) instead.
+      let facetHeadsReady = true;
       // Optional server-side search: the regional Lambda runs the same intersection
       // over in-region S3 reads and returns only this page's IDs + the exact total,
       // so the multi-MB postings never egress to the browser. Opt-in via the toggle.
@@ -1139,7 +1155,7 @@
           { key: "rest", title: "This page · paged into the tail" },
         ];
         const steps = [
-          { g: "startup", name: "Open index", desc: "index header + dictionary", get: () => perfModel.index },
+          { g: "startup", name: "Open index", desc: bundleBoot ? "catalog .rrhc — one GET, every boot region" : "index header + dictionary", get: () => perfModel.index },
           { g: "startup", name: "Open facets", desc: "facet sidecar", get: () => perfModel.facets },
           { g: "startup", name: "Open records", desc: "record store header", get: () => perfModel.recstore },
           { g: "startup", name: "Open lookup", desc: "DOI lookup index", get: () => perfModel.lookup },
@@ -1861,7 +1877,7 @@
         const r0 = reqs, b0 = bytes, t0 = performance.now();
         try {
           const fr = await facetSrc.filterIds(Uint32Array.from(ids), filters.map((k) => k.split("\t")));
-          applyFacetCounts(fr.facetCounts());
+          applyFacetCounts(facetHeadsReady ? fr.facetCounts() : null);
           return { ids: Array.from(fr.ids), ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 };
         } catch (_) {
           applyFacetCounts(null);
@@ -2102,12 +2118,16 @@
           }).catch(() => {});
         }
         // Time the in-wasm facet count over the result set (compute only — no fetch).
-        try {
-          const fcT0 = performance.now();
-          const fc = cur.facetCounts();
-          setPerf({ facetcount: { ms: performance.now() - fcT0, reqs: 0, bytes: 0 } });
-          applyFacetCounts(fc);
-        } catch (_) {}
+        // Skipped while the bundle boot's deferred head load is still streaming in —
+        // counts would read zero; the panel keeps full-corpus counts until it lands.
+        if (facetHeadsReady) {
+          try {
+            const fcT0 = performance.now();
+            const fc = cur.facetCounts();
+            setPerf({ facetcount: { ms: performance.now() - fcT0, reqs: 0, bytes: 0 } });
+            applyFacetCounts(fc);
+          } catch (_) {}
+        }
         setPerf({ tail: null, tailresults: null });   // new query: clear any prior tail-load stat
         await goPage(resetPaging ? 0 : offset, openMs, openReqs, openBytes);
         // Paging fetches the tail incrementally (page() loads only the buckets each
@@ -2127,15 +2147,33 @@
           mr = reqs; mb = bytes; mt = performance.now();
           return d;
         };
+        // Catalog boot bundle: ONE GET hands every member its resident boot bytes;
+        // each open below takes its bytes from the bundle (no per-member header
+        // fetch) and falls back to its cold open when the bundle (or its member)
+        // is absent. The bundle GET itself reports under the "Open index" row.
+        let bundle = null;
+        if (RRHC_URL) {
+          try { bundle = await RrhcBundle.open(RRHC_URL); bundleBoot = true; } catch (_) {}
+        }
+        const inl = (name) => { try { return bundle ? bundle.inlined(name) : null; } catch (_) { return null; } };
+
         // The text index is optional at boot: a dataset whose `.rrs` is still
         // uploading (the full index) boots with trigram disabled but semantic live.
-        try { idx = await RrsIndex.open(RRS_URL); }
+        try {
+          const b = inl(`${DATASETS[DS].idx}.rrs`);
+          idx = b ? RrsIndex.fromBoot(b, RRS_URL) : await RrsIndex.open(RRS_URL);
+        }
         catch (_) { idx = null; mr = reqs; mb = bytes; mt = performance.now(); }
         const index = idx ? seg() : null;
 
         let facets = null;
         if (idx) {
-          try { await idx.openFacets(RRF_URL); facetSrc = idx; facets = seg(); }
+          try {
+            const b = inl(`${DATASETS[DS].idx}.rrf`);
+            if (b) { idx.openFacetsFromBoot(b, RRF_URL); facetHeadsReady = false; }
+            else await idx.openFacets(RRF_URL);
+            facetSrc = idx; facets = seg();
+          }
           catch (_) { mr = reqs; mb = bytes; mt = performance.now(); /* facet sidecar optional */ }
         }
         // Text index absent (its large `.rrs` is still uploading) but the facet
@@ -2151,8 +2189,12 @@
         // uncompressed and never fetches a dict.
         try {
           if (DATASETS[DS].zstd) {
-            const dict = new Uint8Array(await (await fetch(DICT_URL)).arrayBuffer());
-            records = await RrsRecords.openWithDict(IDX_URL, BIN_URL, dict);
+            const dict = inl(`${DATASETS[DS].idx}.dict`)
+              || new Uint8Array(await (await fetch(DICT_URL)).arrayBuffer());
+            const hdr = inl(`${DATASETS[DS].rec}.idx`);
+            records = hdr
+              ? RrsRecords.fromBootWithDict(hdr, dict, IDX_URL, BIN_URL)
+              : await RrsRecords.openWithDict(IDX_URL, BIN_URL, dict);
           } else {
             records = await RrsRecords.open(IDX_URL, BIN_URL);
           }
@@ -2162,7 +2204,11 @@
         // DOI lookup sidecar — optional; absent until a build ships the .rril, in
         // which case the row is omitted and DOI queries fall back to text search.
         let lookupSeg = null;
-        try { lookup = await RrsLookup.open(LOOKUP_URL); lookupSeg = seg(); }
+        try {
+          const b = inl(`${DATASETS[DS].idx}.rril`);
+          lookup = b ? RrsLookup.fromBoot(b, LOOKUP_URL) : await RrsLookup.open(LOOKUP_URL);
+          lookupSeg = seg();
+        }
         catch (_) { lookup = null; mr = reqs; mb = bytes; mt = performance.now(); }
 
         setPerf({ index, facets, recstore, lookup: lookupSeg, summary: "ready" });
@@ -2193,6 +2239,14 @@
           await runSearch(true);
         }
         bootSplitSet();   // deferred (no-op if the URL path already booted it)
+        // Bundle boot deferred the facet-head wave; stream it in now, then refresh
+        // the on-screen query's filtered counts.
+        if (!facetHeadsReady && idx) {
+          idx.loadFacetHeads().then(() => {
+            facetHeadsReady = true;
+            if (cur) { try { applyFacetCounts(cur.facetCounts()); } catch (_) {} }
+          }).catch(() => {});
+        }
       }
 
       /* Split-set backend boot (optional): the RRSS manifest + its `.rrhc` boot bundle in one

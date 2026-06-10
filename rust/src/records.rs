@@ -55,16 +55,27 @@ impl<F: RangeFetch> RecordStore<F> {
     /// or [`RecordStore::with_dict`] when the store may hold compressed records.
     pub async fn open(idx: F, bin: F) -> Result<Self, IndexError> {
         let header = idx.read(0, HEADER_SIZE).await?;
+        Self::from_boot(&header, idx, bin)
+    }
+
+    /// Boots from a **resident** copy of the 16-byte index header instead of
+    /// fetching it — the boot-bundle path (`RRHC`): the caller already holds the
+    /// header bytes, so opening costs no read. Equivalent to [`open`](Self::open);
+    /// attach a dictionary with [`with_dict`](Self::with_dict) as usual.
+    pub fn from_boot(header: &[u8], idx: F, bin: F) -> Result<Self, IndexError> {
+        if header.len() < HEADER_SIZE {
+            return Err(IndexError::Malformed("short RRSR header"));
+        }
         if &header[0..4] != MAGIC {
             let mut m = [0u8; 4];
             m.copy_from_slice(&header[0..4]);
             return Err(IndexError::BadMagic(m));
         }
-        let version = read_u16(&header, 4);
+        let version = read_u16(header, 4);
         if version != 1 && version != 2 {
             return Err(IndexError::BadVersion(version));
         }
-        let count = read_u32(&header, 8);
+        let count = read_u32(header, 8);
         Ok(Self {
             idx,
             bin,

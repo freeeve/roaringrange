@@ -91,7 +91,7 @@ pub mod build;
 pub mod vector_build;
 
 pub use catalog::{Catalog, SearchPage};
-pub use facet::FacetIndex;
+pub use facet::{rrsf_boot_len, FacetIndex, FacetMeta};
 #[cfg(unix)]
 pub use fetch::FileFetch;
 pub use fetch::{FetchError, MemoryFetch, RangeFetch};
