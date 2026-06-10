@@ -8,8 +8,16 @@ import (
 const (
 	// MagicRecord is the RRSR record-store index magic.
 	MagicRecord = "RRSR"
-	// VersionRecord is the RRSR format version number.
+	// VersionRecord is the RRSR format version this package's writer emits
+	// (untagged raw records).
 	VersionRecord = 1
+	// versionRecordFramed is the version-2 store: every record is framed as
+	// [1-byte tag][payload] — tag 0 raw, tag 1 a zstd frame against a shared
+	// dictionary (the chunked-zstd full-corpus format the Rust builder writes).
+	versionRecordFramed = 2
+	// recordTagRaw / recordTagZstd are the version-2 frame tags.
+	recordTagRaw  = 0
+	recordTagZstd = 1
 	// recordHeaderSize is the fixed RRSR index header size in bytes:
 	// magic(4) + version(2) + reserved(2) + count(4) + reserved2(4).
 	recordHeaderSize = 16
@@ -91,13 +99,17 @@ func WriteRecords(bin, idx io.Writer, records [][]byte) error {
 // reader's access pattern — one ranged read of the 16-byte offset pair in the
 // index, one ranged read of the record slice in the blob. See RECORDS.md.
 type RecordStore struct {
-	idx   io.ReaderAt
-	bin   io.ReaderAt
-	count uint32
+	idx     io.ReaderAt
+	bin     io.ReaderAt
+	count   uint32
+	version uint16
 }
 
 // OpenRecordStore boots the store: reads the 16-byte index header and validates
 // magic and version. idx addresses the offset index, bin the record blob.
+// Accepts version 1 (untagged raw records) and version 2 ([tag][payload]-framed
+// records, matching the Rust reader); a version-2 zstd-compressed frame (tag 1)
+// errors at Get — this reference reader carries no zstd decoder.
 func OpenRecordStore(idx, bin io.ReaderAt) (*RecordStore, error) {
 	header := make([]byte, recordHeaderSize)
 	if _, err := idx.ReadAt(header, 0); err != nil {
@@ -106,13 +118,15 @@ func OpenRecordStore(idx, bin io.ReaderAt) (*RecordStore, error) {
 	if string(header[0:4]) != MagicRecord {
 		return nil, ErrMagic
 	}
-	if binary.LittleEndian.Uint16(header[4:6]) != VersionRecord {
-		return nil, ErrTruncated
+	version := binary.LittleEndian.Uint16(header[4:6])
+	if version != VersionRecord && version != versionRecordFramed {
+		return nil, ErrVersion
 	}
 	return &RecordStore{
-		idx:   idx,
-		bin:   bin,
-		count: binary.LittleEndian.Uint32(header[8:12]),
+		idx:     idx,
+		bin:     bin,
+		count:   binary.LittleEndian.Uint32(header[8:12]),
+		version: version,
 	}, nil
 }
 
@@ -142,5 +156,21 @@ func (s *RecordStore) Get(id uint32) (data []byte, ok bool, err error) {
 			return nil, false, err
 		}
 	}
-	return buf, true, nil
+	return s.decode(buf)
+}
+
+// decode unwraps a version-2 [tag][payload] frame; a version-1 store (and the
+// empty record) passes through raw, mirroring the Rust reader's decode.
+func (s *RecordStore) decode(raw []byte) (data []byte, ok bool, err error) {
+	if s.version == VersionRecord || len(raw) == 0 {
+		return raw, true, nil
+	}
+	switch raw[0] {
+	case recordTagRaw:
+		return raw[1:], true, nil
+	case recordTagZstd:
+		return nil, false, ErrCompressedRecord
+	default:
+		return nil, false, ErrTruncated
+	}
 }

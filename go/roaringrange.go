@@ -26,4 +26,8 @@ var (
 	ErrVersion = errors.New("unsupported RRS format version")
 	// ErrTruncated is returned when an index ends before its declared structure.
 	ErrTruncated = errors.New("truncated index")
+	// ErrCompressedRecord is returned when a version-2 record store holds a
+	// zstd-compressed frame (tag 1); this reference reader carries no zstd
+	// decoder — use the Rust reader for compressed stores.
+	ErrCompressedRecord = errors.New("compressed record (zstd frame) is not supported by the Go reference reader")
 )
