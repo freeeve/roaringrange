@@ -1604,7 +1604,16 @@
         setPerf({ results: { ms: recMs, reqs: recReqs, bytes: recBytes }, summary: `${rankedSummary} · ${recMs.toFixed(0)} ms` });
       }
 
-      const pageTo = (o) => (rankedIds ? goPageRanked(o) : serverMode ? goPageServer(o) : goPage(o));
+      // One page in flight at a time: the wasm cursor's page() takes &mut self, so a
+      // double-clicked Next during a slow tail fetch would reject the second call
+      // with wasm-bindgen's "recursive use of an object" instead of paging.
+      let pageBusy = false;
+      const pageTo = async (o) => {
+        if (pageBusy) return;
+        pageBusy = true;
+        try { await (rankedIds ? goPageRanked(o) : serverMode ? goPageServer(o) : goPage(o)); }
+        finally { pageBusy = false; }
+      };
 
       /* -------- explicit full scan: materialize the entire tail intersection so the
          exact total is known and every page is reachable. The expensive opt-in (the
@@ -1743,6 +1752,12 @@
         }
         const embedMs = performance.now() - e0;
         const index = useLambda ? rrviGemma : rrvi;
+        // The model2vec path compares dims at load (ensureVector); the Lambda's output
+        // dim is unknowable until it answers, so check the first real vector here and
+        // fail with the cause — a recipe/index mismatch — not a generic search error.
+        if (vec.length !== index.dim()) {
+          throw new Error(`embedder returned a ${vec.length}-d vector for a ${index.dim()}-d index — the embed recipe and the RRVI disagree`);
+        }
         const r0 = reqs, b0 = bytes, s0 = performance.now();
         const hits = await index.search(vec, k, SEM_NPROBE);
         return { ids: Array.from(hits.ids), embedMs, embedReqs, embedBytes, searchMs: performance.now() - s0, reqs: reqs - r0, bytes: bytes - b0 };
