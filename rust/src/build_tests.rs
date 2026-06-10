@@ -336,6 +336,61 @@ fn filter_cost_prices_categories_from_resident_meta() {
 }
 
 #[test]
+fn membership_bitmap_matches_full_bitmap_via_container_seeks() {
+    // Tail postings dense enough to exceed the subset reader's whole-read
+    // threshold: several buckets each holding a >4096-card container (an ~8 KB
+    // bitmap container apiece), so the offset-table seek path actually runs.
+    let dense = |buckets: &[u32]| {
+        let mut b = RoaringBitmap::new();
+        for &bk in buckets {
+            let base = bk * 65_536;
+            b.insert_range(base..base + 5_000);
+        }
+        b
+    };
+    let en = dense(&[0, 1, 3, 7]); // head bucket + three tail buckets
+    let es = dense(&[2, 3, 8]);
+    let art = dense(&[1, 2, 3, 7, 8]);
+    let facets = block_on(FacetIndex::open(MemoryFetch::new(build_rrsf(&[
+        ("language", vec![("en", en), ("es", es)]),
+        ("type", vec![("article", art)]),
+    ]))))
+    .unwrap();
+
+    // Candidates scattered across the head bucket, several tail buckets (both in
+    // and out of the categories' ranges), and a bucket no category touches.
+    let cand: RoaringBitmap = [5u32, 70_000, 196_700, 230_000, 459_000, 525_000, 9_000_000]
+        .into_iter()
+        .collect();
+
+    let pair = |f: &str, c: &str| (f.to_string(), c.to_string());
+    let cases = vec![
+        vec![pair("language", "en")],
+        vec![pair("language", "en"), pair("language", "es")],
+        vec![pair("language", "en"), pair("type", "article")],
+        vec![pair("type", "article")],
+        vec![pair("language", "nope")], // unresolvable -> matches nothing
+    ];
+    for pairs in cases {
+        let filter = facets.resolve(&pairs);
+        let full = block_on(filter.full_bitmap()).unwrap();
+        let expect: RoaringBitmap = cand.iter().filter(|id| full.contains(*id)).collect();
+        let got = block_on(filter.membership_bitmap(&cand)).unwrap();
+        assert_eq!(got, expect, "pairs {pairs:?}");
+    }
+    assert!(
+        block_on(
+            facets
+                .resolve(&[pair("language", "en")])
+                .membership_bitmap(&RoaringBitmap::new())
+        )
+        .unwrap()
+        .is_empty(),
+        "empty candidates short-circuit"
+    );
+}
+
+#[test]
 fn open_rejects_zero_stride_with_nonempty_dict() {
     // stride 0 with ngrams > 0 is corruption: sparse_count would silently be 0
     // and every query would return empty instead of surfacing an error.

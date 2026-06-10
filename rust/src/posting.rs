@@ -101,7 +101,7 @@ fn distinct_high_keys(bm: &RoaringBitmap) -> Vec<u16> {
 /// is in `keys`, returned as a RoaringBitmap. Falls back to a full read when the
 /// posting is small enough that seeking saves nothing, or when its layout is not
 /// the seekable NO_RUNCONTAINER-with-offsets variant.
-async fn read_posting_subset<F: RangeFetch>(
+pub(crate) async fn read_posting_subset<F: RangeFetch>(
     fetch: &F,
     off: u64,
     len: usize,

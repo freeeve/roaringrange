@@ -617,6 +617,79 @@ impl<F: RangeFetch> ResolvedFilter<F> {
         Ok(b)
     }
 
+    /// The filter restricted to `ids` — the candidates-aware sibling of
+    /// [`full_bitmap`](Self::full_bitmap). Where that fetches every selected
+    /// posting whole (a broad category over a large corpus runs to tens of MB),
+    /// this answers a *membership* question about a small ranked candidate list
+    /// by reading each tail posting at **container granularity** — only the
+    /// 64K-doc buckets the candidates occupy, via the same offset-table seek the
+    /// tail scan uses — plus the (single-bucket, small) head posting only when a
+    /// candidate sits below the head boundary. Small or non-seekable postings
+    /// fall back to whole reads inside the subset reader, so the result equals
+    /// `full_bitmap() ∩ ids` by construction.
+    pub async fn membership_bitmap(
+        &self,
+        ids: &RoaringBitmap,
+    ) -> Result<RoaringBitmap, IndexError> {
+        if ids.is_empty() {
+            return Ok(RoaringBitmap::new());
+        }
+        // Distinct container buckets the candidates span (ascending, since the
+        // bitmap iterates in order). Bucket 0 selects a category's head posting;
+        // the rest live in its tail.
+        let mut keys: Vec<u16> = Vec::new();
+        for id in ids.iter() {
+            let k = (id >> 16) as u16;
+            if keys.last() != Some(&k) {
+                keys.push(k);
+            }
+        }
+        let head_needed = keys.first() == Some(&0);
+        let tail_keys: Vec<u16> = keys.into_iter().filter(|&k| k != 0).collect();
+
+        // One concurrent wave across every selected category, like `combine`.
+        let fetch = &self.fetch;
+        let tail_keys = &tail_keys;
+        let mut futs = Vec::new();
+        for (fi, cats) in self.fields.iter().enumerate() {
+            for c in cats {
+                futs.push(async move {
+                    let mut bm = RoaringBitmap::new();
+                    if head_needed && c.head_size > 0 {
+                        bm |= deserialize(&fetch.read(c.head_off, c.head_size as usize).await?)?;
+                    }
+                    if !tail_keys.is_empty() && c.tail_size > 0 {
+                        bm |= crate::posting::read_posting_subset(
+                            fetch,
+                            c.tail_off,
+                            c.tail_size as usize,
+                            tail_keys,
+                        )
+                        .await?;
+                    }
+                    Ok::<(usize, RoaringBitmap), IndexError>((fi, bm))
+                });
+            }
+        }
+        let results = join_all(futs).await;
+        let mut per_field: Vec<RoaringBitmap> = (0..self.fields.len())
+            .map(|_| RoaringBitmap::new())
+            .collect();
+        for r in results {
+            let (fi, bm) = r?;
+            per_field[fi] |= bm;
+        }
+        per_field.sort_by_key(|b| b.len());
+        let mut acc = ids.clone();
+        for b in per_field {
+            acc &= b;
+            if acc.is_empty() {
+                break;
+            }
+        }
+        Ok(acc)
+    }
+
     /// Fetches every selected category posting in one concurrent wave, ORs the
     /// postings within each field, then ANDs the fields smallest-first.
     async fn combine(

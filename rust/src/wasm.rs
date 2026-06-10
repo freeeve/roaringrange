@@ -333,8 +333,13 @@ async fn filtered_ids(
             if filter.is_empty() {
                 ids
             } else {
+                // Membership, not the full filter bitmap: the candidates span a
+                // handful of 64K buckets, so each selected posting is read at
+                // container granularity — a broad category (tens of MB whole)
+                // costs KBs here.
+                let candidates: RoaringBitmap = ids.iter().copied().collect();
                 let mask = filter
-                    .full_bitmap()
+                    .membership_bitmap(&candidates)
                     .await
                     .map_err(|e| JsError::new(&e.to_string()))?;
                 ids.into_iter().filter(|id| mask.contains(*id)).collect()
