@@ -553,6 +553,15 @@ impl<F: RangeFetch> Index<F> {
     where
         F: Clone,
     {
+        // A provably-empty filter arm (a selected field none of whose categories
+        // resolved — e.g. a sidecar that doesn't carry the field at all) can
+        // never match: short-circuit before fetching ANY posting. Without this,
+        // an unsatisfiable filter still paid the full text intersection plus
+        // per-page tail scans to compute an empty set — measured at ~750 MB
+        // across a 389-split set filtering on a field its sidecars lack.
+        if filter.as_ref().is_some_and(|f| f.has_empty_arm()) {
+            return Ok(Cursor::empty(self.fetch.clone()));
+        }
         let keys = ngram_keys(query, self.gram_size as usize);
         let min_match = keys.len().saturating_sub(max_missing).max(1);
         // Resolve only the n-grams present in the dictionary; absent ones simply
@@ -633,6 +642,13 @@ impl<F: RangeFetch> ResolvedFilter<F> {
         self.fields.is_empty()
     }
 
+    /// Whether some selected field resolved to **no** categories — an arm that
+    /// matches nothing, making the whole AND provably empty without fetching a
+    /// single posting. Callers short-circuit on this.
+    pub fn has_empty_arm(&self) -> bool {
+        self.fields.iter().any(|cats| cats.is_empty())
+    }
+
     /// The combined head-side filter bitmap.
     async fn head_bitmap(&self) -> Result<RoaringBitmap, IndexError> {
         self.combine(|c| (c.head_off, c.head_size as usize)).await
@@ -667,7 +683,7 @@ impl<F: RangeFetch> ResolvedFilter<F> {
         &self,
         ids: &RoaringBitmap,
     ) -> Result<RoaringBitmap, IndexError> {
-        if ids.is_empty() {
+        if ids.is_empty() || self.has_empty_arm() {
             return Ok(RoaringBitmap::new());
         }
         // Distinct container buckets the candidates span (ascending, since the
@@ -732,6 +748,9 @@ impl<F: RangeFetch> ResolvedFilter<F> {
         &self,
         range_of: impl Fn(&CatRange) -> (u64, usize),
     ) -> Result<RoaringBitmap, IndexError> {
+        if self.has_empty_arm() {
+            return Ok(RoaringBitmap::new()); // an empty arm ANDs to nothing — fetch nothing
+        }
         let mut flat: Vec<(usize, (u64, usize))> = Vec::new();
         for (fi, cats) in self.fields.iter().enumerate() {
             for c in cats {
