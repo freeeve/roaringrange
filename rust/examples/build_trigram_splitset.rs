@@ -20,54 +20,11 @@
 //! chunk, so peak memory is one open split rather than the whole split set.
 
 use rayon::prelude::*;
-use roaringrange::fetch::{FetchError, RangeFetch};
 use roaringrange::records::RecordStore;
-use roaringrange::{write_splitset_bundle, Policy, SplitBuildConfig, SplitSetBuilder};
-use std::fs::File;
+use roaringrange::{write_splitset_bundle, FileFetch, Policy, SplitBuildConfig, SplitSetBuilder};
 use std::io::Write;
-use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
-
-/// A [`RangeFetch`] over a local file using positional reads (`pread`), so a 100+ GB store is
-/// range-read without loading it into memory. Cloneable (shared fd) so each `rayon` worker reads
-/// its own records concurrently.
-#[derive(Clone)]
-struct FileFetch {
-    file: Arc<File>,
-}
-
-impl FileFetch {
-    /// Opens `path` read-only for positional reads.
-    fn open(path: &str) -> std::io::Result<Self> {
-        Ok(Self {
-            file: Arc::new(File::open(path)?),
-        })
-    }
-}
-
-impl RangeFetch for FileFetch {
-    async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
-        let mut buf = vec![0u8; len];
-        let mut filled = 0;
-        while filled < len {
-            match self
-                .file
-                .read_at(&mut buf[filled..], offset + filled as u64)
-            {
-                Ok(0) => {
-                    return Err(FetchError::Transport(format!(
-                        "unexpected EOF at offset {offset} (+{filled})"
-                    )))
-                }
-                Ok(nr) => filled += nr,
-                Err(e) => return Err(FetchError::Transport(e.to_string())),
-            }
-        }
-        Ok(buf)
-    }
-}
 
 /// Parses one record's JSON into the indexed text and its facets. Text is
 /// `"<title> <abstract> <authors> <venue>"` (the monolith's `build_text`); facets carry the

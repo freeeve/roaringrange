@@ -8,48 +8,9 @@
 //!     records.idx records.bin records.dict <n> > head.jsonl
 //! ```
 
-use roaringrange::fetch::{FetchError, RangeFetch};
 use roaringrange::records::RecordStore;
-use std::fs::File;
+use roaringrange::FileFetch;
 use std::io::Write;
-use std::os::unix::fs::FileExt;
-
-/// A [`RangeFetch`] over a local file using positional reads (`pread`), so a
-/// 100+ GB store is range-read without loading it into memory.
-struct FileFetch {
-    file: File,
-}
-
-impl FileFetch {
-    fn open(path: &str) -> std::io::Result<Self> {
-        Ok(Self {
-            file: File::open(path)?,
-        })
-    }
-}
-
-impl RangeFetch for FileFetch {
-    async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
-        let mut buf = vec![0u8; len];
-        let mut filled = 0;
-        while filled < len {
-            match self
-                .file
-                .read_at(&mut buf[filled..], offset + filled as u64)
-            {
-                Ok(0) => {
-                    return Err(FetchError::Transport(format!(
-                        "unexpected EOF at offset {} (+{filled})",
-                        offset
-                    )))
-                }
-                Ok(nr) => filled += nr,
-                Err(e) => return Err(FetchError::Transport(e.to_string())),
-            }
-        }
-        Ok(buf)
-    }
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

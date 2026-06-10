@@ -25,16 +25,14 @@ use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use roaringrange::build::chunk::{merge_partials_to_rrs, write_partial};
 use roaringrange::build::DEFAULT_STRIDE;
-use roaringrange::fetch::{FetchError, RangeFetch};
 use roaringrange::ngram_keys;
 use roaringrange::records::RecordStore;
+use roaringrange::FileFetch;
 use std::collections::HashMap;
 use std::fs::File;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{BufWriter, Write};
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
 
 /// Trigram size (must match the reader/query path and the split set).
@@ -72,45 +70,6 @@ const SUBBATCH: u32 = 50_000;
 /// Default chunk width; ~8M docs is roughly a 2 GB partial and keeps peak chunk RAM well within box
 /// limits, while leaving the partial count far under the open-fd ceiling the merge needs.
 const DEFAULT_CHUNK_DOCS: u32 = 8_000_000;
-
-/// A [`RangeFetch`] over a local file using positional reads (`pread`), so a 100+ GB store is
-/// range-read without loading it into memory. Cloneable (shared fd) so each `rayon` worker reads
-/// its own records concurrently.
-#[derive(Clone)]
-struct FileFetch {
-    file: Arc<File>,
-}
-
-impl FileFetch {
-    /// Opens `path` read-only for positional reads.
-    fn open(path: &str) -> std::io::Result<Self> {
-        Ok(Self {
-            file: Arc::new(File::open(path)?),
-        })
-    }
-}
-
-impl RangeFetch for FileFetch {
-    async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
-        let mut buf = vec![0u8; len];
-        let mut filled = 0;
-        while filled < len {
-            match self
-                .file
-                .read_at(&mut buf[filled..], offset + filled as u64)
-            {
-                Ok(0) => {
-                    return Err(FetchError::Transport(format!(
-                        "unexpected EOF at offset {offset} (+{filled})"
-                    )))
-                }
-                Ok(nr) => filled += nr,
-                Err(e) => return Err(FetchError::Transport(e.to_string())),
-            }
-        }
-        Ok(buf)
-    }
-}
 
 /// Builds one record's indexed text — `"<title> <abstract> <authors> <venue>"`, skipping empty
 /// fields — byte-identical to `build_trigram_splitset`'s `record_fields` text so the monolith and

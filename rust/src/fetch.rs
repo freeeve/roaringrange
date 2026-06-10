@@ -105,6 +105,49 @@ impl RangeFetch for MemoryFetch {
     }
 }
 
+/// A file-backed [`RangeFetch`] for native tooling (builders, benches,
+/// verifiers): positioned reads against a local file, mirroring the ranged-GET
+/// access pattern with no server. Cheap to clone — the open handle is shared.
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct FileFetch {
+    file: std::sync::Arc<std::fs::File>,
+}
+
+#[cfg(unix)]
+impl FileFetch {
+    /// Opens `path` read-only.
+    pub fn open(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        Ok(Self {
+            file: std::sync::Arc::new(std::fs::File::open(path)?),
+        })
+    }
+}
+
+#[cfg(unix)]
+impl RangeFetch for FileFetch {
+    async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
+        use std::os::unix::fs::FileExt;
+        let mut buf = vec![0u8; len];
+        let mut filled = 0;
+        while filled < len {
+            match self
+                .file
+                .read_at(&mut buf[filled..], offset + filled as u64)
+            {
+                Ok(0) => {
+                    return Err(FetchError::Transport(format!(
+                        "unexpected EOF at offset {offset} (+{filled} of {len})"
+                    )))
+                }
+                Ok(n) => filled += n,
+                Err(e) => return Err(FetchError::Transport(e.to_string())),
+            }
+        }
+        Ok(buf)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,39 +7,8 @@
 //! Results are rank-ordered doc IDs (0 = most-cited), the same numbering the records/facets use.
 
 use futures::executor::block_on;
-use roaringrange::{FetchError, Index, RangeFetch};
-use std::fs::File;
-use std::os::unix::fs::FileExt;
-use std::sync::Arc;
+use roaringrange::{FileFetch, Index};
 use std::time::Instant;
-
-/// A [`RangeFetch`] over a local file using positional reads, so a 100+ GB index is range-read
-/// without loading it into memory.
-struct FileFetch {
-    file: Arc<File>,
-}
-
-impl RangeFetch for FileFetch {
-    async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
-        let mut buf = vec![0u8; len];
-        let mut filled = 0;
-        while filled < len {
-            match self
-                .file
-                .read_at(&mut buf[filled..], offset + filled as u64)
-            {
-                Ok(0) => {
-                    return Err(FetchError::Transport(format!(
-                        "unexpected EOF at offset {offset} (+{filled})"
-                    )))
-                }
-                Ok(nr) => filled += nr,
-                Err(e) => return Err(FetchError::Transport(e.to_string())),
-            }
-        }
-        Ok(buf)
-    }
-}
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -54,8 +23,8 @@ fn main() {
         args
     };
 
-    let file = Arc::new(File::open(&path).expect("open .rrs"));
-    let idx = block_on(Index::open(FileFetch { file })).expect("open index");
+    let fetch = FileFetch::open(&path).expect("open .rrs");
+    let idx = block_on(Index::open(fetch)).expect("open index");
     println!("opened {path} (gram_size={})", idx.gram_size());
 
     for q in &queries {

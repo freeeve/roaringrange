@@ -8,45 +8,8 @@
 //! and the top-k matching doc ids.
 
 use futures::executor::block_on;
-use roaringrange::fetch::{FetchError, RangeFetch};
-use roaringrange::{SplitFetcher, SplitSet};
-use std::fs::File;
-use std::os::unix::fs::FileExt;
+use roaringrange::{FileFetch, SplitFetcher, SplitSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-/// A [`RangeFetch`] over a local file using positional reads, so a split is range-read without
-/// loading it whole.
-#[derive(Clone)]
-struct FileFetch {
-    file: Arc<File>,
-}
-
-impl FileFetch {
-    fn open(path: &Path) -> std::io::Result<Self> {
-        Ok(Self {
-            file: Arc::new(File::open(path)?),
-        })
-    }
-}
-
-impl RangeFetch for FileFetch {
-    async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
-        let mut buf = vec![0u8; len];
-        let mut filled = 0;
-        while filled < len {
-            match self
-                .file
-                .read_at(&mut buf[filled..], offset + filled as u64)
-            {
-                Ok(0) => return Err(FetchError::Transport(format!("EOF at {offset}+{filled}"))),
-                Ok(nr) => filled += nr,
-                Err(e) => return Err(FetchError::Transport(e.to_string())),
-            }
-        }
-        Ok(buf)
-    }
-}
 
 /// Resolves a split's `data_file` to a file in `dir` (the manifest's directory).
 struct DirResolver {

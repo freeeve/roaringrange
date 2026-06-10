@@ -92,6 +92,8 @@ pub mod vector_build;
 
 pub use catalog::{Catalog, SearchPage};
 pub use facet::FacetIndex;
+#[cfg(unix)]
+pub use fetch::FileFetch;
 pub use fetch::{FetchError, MemoryFetch, RangeFetch};
 pub use index::{Index, IndexError, ResolvedFilter};
 pub use lookup::Lookup;
