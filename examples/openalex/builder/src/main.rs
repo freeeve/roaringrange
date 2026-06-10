@@ -84,10 +84,8 @@ fn init_logging() {
         .init();
 }
 
-mod headtune;
 mod phased;
 mod secondary;
-mod transcode;
 
 /// Trigram size (matches the index/reader contract).
 const GRAM: usize = 3;
@@ -197,26 +195,17 @@ fn main() {
     init_logging();
     let args: Vec<String> = std::env::args().collect();
 
-    // Head-size tuning analysis: sweep candidate head boundaries against a query
-    // workload over the finished `.rrs`, reporting per-boundary head-serve rate and
-    // modeled slow-mobile latency. Reads only the finished index (no rebuild).
-    if flag(&args, "-analyze-head") {
-        headtune::run(&args);
-        return;
-    }
-
-    // Workload generation: derive a labeled query set from the corpus's own text
-    // (titles, partial titles, subjects, authors, venues) for `-analyze-head`.
-    if flag(&args, "-gen-workload") {
-        headtune::gen_workload(&args);
-        return;
-    }
-
-    // Head-boundary transcode: re-split a finished `.rrs`/`.rrf` at a new head size
-    // without re-indexing (re-split is byte-equivalent to a from-source build at B).
-    if flag(&args, "-transcode") {
-        transcode::run(&args);
-        return;
+    // The v2-era head-boundary tools (-analyze-head, -gen-workload, -transcode)
+    // were removed with the RRS v3 head/tail collapse: there is no head boundary
+    // left to tune or re-split, and their v2-layout parsing misread v3 files.
+    // Fail loudly in case a stale runbook still passes them.
+    for gone in ["-analyze-head", "-gen-workload", "-transcode"] {
+        if flag(&args, gone) {
+            eprintln!(
+                "{gone} was removed with RRS v3 (no head boundary exists to tune or re-split)"
+            );
+            std::process::exit(2);
+        }
     }
 
     // Secondary-index mode: remap the *finished* primary outputs into an alternate
