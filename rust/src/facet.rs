@@ -256,23 +256,23 @@ impl<F: RangeFetch> FacetIndex<F> {
         Ok(FacetIndex { fetch, fields })
     }
 
-    /// Resolves `(field, category)` selections into a [`ResolvedFilter`]. Unknown
-    /// fields or categories are skipped. Selections for the same field are grouped
-    /// so they OR together; distinct fields AND.
+    /// Resolves `(field, category)` selections into a [`ResolvedFilter`].
+    /// Selections for the same field are grouped so they OR together; distinct
+    /// fields AND. A selected field whose categories all fail to resolve (an
+    /// unknown field, or categories this sidecar doesn't carry — common for a
+    /// per-split sidecar that lacks a globally-selected category) contributes an
+    /// **empty** arm that matches nothing: the user asked for docs in that
+    /// category and none exist here, which must not degrade to "unfiltered".
     pub fn resolve(&self, pairs: &[(String, String)]) -> ResolvedFilter<F>
     where
         F: Clone,
     {
-        let mut by_field: BTreeMap<usize, Vec<CatRange>> = BTreeMap::new();
+        let mut by_field: BTreeMap<&str, Vec<CatRange>> = BTreeMap::new();
         for (fname, cname) in pairs {
-            if let Some((fi, field)) = self
-                .fields
-                .iter()
-                .enumerate()
-                .find(|(_, f)| &f.name == fname)
-            {
+            let ranges = by_field.entry(fname.as_str()).or_default();
+            if let Some(field) = self.fields.iter().find(|f| &f.name == fname) {
                 if let Some(c) = field.categories.iter().find(|c| &c.name == cname) {
-                    by_field.entry(fi).or_default().push(c.range);
+                    ranges.push(c.range);
                 }
             }
         }

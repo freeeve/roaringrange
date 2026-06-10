@@ -870,11 +870,15 @@ impl SplitSet {
         ))
     }
 
-    /// Whether `split` can be pruned for a facet filter: it has no facet presence at all, or for
-    /// some selected field none of that field's category keys are present (the across-field AND
-    /// can never be satisfied). `fields` is the per-field list of selected category keys.
+    /// Whether `split` can be pruned for a facet filter: the manifest carries facet-presence
+    /// summaries (`FLAG_FACET`) and either this split has none (it indexed no facet values) or
+    /// for some selected field none of that field's category keys are present (the across-field
+    /// AND can never be satisfied). Without `FLAG_FACET` the manifest has no facet information
+    /// — summaries absent wholesale (e.g. stripped to slim the boot read) must not read as "no
+    /// facets", so nothing is pruned and the filter resolves against each split's `.rrf`.
+    /// `fields` is the per-field list of selected category keys.
     fn facet_pruned(&self, split: &Split, fields: &[Vec<u64>]) -> Result<bool, IndexError> {
-        if fields.is_empty() {
+        if fields.is_empty() || self.flags & FLAG_FACET == 0 {
             return Ok(false);
         }
         match self.facet_keys(split)? {
@@ -1761,6 +1765,89 @@ mod tests {
             block_on(ss.search_filtered(&resolver(0), "abc", &[], 10)).unwrap(),
             vec![0, 1, 2, 3]
         );
+    }
+
+    #[test]
+    fn facet_filtered_search_survives_stripped_summaries() {
+        // The splitset_strip_summaries flow: the same faceted fixture, but the manifest is
+        // re-emitted with every per-split summary dropped and FLAG_FACET cleared. Without the
+        // summaries no split may be facet-pruned — a missing facet TLV must read as "no
+        // information", not "no facets" — and the filter must resolve via each split's .rrf.
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            policy: Policy::Tiered,
+            byte_cap: 250,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 8,
+        });
+        let f = |lang: &str| vec![("lang".to_string(), lang.to_string())];
+        b.add_faceted("abc en0", &f("en")).unwrap();
+        b.add_faceted("abc en1", &f("en")).unwrap();
+        b.add_faceted("abc fr0", &f("fr")).unwrap();
+        b.add_faceted("abc fr1", &f("fr")).unwrap();
+        let built = b.finish().unwrap();
+        let full = open_built(&built);
+
+        let stripped_specs: Vec<SplitSpec> = full
+            .splits()
+            .iter()
+            .map(|s| SplitSpec {
+                data_file: s.data_file.clone(),
+                tier: s.tier,
+                doc_count: s.doc_count,
+                doc_id_lo: s.doc_id_lo,
+                doc_id_hi: s.doc_id_hi,
+                epoch: s.epoch,
+                byte_size: s.byte_size,
+                flags: 0,
+                summary: Vec::new(),
+            })
+            .collect();
+        let config = SplitSetConfig {
+            policy: full.policy(),
+            tier_count: full.tier_count(),
+            base_count: full.base_count(),
+            byte_cap: full.byte_cap(),
+            gram_size: full.gram_size(),
+            body_kind: full.body_kind(),
+            sortcol: None,
+            flags: 0,
+        };
+        let mut manifest = Vec::new();
+        write_splitset(&mut manifest, &stripped_specs, &config).unwrap();
+        let ss = block_on(SplitSet::open(MemoryFetch::new(manifest))).unwrap();
+        assert_eq!(ss.flags() & FLAG_FACET, 0);
+
+        let files: HashMap<String, Vec<u8>> = built
+            .splits
+            .iter()
+            .chain(built.facets.iter())
+            .cloned()
+            .collect();
+        let resolver = || CountingResolver {
+            files: files.clone(),
+            opens: std::cell::Cell::new(0),
+        };
+
+        // The filtered results must match the summarized manifest's exactly.
+        assert_eq!(
+            block_on(ss.search_filtered(&resolver(), "abc", &f("en"), 10)).unwrap(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            block_on(ss.search_filtered(&resolver(), "abc", &f("fr"), 10)).unwrap(),
+            vec![2, 3]
+        );
+
+        // An absent category now costs .rrf reads (no pruning possible) but stays empty.
+        let r = resolver();
+        assert!(block_on(ss.search_filtered(&r, "abc", &f("de"), 10))
+            .unwrap()
+            .is_empty());
+        assert!(r.opens.get() > 0, "without summaries every split is consulted");
     }
 
     #[test]

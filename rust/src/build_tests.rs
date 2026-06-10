@@ -506,8 +506,15 @@ fn facet_filtering_within_or_across_and() {
     assert_eq!(page(&[("format", "ebook"), ("language", "en")]), vec![1, 3]);
     // Tail exclusion: en has no tail docs, so the tail doc is filtered out.
     assert_eq!(page(&[("language", "en")]), vec![1, 2, 3]);
-    // Unknown selection is skipped -> no constraint -> all text docs.
-    assert_eq!(page(&[("nope", "x")]), vec![1, 2, 3, 4, 5, tail_doc]);
+    // An unresolvable selection (unknown field or category) matches nothing —
+    // the user asked for docs in a category none of these docs are in; it must
+    // not silently degrade to "unfiltered" (a per-split sidecar may lack a
+    // globally-selected category, and a typo'd filter must not return everything).
+    assert_eq!(page(&[("nope", "x")]), Vec::<u32>::new());
+    assert_eq!(page(&[("format", "nope")]), Vec::<u32>::new());
+    // ...but an unresolvable category ORed with a resolvable one in the same
+    // field still matches the resolvable side.
+    assert_eq!(page(&[("format", "ebook"), ("format", "nope")]), vec![1, 3, 5, tail_doc]);
 
     // Search-filtered facet counts over the unfiltered query's head result
     // {1,2,3,4,5} (tail_doc is in the tail, not the head): format ebook{1,3,5}=3,
