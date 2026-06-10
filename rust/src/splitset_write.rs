@@ -170,13 +170,36 @@ impl SplitSetWriter {
                 summary: prev.summary(s).map(<[u8]>::to_vec).unwrap_or_default(),
             })
             .collect();
+        // Zero-doc splits (deletes-only flushes) carry a nominal doc-id range claiming the
+        // then-unallocated next id; only splits that actually hold docs advance the id space,
+        // or a resume after a deletes-only flush would skip an id and break the dense space.
         let next_global_id = prev
             .splits()
             .iter()
+            .filter(|s| s.doc_count > 0)
             .map(|s| s.doc_id_hi.saturating_add(1))
             .max()
             .unwrap_or(0);
         let next_epoch = prev.splits().iter().map(|s| s.epoch).max().unwrap_or(0) + 1;
+        // Continue the delta/compaction filename sequences past the carried-forward splits:
+        // restarting them at 0 would re-emit a live split's name and the client's PUT would
+        // overwrite an object the resumed manifest still references.
+        let next_seq = |marker: &str| -> u32 {
+            prev.splits()
+                .iter()
+                .filter_map(|s| {
+                    s.data_file
+                        .strip_prefix(&name_prefix)?
+                        .strip_prefix(marker)?
+                        .strip_suffix(".rrs")?
+                        .parse::<u32>()
+                        .ok()
+                })
+                .max()
+                .map_or(0, |m| m + 1)
+        };
+        let flush_seq = next_seq("-d");
+        let compact_seq = next_seq("-c");
         SplitSetWriter {
             gram_size,
             stride: nonzero_or(stride, DEFAULT_STRIDE),
@@ -194,8 +217,8 @@ impl SplitSetWriter {
             specs,
             next_global_id,
             next_epoch,
-            flush_seq: 0,
-            compact_seq: 0,
+            flush_seq,
+            compact_seq,
             memtable: BTreeMap::new(),
             memtable_base: next_global_id,
             memtable_count: 0,
@@ -613,6 +636,98 @@ mod tests {
         assert_eq!(
             res3, res2,
             "compaction preserves results (and supersession)"
+        );
+    }
+
+    #[test]
+    fn resume_continues_delta_names_and_id_space() {
+        // Session 1: base + one delta flush named corpus-d00000.rrs.
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            policy: Policy::Tiered,
+            byte_cap: 1 << 20,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 10,
+        });
+        b.add_text("abc base0").unwrap();
+        let built = b.finish().unwrap();
+        let mut files: HashMap<String, Vec<u8>> = built.splits.iter().cloned().collect();
+
+        let mut w =
+            SplitSetWriter::resume(&open(&built.manifest), 3, 0, 0, "corpus".to_string(), 10);
+        assert_eq!(w.add_text("abc s1a"), 1);
+        let f1 = w.flush().unwrap().unwrap();
+        assert_eq!(f1.split_name, "corpus-d00000.rrs");
+        files.insert(f1.split_name.clone(), f1.split_bytes.clone());
+
+        // Session 2 (crash recovery): resume from the cut-over manifest. The next delta must
+        // continue the name sequence — restarting at d00000 would overwrite the live split
+        // the carried-forward manifest still references.
+        let mut w2 = SplitSetWriter::resume(&open(&f1.manifest), 3, 0, 0, "corpus".to_string(), 10);
+        assert_eq!(w2.add_text("abc s2a"), 2, "id space continues");
+        let f2 = w2.flush().unwrap().unwrap();
+        assert_ne!(
+            f2.split_name, f1.split_name,
+            "a resumed writer must never re-emit a live delta's filename"
+        );
+        assert_eq!(f2.split_name, "corpus-d00001.rrs");
+        files.insert(f2.split_name.clone(), f2.split_bytes.clone());
+
+        let ss = open(&f2.manifest);
+        let res = block_on(ss.search(&MapResolver(files), "abc", 100)).unwrap();
+        assert_eq!(
+            res,
+            vec![0, 1, 2],
+            "all three docs reachable across both sessions"
+        );
+    }
+
+    #[test]
+    fn deletes_only_flush_neither_claims_nor_skips_an_id() {
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            policy: Policy::Tiered,
+            byte_cap: 1 << 20,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 0,
+        });
+        b.add_text("abc b0").unwrap();
+        b.add_text("abc b1").unwrap();
+        let built = b.finish().unwrap();
+
+        let mut w =
+            SplitSetWriter::resume(&open(&built.manifest), 3, 0, 0, "corpus".to_string(), 0);
+        w.delete(0);
+        let f = w.flush().unwrap().expect("deletes-only flush");
+        let ss = open(&f.manifest);
+
+        // The zero-doc tombstone split's range is nominal: it must not contain the id it
+        // names (which is still unallocated and will go to the next added doc).
+        let zero = ss
+            .delta_splits()
+            .iter()
+            .find(|s| s.doc_count == 0)
+            .expect("the deletes-only split");
+        assert!(
+            !zero.contains(zero.doc_id_lo),
+            "a zero-doc split holds no documents"
+        );
+
+        // The same writer hands out the unconsumed id…
+        assert_eq!(w.add_text("abc next"), 2);
+        // …and so does a writer resumed from the deletes-only manifest (it previously
+        // computed max(doc_id_hi)+1 over the nominal range and skipped id 2).
+        let mut w2 = SplitSetWriter::resume(&ss, 3, 0, 0, "corpus".to_string(), 0);
+        assert_eq!(
+            w2.add_text("abc next2"),
+            2,
+            "dense id space preserved across resume"
         );
     }
 

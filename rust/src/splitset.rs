@@ -167,9 +167,12 @@ impl Split {
         }
     }
 
-    /// Whether `global` falls in this split's doc-id range `[docIdLo, docIdHi]`.
+    /// Whether `global` falls in this split's doc-id range `[docIdLo, docIdHi]`. A zero-doc
+    /// split (a deletes-only flush) holds no documents — its range is nominal, claiming the
+    /// then-unallocated next id — so it contains nothing, and never shadows the real split
+    /// that later receives that id.
     pub fn contains(&self, global: u32) -> bool {
-        global >= self.doc_id_lo && global <= self.doc_id_hi
+        self.doc_count > 0 && global >= self.doc_id_lo && global <= self.doc_id_hi
     }
 
     /// Inverse of [`to_global`](Self::to_global): maps a global doc ID back to this split's local
@@ -1847,7 +1850,10 @@ mod tests {
         assert!(block_on(ss.search_filtered(&r, "abc", &f("de"), 10))
             .unwrap()
             .is_empty());
-        assert!(r.opens.get() > 0, "without summaries every split is consulted");
+        assert!(
+            r.opens.get() > 0,
+            "without summaries every split is consulted"
+        );
     }
 
     #[test]
