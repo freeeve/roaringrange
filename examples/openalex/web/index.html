@@ -228,6 +228,9 @@
 
       /* ---- server-side (Lambda) opt-in ---- */
       .srvtoggle { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+      /* display:flex beats the UA's [hidden]{display:none} — restate it, or the
+         lambda-embeddings and split wraps render despite hidden=true. */
+      .srvtoggle[hidden] { display: none; }
       .srvtoggle .switch {
         display: inline-flex; align-items: center; gap: 8px;
         font-size: 13px; font-weight: 500; color: var(--ink-soft); cursor: pointer; user-select: none;
@@ -2201,16 +2204,21 @@
       async function bootSplitSet() {
         if (!SPLIT_RRSS_URL || rrss) return;
         try {
+          // Build the reader fully on a local before publishing it: rrss becomes
+          // visible to the search path the moment it's assigned, and a fast toggle
+          // racing setGlobalBloom's &mut borrow throws wasm-bindgen's
+          // "recursive use of an object".
+          let opened;
           if (typeof RrssIndex.openBundle === "function" && SPLIT_RRHC_URL) {
-            try { rrss = await RrssIndex.openBundle(SPLIT_RRSS_URL, SPLIT_BASE_URL, SPLIT_RRHC_URL); }
-            catch (_) { rrss = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL); }
+            try { opened = await RrssIndex.openBundle(SPLIT_RRSS_URL, SPLIT_BASE_URL, SPLIT_RRHC_URL); }
+            catch (_) { opened = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL); }
           } else {
-            rrss = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL);
+            opened = await RrssIndex.open(SPLIT_RRSS_URL, SPLIT_BASE_URL);
           }
           // Global term-Bloom sidecar (optional): consulted lazily by the tiered query
           // path — k one-byte probes per term, only after an empty top tier — so an
           // absent/typo term stops the descent instead of opening all 389 splits.
-          if (SPLIT.bloom && typeof rrss.setGlobalBloom === "function") rrss.setGlobalBloom(SPLIT.bloom);
+          if (SPLIT.bloom && typeof opened.setGlobalBloom === "function") opened.setGlobalBloom(SPLIT.bloom);
           // The split set's record store: when it declares the same basename as the
           // dataset's store (the trigram split set shares the monolith's rank-ordered
           // doc-ID space), reuse the already-open reader — it carries the zstd
@@ -2220,6 +2228,7 @@
           splitRecords = (SPLIT.rec === DATASETS[DS].rec)
             ? records
             : await RrsRecords.open(SPLIT_REC_IDX_URL, SPLIT_REC_BIN_URL);
+          rrss = opened;   // publish last
         } catch (_) { rrss = null; splitRecords = null; return; }
         // Reveal the toggle (trigram mode only — syncModeUi recomputes from rrss),
         // and refresh the file chips in case split mode is already on (?ds=lite).
@@ -2285,6 +2294,7 @@
         // Mutually exclusive with split mode in BOTH directions (the split branch wins
         // in runSearch, so leaving it set would silently ignore this toggle).
         if (serverMode && splitMode) { splitMode = false; els.splitmode.checked = false; }
+        syncUrl();   // land srv=1 immediately — a refresh mid-search must not lose it
         runSearch(true);   // filters + facet counts now work in server mode (via the Lambda)
       });
       // Split-set opt-in: swap the trigram backend from the monolith RRS to the RRSS split set.
@@ -2294,6 +2304,7 @@
         splitMode = els.splitmode.checked;
         if (splitMode && serverMode) { serverMode = false; els.servermode.checked = false; }
         renderActiveFiles();
+        syncUrl();   // land split=1 immediately — a refresh mid-search must not lose it
         runSearch(true);
       });
       // Mode-1 opt-in: embed queries with the EmbeddingGemma Lambda against the Gemma
