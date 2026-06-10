@@ -793,6 +793,15 @@ pub struct Cursor<F: RangeFetch> {
 /// tail step. Larger means fewer round-trips but more over-read past a filled page.
 const TAIL_KEY_BATCH: usize = 8;
 
+/// Tail windows a single `ensure` (one `page`/`next` call) scans before returning
+/// with the tail still pending — bounding any one call's work. A sparse-result
+/// query (total matches ≪ page size) must otherwise prove no further match exists
+/// by scanning the *whole* tail in one call: ~925 sequential windows over a 484M
+/// corpus, minutes in a browser. With the budget, each call returns what it found
+/// (`loaded`/`pending_tail` expose the state), the caller renders progressively
+/// and keeps calling; [`Cursor::load_tail`] loops to completion.
+const TAIL_WINDOWS_PER_CALL: usize = 12;
+
 impl<F: RangeFetch> Cursor<F> {
     /// An exhausted cursor with no results (empty or absent query).
     fn empty(fetch: F) -> Self {
@@ -864,11 +873,20 @@ impl<F: RangeFetch> Cursor<F> {
             if self.tail_scan.is_some() {
                 let mut scan = self.tail_scan.take().unwrap();
                 let facet_fetch = self.filter.as_ref().map(|f| &f.fetch);
-                while self.results.len() < need && !scan.exhausted() {
+                let start_len = self.results.len();
+                let mut windows = TAIL_WINDOWS_PER_CALL;
+                while self.results.len() < need && !scan.exhausted() && windows > 0 {
                     let win = scan
                         .next_window(&self.fetch, facet_fetch, TAIL_KEY_BATCH)
                         .await?;
                     self.results.extend(win.iter());
+                    windows -= 1;
+                    // First-paint bias: once this call has surfaced anything new,
+                    // return early (after ≥2 windows) so an interactive caller can
+                    // render it; the next call resumes the scan where it stopped.
+                    if self.results.len() > start_len && windows <= TAIL_WINDOWS_PER_CALL - 2 {
+                        break;
+                    }
                 }
                 if scan.exhausted() {
                     self.tail_done = true;
@@ -916,8 +934,11 @@ impl<F: RangeFetch> Cursor<F> {
     }
 
     /// Random-access page: up to `limit` doc IDs starting at `offset`. Going
-    /// backward (or to any already-materialized window) never fetches; going
-    /// past the head fetches the tail once, after which all pages are free.
+    /// backward (or to any already-materialized window) never fetches; going past
+    /// the head scans the tail incrementally with **bounded work per call**
+    /// ([`TAIL_WINDOWS_PER_CALL`]) — a call may return fewer than `limit` ids
+    /// while [`pending_tail`](Self::pending_tail) is still true, and calling
+    /// again continues the scan from where it stopped.
     pub async fn page(&mut self, offset: usize, limit: usize) -> Result<Vec<u32>, IndexError> {
         self.ensure(offset + limit).await?;
         let start = offset.min(self.results.len());
@@ -943,7 +964,12 @@ impl<F: RangeFetch> Cursor<F> {
     /// Forces the lazy tail intersection to be fetched; afterwards `loaded` and
     /// `page` span the full result set. A no-op once the tail is loaded.
     pub async fn load_tail(&mut self) -> Result<(), IndexError> {
-        self.ensure(usize::MAX).await
+        // ensure() bounds each call's tail work (TAIL_WINDOWS_PER_CALL); loop it
+        // to completion — every iteration advances the scan, so this terminates.
+        while self.pending_tail() {
+            self.ensure(usize::MAX).await?;
+        }
+        Ok(())
     }
 }
 

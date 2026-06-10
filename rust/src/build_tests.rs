@@ -470,6 +470,53 @@ fn filter_count_bound_uses_resident_counts() {
 }
 
 #[test]
+fn sparse_result_paging_is_bounded_per_call_and_completes() {
+    // One doc per bucket across 400 buckets — total matches (400) exceed nothing,
+    // but they are scattered so far apart that filling any page must scan many
+    // tail windows. A single page() call must do BOUNDED work (return partial
+    // with the tail pending), and repeated calls / load_tail must converge on
+    // exactly the full set.
+    let abc = ngram_keys("abc", 3)[0];
+    let mut b = RoaringBitmap::new();
+    for bk in 1..=400u32 {
+        b.insert(bk * BUCKET + 7);
+    }
+    let want: Vec<u32> = b.iter().collect();
+    let buf = build_rrs(3, 2, &[(abc, b)]);
+    let idx = block_on(Index::open(MemoryFetch::new(buf))).unwrap();
+
+    let mut cur = block_on(idx.search_cursor("abc", 0)).unwrap();
+    // Ask for more than one budget's worth: the call returns what its window
+    // budget reached, not the whole answer.
+    let first = block_on(cur.page(0, 300)).unwrap();
+    assert!(
+        !first.is_empty() && first.len() < 300,
+        "one call is budgeted: got {} of 300",
+        first.len()
+    );
+    assert!(
+        cur.pending_tail(),
+        "tail must still be pending after one call"
+    );
+
+    // Repeated calls continue the scan and eventually fill the request.
+    let mut page = first;
+    let mut calls = 1;
+    while page.len() < 300 && cur.pending_tail() {
+        page = block_on(cur.page(0, 300)).unwrap();
+        calls += 1;
+        assert!(calls < 100, "scan must progress every call");
+    }
+    assert_eq!(page, want[..300].to_vec());
+
+    // load_tail loops the budget to completion; the set is exact.
+    block_on(cur.load_tail()).unwrap();
+    assert!(!cur.pending_tail());
+    assert_eq!(cur.loaded(), want.len());
+    assert_eq!(block_on(cur.page(0, 500)).unwrap(), want);
+}
+
+#[test]
 fn open_rejects_zero_stride_with_nonempty_dict() {
     // stride 0 with ngrams > 0 is corruption: sparse_count would silently be 0
     // and every query would return empty instead of surfacing an error.

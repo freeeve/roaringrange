@@ -1496,60 +1496,70 @@
         const intoTail = offset + PAGE > c.headCount();
         skeletons(Math.min(PAGE, 8));
         const pgReq0 = reqs, pgByte0 = bytes, t0 = performance.now();
+        let recMsTotal = 0, recReqsTotal = 0, recBytesTotal = 0;
         let ids;
         try { ids = await c.page(offset, PAGE); }
         catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
-        // Past the real end: while the tail is pending, Next stays enabled on what
-        // turns out to be the last page, so the page that exhausts the tail can come
-        // back empty. Step back to the last real page instead of rendering the
-        // no-results empty state under a pager reading "51–50 of 50" (and persisting
-        // the out-of-range p in the URL).
-        if (ids.length === 0 && offset > 0) {
-          const total = c.loaded();
-          const lastStart = Math.max(0, Math.floor(Math.max(0, total - 1) / PAGE) * PAGE);
-          if (lastStart < offset) {
-            offset = lastStart;
-            try { ids = await c.page(offset, PAGE); }
-            catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
+        // Progressive fill: page() bounds its tail work per call, so a sparse-result
+        // query (total matches ≪ page size, e.g. ~20 hits over 484M docs) returns
+        // partial pages while the scan is pending. Each round renders what's found
+        // and continues — results trickle in instead of one multi-minute skeleton
+        // stall while the cursor proves no further match exists.
+        for (;;) {
+          if (seq !== searchSeq) return;   // a newer query superseded this page
+          // Past the real end (only meaningful once the tail is exhausted): step
+          // back to the last real page instead of rendering the no-results empty
+          // state under a pager reading "51–50 of 50".
+          if (ids.length === 0 && offset > 0 && !c.pendingTail()) {
+            const total = c.loaded();
+            const lastStart = Math.max(0, Math.floor(Math.max(0, total - 1) / PAGE) * PAGE);
+            if (lastStart < offset) {
+              offset = lastStart;
+              try { ids = await c.page(offset, PAGE); }
+              catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
+              continue;
+            }
           }
-        }
-        const idxMs = extraMs + (performance.now() - t0);   // index work this call: head search, or this page's tail buckets
-        const idxReqs = openReqs + (reqs - pgReq0);
-        const idxBytes = openBytes + (bytes - pgByte0);
-        const page = Array.from(ids);
+          const page = Array.from(ids);
+          const missing = page.filter((id) => !recCache.has(id));
+          const recReq0 = reqs, recByte0 = bytes, recT0 = performance.now();
+          let map;
+          try { map = await fetchRecords(missing); }
+          catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
+          recMsTotal += performance.now() - recT0;
+          recReqsTotal += reqs - recReq0;
+          recBytesTotal += bytes - recByte0;
+          if (seq !== searchSeq) return;
+          for (const [id, rec] of map) recCache.set(id, rec);
+          lastPage = page;
+          lastTotal = c.loaded();          // results materialized so far (a lower bound while pendingTail)
+          tailPending = c.pendingTail();
+          const scanning = page.length < PAGE && tailPending;
 
-        const missing = page.filter((id) => !recCache.has(id));
-        const recReq0 = reqs, recByte0 = bytes, recT0 = performance.now();
-        const map = await fetchRecords(missing);
-        const recMs = performance.now() - recT0, recReqs = reqs - recReq0, recBytes = bytes - recByte0;
-        if (seq !== searchSeq) return;   // a newer query superseded this page — drop the stale render
-        for (const [id, rec] of map) recCache.set(id, rec);
-        lastPage = page;
-        lastTotal = c.loaded();          // results materialized so far (a lower bound while pendingTail)
-        tailPending = c.pendingTail();
+          // Mid-scan with nothing found yet: keep the skeletons (the empty-state
+          // message would read as a verdict the scan hasn't reached).
+          if (page.length || !scanning) renderCards(recCache);
+          updateResultsHead();
+          updatePager();
+          syncUrl();
 
-        renderCards(recCache);
-        updateResultsHead();
-        updatePager();
-        syncUrl();
-        const summary = (lastTotal || tailPending)
-          ? `${fmt(lastTotal)}${tailPending ? "+" : ""} result${lastTotal === 1 && !tailPending ? "" : "s"} in ${(idxMs + recMs).toFixed(0)} ms`
-          : "no results";
-        if (intoTail) {
-          setPerf({
-            tail: { ms: idxMs, reqs: idxReqs, bytes: idxBytes },
-            tailresults: { ms: recMs, reqs: recReqs, bytes: recBytes },
-            headN: c.headCount(),
-            summary,
-          });
-        } else {
-          setPerf({
-            search: { ms: idxMs, reqs: idxReqs, bytes: idxBytes },
-            results: { ms: recMs, reqs: recReqs, bytes: recBytes },
-            headN: c.headCount(),
-            tail: null, tailresults: null,
-            summary,
-          });
+          const elapsed = performance.now() - t0;
+          const idxMs = extraMs + elapsed - recMsTotal;
+          const idxReqs = openReqs + (reqs - pgReq0) - recReqsTotal;
+          const idxBytes = openBytes + (bytes - pgByte0) - recBytesTotal;
+          const summary = (lastTotal || tailPending)
+            ? `${fmt(lastTotal)}${tailPending ? "+" : ""} result${lastTotal === 1 && !tailPending ? "" : "s"}` +
+              (scanning ? ` · scanning the long tail… (${(elapsed / 1000).toFixed(0)}s)` : ` in ${(extraMs + elapsed).toFixed(0)} ms`)
+            : "no results";
+          const io = { ms: idxMs, reqs: idxReqs, bytes: idxBytes };
+          const rec = { ms: recMsTotal, reqs: recReqsTotal, bytes: recBytesTotal };
+          setPerf(intoTail
+            ? { tail: io, tailresults: rec, headN: c.headCount(), summary }
+            : { search: io, results: rec, headN: c.headCount(), tail: null, tailresults: null, summary });
+
+          if (!scanning) break;
+          try { ids = await c.page(offset, PAGE); }
+          catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
         }
       }
 
