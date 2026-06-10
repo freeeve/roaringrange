@@ -287,6 +287,55 @@ fn open_rejects_bad_magic() {
 }
 
 #[test]
+fn query_cost_prices_postings_from_the_dictionary() {
+    let abc = ngram_keys("abc", 3)[0];
+    let bcd = ngram_keys("bcd", 3)[0];
+    let abc_bm = bm(&[1, 3, 5, 7]);
+    let bcd_bm = bm(&[3, 5, 9]);
+    let abc_size = serialize_posting(&abc_bm).len() as u64;
+    let bcd_size = serialize_posting(&bcd_bm).len() as u64;
+    let buf = build_rrs(3, 2, &[(abc, abc_bm), (bcd, bcd_bm)]);
+    let idx = block_on(Index::open(MemoryFetch::new(buf))).unwrap();
+
+    // Costs come straight from the dictionary's recorded posting sizes.
+    assert_eq!(block_on(idx.query_cost("abc")).unwrap(), abc_size);
+    assert_eq!(
+        block_on(idx.query_cost("abcd")).unwrap(),
+        abc_size + bcd_size
+    );
+    // An absent trigram short-circuits the strict-AND search to empty -> cost 0,
+    // and an unkeyable query prices to 0 too.
+    assert_eq!(block_on(idx.query_cost("abq")).unwrap(), 0);
+    assert_eq!(block_on(idx.query_cost("")).unwrap(), 0);
+}
+
+#[test]
+fn filter_cost_prices_categories_from_resident_meta() {
+    let en = bm(&[1, 2, 3]);
+    let es = bm(&[4, 5, BUCKET + 1]);
+    let (en_h, en_t) = split_head_tail(&en);
+    let (es_h, es_t) = split_head_tail(&es);
+    let facets = block_on(FacetIndex::open(MemoryFetch::new(build_rrsf(&[(
+        "language",
+        vec![("en", en), ("es", es)],
+    )]))))
+    .unwrap();
+
+    let pair = |f: &str, c: &str| (f.to_string(), c.to_string());
+    assert_eq!(
+        facets.filter_cost(&[pair("language", "en")]),
+        (en_h.len() + en_t.len()) as u64
+    );
+    assert_eq!(
+        facets.filter_cost(&[pair("language", "en"), pair("language", "es")]),
+        (en_h.len() + en_t.len() + es_h.len() + es_t.len()) as u64
+    );
+    // Unknown selections fetch nothing, so they price to 0.
+    assert_eq!(facets.filter_cost(&[pair("language", "fr")]), 0);
+    assert_eq!(facets.filter_cost(&[pair("nope", "x")]), 0);
+}
+
+#[test]
 fn open_rejects_zero_stride_with_nonempty_dict() {
     // stride 0 with ngrams > 0 is corruption: sparse_count would silently be 0
     // and every query would return empty instead of surfacing an error.

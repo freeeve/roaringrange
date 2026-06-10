@@ -282,6 +282,22 @@ impl<F: RangeFetch> FacetIndex<F> {
         ResolvedFilter::new(self.fetch.clone(), by_field.into_values().collect())
     }
 
+    /// Total byte size of the selected categories' postings (head + tail) — the
+    /// client-side cost a facet filter adds to a query, priced from the resident
+    /// category table with **no fetch**. Unknown selections contribute 0 (they
+    /// resolve to a match-nothing arm, so nothing is fetched for them either).
+    pub fn filter_cost(&self, pairs: &[(String, String)]) -> u64 {
+        let mut total = 0u64;
+        for (fname, cname) in pairs {
+            if let Some(field) = self.fields.iter().find(|f| &f.name == fname) {
+                if let Some(c) = field.categories.iter().find(|c| &c.name == cname) {
+                    total += c.range.head_size as u64 + c.range.tail_size as u64;
+                }
+            }
+        }
+        total
+    }
+
     /// Computes the per-category document counts within `result` — i.e. how many
     /// of the query's (head) results fall in each category. Returned as a vector
     /// per field, aligned with `self.fields[i].categories`. In-memory; no fetches.

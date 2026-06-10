@@ -298,6 +298,31 @@ impl<F: RangeFetch> Index<F> {
         }
     }
 
+    /// Estimated client-side bytes a search for `query` would fetch — the summed
+    /// posting sizes of its n-gram keys, resolved with **dictionary reads only**
+    /// (KBs, none of the postings themselves). The dictionary records every
+    /// posting's byte length, so a caller can price a query *before* fetching and
+    /// route an expensive one to a server-side search instead. Returns `0` when
+    /// any key is absent (the strict-AND search short-circuits to empty the same
+    /// way). The dict blocks read here are the ones a subsequent local search
+    /// reads anyway, so a fall-through to client-side search re-uses them via the
+    /// range cache.
+    pub async fn query_cost(&self, query: &str) -> Result<u64, IndexError> {
+        let keys = ngram_keys(query, self.gram_size as usize);
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let lookups = join_all(keys.iter().map(|&k| self.lookup(k))).await;
+        let mut total = 0u64;
+        for rec in lookups {
+            match rec? {
+                Some(rec) => total += rec.size as u64,
+                None => return Ok(0),
+            }
+        }
+        Ok(total)
+    }
+
     /// Returns the full posting (all docs) for `key`, or `Ok(None)` if the key is absent. One
     /// ranged dict-block read plus one ranged posting read.
     pub async fn posting(&self, key: u64) -> Result<Option<RoaringBitmap>, IndexError> {

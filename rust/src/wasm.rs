@@ -398,6 +398,25 @@ impl RrsIndex {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    /// Estimated client-side bytes a search for `query` (plus the optional facet
+    /// `filters`, the same `[field, category]` pairs `searchCursorFiltered` takes)
+    /// would fetch — priced from KB-scale dictionary reads and the resident facet
+    /// table only; **no posting is fetched**. Compare against a routing threshold
+    /// to send expensive queries to a server-side search instead. `0` when a query
+    /// trigram is absent (the strict-AND search short-circuits to empty).
+    #[wasm_bindgen(js_name = queryCost)]
+    pub async fn query_cost(&self, query: &str, filters: Option<Array>) -> Result<f64, JsError> {
+        let mut total = self
+            .inner
+            .query_cost(query)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        if let (Some(filters), Some(f)) = (filters, self.facets.as_ref()) {
+            total += f.filter_cost(&filter_pairs(&filters)?);
+        }
+        Ok(total as f64)
+    }
+
     /// Opens a stateful pagination cursor for `query` (one head fetch wave up
     /// front). Resolves to an `RrsCursor`.
     #[wasm_bindgen(js_name = searchCursor)]
