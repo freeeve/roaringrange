@@ -4,6 +4,32 @@ Coordinated migration to bring the OpenAlex demo fully consistent on **RRSI v3**
 **split-set** toggle back on. Gated on the in-flight v3 monolith build. Do NOT run the heavy
 steps while that build (or the Gemma embed) is competing for the box.
 
+## ⏯ RESUME HERE — status 2026-06-09 evening (context cleared mid-cutover)
+**v3 monolith is BUILT, VERIFIED, and STAGING to S3. Strategy chosen: OVERWRITE IN PLACE (option a).**
+- Built: `/tmp/oa-out/openalex-full.rrs` (105.4 GB, RRSI **v3**, 114,556,791 trigrams) via `build_trigram_monolith`
+  (commit `cfa643b`). Verified queryable: `cargo run --release --example query_rrs -- /tmp/oa-out/openalex-full.rrs "machine learning"` → 20 hits; gibberish → 0.
+- **Uploading to a STAGING key** `s3://openalex-eve/openalex-full-v3.rrs` (non-destructive; live v2 untouched).
+  Detached bg job, log `/tmp/oa-out/upload_monolith_v3.log`. Confirm it finished before cutover:
+  `AWS_PROFILE=openalex-admin aws s3api head-object --bucket openalex-eve --key openalex-full-v3.rrs --query ContentLength --output text` should equal `stat -f%z /tmp/oa-out/openalex-full.rrs`.
+- Steps 1 (stripped 29 KB manifest, live) + 2 (split re-enabled in `index.html`) are DONE.
+- Committed+pushed this session (tag **v0.8.0**): libzstd record-decode fix (`331613a`), `build_trigram_monolith`
+  (`cfa643b`), client **range cache** (`ba3ca3b` + demo `8b50350`), `query_rrs` (`67fc810`), demo copy fixes (`47d5f6f`).
+
+**Remaining cutover (run top-to-bottom once the staging upload is confirmed complete):**
+```bash
+export AWS_PROFILE=openalex-admin
+# 1. verify the staged v3 object (header v3 + full size)
+aws s3api get-object --bucket openalex-eve --key openalex-full-v3.rrs --range bytes=4-5 /dev/stdout | xxd -p   # → 0300
+aws s3api head-object --bucket openalex-eve --key openalex-full-v3.rrs --query ContentLength --output text     # == stat -f%z /tmp/oa-out/openalex-full.rrs
+# 2. atomic overwrite of the LIVE key (same-bucket multipart copy; no re-upload). THIS STARTS THE BREAKAGE WINDOW.
+aws s3 cp s3://openalex-eve/openalex-full-v3.rrs s3://openalex-eve/openalex-full.rrs --cache-control "public, max-age=31536000, immutable"
+# 3. deploy v3 wasm + web assets (NO --no-build): ships v3 reader + range cache + copy fixes + split toggle
+( cd /Users/efreeman/roaringrange/examples/openalex && ./deploy.sh )
+# 4. invalidate the overwritten data file (deploy.sh only invalidates /index.html /how-it-works.html)
+aws cloudfront create-invalidation --distribution-id E3H4W2Y0UYDT7E --paths /openalex-full.rrs
+```
+Then verify live: trigram (mono + split toggle), term, semantic, hybrid render + facets filter; perf-bar footer shows `cache N hits`. CloudFront dist = `E3H4W2Y0UYDT7E`. Open question left for the user: run the cutover automatically when the upload verifies, or pause for a go. After success, optional cleanup: `s3 rm openalex-full-v3.rrs` and local `/tmp/oa-out/{openalex-full.rrs,openalex-full.rrs.rrwork,records-full.*}` to reclaim disk. Other bg job still running: Gemma embed (`embed_gemma_memmap.py`, separate, ~hours).
+
 ## Why
 The reader/wasm crate is **RRSI v3-only** (commit `d4cc15b`). Live state today (2026-06-09):
 - `openalex-full.rrs` monolith = **v2** → only the *old* (v2) deployed wasm can read it.
