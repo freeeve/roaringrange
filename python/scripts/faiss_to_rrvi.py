@@ -48,10 +48,14 @@ def export_to_rrvi(
     metric: str = "ip",
     train_size: int | None = None,
     seed: int = 1234,
+    normalized: bool = False,
 ) -> rr.VectorBuildStats:
     """Trains `OPQ{m},IVF{nlist},PQ{m}` over `vectors` and writes `out_path`.
 
     `vectors` is `(n, dim)` float32; `doc_ids` is `(n,)` uint32 aligned to it.
+    `normalized=True` declares the vectors already L2-normalized, skipping the
+    in-place renormalize — required to train straight off a read-only source
+    (e.g. a `mode="r"` memmap of an embedder's output) without copying it.
     Returns the binding's `VectorBuildStats`.
     """
     faiss = _require_faiss()
@@ -63,7 +67,14 @@ def export_to_rrvi(
     if doc_ids.shape != (n,):
         raise ValueError("doc_ids must be shape (n,)")
 
-    if metric in ("ip", "cosine", "inner_product", "dot"):
+    if metric in ("ip", "cosine", "inner_product", "dot") and not normalized:
+        # normalize_L2 writes in place, and ascontiguousarray of an
+        # already-contiguous float32 input is a no-copy VIEW — so a read-only
+        # source must be copied first: faiss's swig_ptr ignores the numpy
+        # writeable flag and writing through the view into PROT_READ mmap
+        # pages SIGBUSes (macOS) or corrupts silently.
+        if not x.flags.writeable:
+            x = x.copy()
         faiss.normalize_L2(x)
 
     index = faiss.index_factory(dim, f"OPQ{m},IVF{nlist},PQ{m}", faiss.METRIC_L2)
@@ -145,6 +156,9 @@ def report_recall(vectors: np.ndarray, nlist: int, m: int, metric: str, k: int =
     x = np.ascontiguousarray(vectors, dtype="float32")
     n, dim = x.shape
     if metric in ("ip", "cosine", "inner_product", "dot"):
+        # See export_to_rrvi: normalize_L2 is in-place; copy a read-only view first.
+        if not x.flags.writeable:
+            x = x.copy()
         faiss.normalize_L2(x)
     rng = np.random.default_rng(seed)
     q = x[rng.choice(n, size=min(n_queries, n), replace=False)].copy()
