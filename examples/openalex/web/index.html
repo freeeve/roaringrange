@@ -654,8 +654,10 @@
             <label for="mode-term">Term</label>
             <input type="radio" name="mode" id="mode-semantic" value="semantic" />
             <label for="mode-semantic">Semantic</label>
-            <input type="radio" name="mode" id="mode-hybrid" value="hybrid" />
-            <label for="mode-hybrid">Hybrid</label>
+            <input type="radio" name="mode" id="mode-hybrid-tri" value="hybrid-tri" />
+            <label for="mode-hybrid-tri">Hybrid·tri</label>
+            <input type="radio" name="mode" id="mode-hybrid-term" value="hybrid-term" />
+            <label for="mode-hybrid-term">Hybrid·term</label>
           </div>
 
           <div class="fuzz" id="fuzzmode" role="radiogroup" aria-label="Match mode">
@@ -900,7 +902,7 @@
 
       // Static file → URL, keyed for the per-mode size readout. A dataset may not
       // ship every file (e.g. no vector/term index), in which case its URL is null.
-      const FILE_URLS = { rrs: RRS_URL, rrf: RRF_URL, idx: IDX_URL, bin: BIN_URL, rril: LOOKUP_URL, dict: DICT_URL, rrvi: RRVI_URL, rrm2: RRM2_URL, rrt: RRT_URL };
+      const FILE_URLS = { rrs: RRS_URL, rrf: RRF_URL, idx: IDX_URL, bin: BIN_URL, rril: LOOKUP_URL, dict: DICT_URL, rrvi: RRVI_URL, rrm2: RRM2_URL, rrt: RRT_URL, rrss: SPLIT_RRSS_URL };
       const fileSizes = {};   // file key → byte length (0 = unknown / not reachable)
 
       /* True object size via a 1-byte ranged GET's Content-Range ("bytes 0-0/<total>").
@@ -940,13 +942,17 @@
         const parts = [];
         const add = (label, bytes) => parts.push({ label, bytes });
         if (mode === "trigram" && splitMode && rrss) {
-          // Split-set backend: the manifest + per-split files (and their .rrf), as one footprint.
-          add(`.rrss + ${rrss.splitCount()} splits`, Number(rrss.totalBytes()));
-        } else if (mode === "trigram" || mode === "hybrid") {
+          // Split-set backend: the resident manifest, then the split bodies as one
+          // footprint with their doc coverage — a tier-pruned manifest (the lite
+          // set) searches fewer docs than the record store holds, and the chip
+          // makes that visible.
+          add(".rrss manifest", fileSizes.rrss);
+          add(`${rrss.splitCount()} splits · ${fmtCount(Number(rrss.docCount()))} docs`, Number(rrss.totalBytes()));
+        } else if (mode === "trigram" || mode === "hybrid-tri") {
           add(".rrs", fileSizes.rrs); add(".rrf", fileSizes.rrf);
         }
-        if (mode === "term") add(".rrt", fileSizes.rrt);
-        if (mode === "semantic" || mode === "hybrid") { add(".rrvi", fileSizes.rrvi); add(".rrm2", fileSizes.rrm2); }
+        if (mode === "term" || mode === "hybrid-term") add(".rrt", fileSizes.rrt);
+        if (mode.startsWith("hybrid") || mode === "semantic") { add(".rrvi", fileSizes.rrvi); add(".rrm2", fileSizes.rrm2); }
         const records = (fileSizes.idx || 0) + (fileSizes.bin || 0);
         if (records) add("records", records);
         if (fileSizes.dict) add(".dict", fileSizes.dict);
@@ -1022,6 +1028,7 @@
         const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
         if (mode !== "trigram") params.set("mode", mode);
         if (splitMode) params.set("split", "1");
+        if (serverMode) params.set("srv", "1");
         const mm = currentFuzz();
         if (mm) params.set("fuzz", String(mm));
         for (const key of activeFilters) params.append("f", key);
@@ -1041,6 +1048,10 @@
         const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = triOnly ? "" : "none";
         els.splitmodeWrap.hidden = !(triOnly && rrss);
         if (!triOnly && splitMode) { splitMode = false; els.splitmode.checked = false; }
+        // The Gemma embed toggle only applies to the vector modes: show it there
+        // (when configured), never under trigram/term.
+        els.lambdasemWrap.hidden =
+          !((mode === "semantic" || mode.startsWith("hybrid")) && EMBED_LAMBDA_URL && RRVI_GEMMA_URL);
       }
 
       /* Apply URL params to the inputs/checkboxes on load. Facet boxes must already be
@@ -1054,10 +1065,15 @@
           els.q.value = q;
           // Restore the search mode (default trigram). A deep link must replay in the
           // backend that produced it — its page offset indexes that backend's ranking.
-          const mode = params.get("mode");
-          if (["term", "semantic", "hybrid"].includes(mode)) {
+          // Legacy deep links: "hybrid" predates the two-arm split — treat as tri+sem.
+          const mode = params.get("mode") === "hybrid" ? "hybrid-tri" : params.get("mode");
+          if (["term", "semantic", "hybrid-tri", "hybrid-term"].includes(mode)) {
             const r = $(`mode-${mode}`);
             if (r) { r.checked = true; syncModeUi(mode); }
+          } else if (params.get("srv") === "1") {
+            // Server and split are mutually exclusive; srv wins if both appear.
+            serverMode = true;
+            els.servermode.checked = true;
           } else if (params.get("split") === "1" && rrss) {
             splitMode = true;
             els.splitmode.checked = true;
@@ -1131,7 +1147,7 @@
           {
             g: "popular",
             name: (serverMode || autoRouted) ? "ID fetch (lambda)" : "ID fetch",
-            desc: (serverMode || autoRouted) ? "IDs + facets returned" : (searchMode === "term" ? "FST term postings" : "intersect trigrams"),
+            desc: (serverMode || autoRouted) ? "IDs + facets returned" : ((searchMode === "term" || searchMode === "hybrid-term") ? "FST term postings" : "intersect trigrams"),
             get: () => perfModel.search,
           },
           { g: "popular", name: "DOI lookup", desc: "resolve identifier", get: () => perfModel.doilookup },
@@ -1915,7 +1931,7 @@
         }
         // Semantic / hybrid: embed the query in-browser (model2vec) and search the
         // vector index; render through the same showDocs() doc-ID path.
-        if (searchMode === "semantic" || searchMode === "hybrid") {
+        if (searchMode === "semantic" || searchMode.startsWith("hybrid")) {
           const ok = lambdaSemantic ? await ensureGemmaVector() : await ensureVector();
           if (mySeq !== searchSeq) return;
           // Active facets filter the ranked vector results (vector_id == doc_id, so
@@ -1946,36 +1962,43 @@
             await goPageRanked(resetPaging ? 0 : offset);
             return;
           }
-          // hybrid: fuse the trigram and semantic result lists by reciprocal rank.
+          // hybrid: fuse a text arm with the semantic arm by reciprocal rank. The
+          // text arm is the trigram intersection (hybrid-tri) or the FST term
+          // postings (hybrid-term) — same fusion, different recall/precision trade.
           // The two arms run sequentially ON PURPOSE: the perf bar's per-phase
           // reqs/bytes come from global fetch counters, so overlapping the vector
-          // probe with the trigram intersection would scramble each arm's
-          // attribution — the instrument this demo exists to show.
+          // probe with the text fetch would scramble each arm's attribution — the
+          // instrument this demo exists to show.
+          const termArm = searchMode === "hybrid-term";
+          const textReady = termArm ? await ensureTermIndex() : !!idx;
+          if (mySeq !== searchSeq) return;
           const t0 = performance.now();
-          let sem = null, tri = [];
+          let sem = null, text = [];
           if (ok) { try { sem = await semanticIds(q, depth); } catch (_) {} }
-          let triMs = 0, triReqs = 0, triBytes = 0;
-          if (idx) {
+          let txMs = 0, txReqs = 0, txBytes = 0;
+          if (textReady) {
             const tr0 = reqs, tb0 = bytes, tt0 = performance.now();
-            try { tri = Array.from(await idx.search(q, depth)); } catch (_) {}
-            triMs = performance.now() - tt0; triReqs = reqs - tr0; triBytes = bytes - tb0;
+            try {
+              text = Array.from(termArm ? await rterm.search(q, depth) : await idx.search(q, depth));
+            } catch (_) {}
+            txMs = performance.now() - tt0; txReqs = reqs - tr0; txBytes = bytes - tb0;
           }
           if (mySeq !== searchSeq) return;
           // Fusion runs in the wasm reader (the same reciprocal_rank_fusion every
           // native consumer uses), so the demo can't drift from the library's ranking.
           const fused = Array.from(reciprocalRankFusion(
-            Uint32Array.from(sem ? sem.ids : []), Uint32Array.from(tri), RRF_K));
+            Uint32Array.from(sem ? sem.ids : []), Uint32Array.from(text), RRF_K));
           const ff = await facetFilter(fused, filters);
           if (mySeq !== searchSeq) return;
           cur = null;
           rankedIds = ff.ids;
-          rankedSummary = `hybrid (RRF)${filters.length ? " + facets" : ""} · ${ff.ids.length} result${ff.ids.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`;
+          rankedSummary = `hybrid ${termArm ? "term" : "trigram"}+semantic (RRF)${filters.length ? " + facets" : ""} · ${ff.ids.length} result${ff.ids.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`;
           // Both arms shown side by side: embed + vector fetch (semantic) and the
-          // trigram intersection (the existing "ID fetch" row); facets filter the fusion.
+          // text arm (the existing "ID fetch" row); facets filter the fusion.
           setPerf({
             embed: sem ? { ms: sem.embedMs, reqs: sem.embedReqs, bytes: sem.embedBytes } : null,
             vsearch: sem ? { ms: sem.searchMs, reqs: sem.reqs, bytes: sem.bytes } : null,
-            search: idx ? { ms: triMs, reqs: triReqs, bytes: triBytes } : null,
+            search: textReady ? { ms: txMs, reqs: txReqs, bytes: txBytes } : null,
             facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
             tail: null, tailresults: null,
           });
@@ -2198,8 +2221,10 @@
             ? records
             : await RrsRecords.open(SPLIT_REC_IDX_URL, SPLIT_REC_BIN_URL);
         } catch (_) { rrss = null; splitRecords = null; return; }
-        // Reveal the toggle (trigram mode only — syncModeUi recomputes from rrss).
+        // Reveal the toggle (trigram mode only — syncModeUi recomputes from rrss),
+        // and refresh the file chips in case split mode is already on (?ds=lite).
         syncModeUi(document.querySelector('input[name="mode"]:checked')?.value || "trigram");
+        renderActiveFiles();
       }
 
       /* -------- events -------- */
@@ -2274,10 +2299,11 @@
       // Mode-1 opt-in: embed queries with the EmbeddingGemma Lambda against the Gemma
       // vector index, instead of the in-browser model2vec embedder. Only revealed when
       // both an embed endpoint and a Gemma index are configured for this dataset.
-      if (EMBED_LAMBDA_URL && RRVI_GEMMA_URL) els.lambdasemWrap.hidden = false;
+      // Visibility lives in syncModeUi: the embed toggle shows only under the
+      // vector modes (and only when an endpoint + Gemma index are configured).
       els.lambdasem.addEventListener("change", () => {
         lambdaSemantic = els.lambdasem.checked;
-        if (searchMode === "semantic" || searchMode === "hybrid") runSearch(true);
+        if (searchMode === "semantic" || searchMode.startsWith("hybrid")) runSearch(true);
       });
       els.clearfilters.addEventListener("click", () => {
         activeFilters.clear();

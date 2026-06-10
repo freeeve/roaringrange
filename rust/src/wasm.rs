@@ -1751,6 +1751,18 @@ impl RrssIndex {
         self.inner.splits().len()
     }
 
+    /// Total documents the manifest's splits hold (Σ per-split doc counts) — what
+    /// a tier-pruned manifest (e.g. the lite tier-prefix set) actually searches,
+    /// as opposed to the record store's full corpus size.
+    #[wasm_bindgen(js_name = docCount)]
+    pub fn doc_count(&self) -> f64 {
+        self.inner
+            .splits()
+            .iter()
+            .map(|s| s.doc_count as u64)
+            .sum::<u64>() as f64
+    }
+
     /// Number of delta splits flushed since the base (0 for a base-only set).
     #[wasm_bindgen(js_name = deltaCount)]
     pub fn delta_count(&self) -> usize {
