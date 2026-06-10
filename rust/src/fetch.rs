@@ -105,6 +105,66 @@ impl RangeFetch for MemoryFetch {
     }
 }
 
+/// Gap (bytes) up to which [`read_coalesced`] bridges two nearby ranges into one
+/// read: over-reading at most this much beats paying another round trip. Matches
+/// the posting reader's container-span gap.
+pub(crate) const COALESCE_GAP: u64 = 16 * 1024;
+
+/// Fetches a batch of byte ranges in one concurrent wave, **coalescing**
+/// near-adjacent ranges (gap ≤ `gap` bytes) into single reads and slicing the
+/// results back out, aligned with `ranges`. Object stores have no multi-range
+/// GET, so a page of clustered small reads (record offset pairs, rank-adjacent
+/// record slices, one field's facet postings) otherwise costs one round trip
+/// each. The bridged gap bytes land in the shared range cache, so they are not
+/// wasted on a warm client. A zero-length range yields an empty vec, no fetch.
+pub(crate) async fn read_coalesced<F: RangeFetch>(
+    fetch: &F,
+    ranges: &[(u64, usize)],
+    gap: u64,
+) -> Result<Vec<Vec<u8>>, FetchError> {
+    use futures::future::join_all;
+    let mut order: Vec<usize> = (0..ranges.len()).collect();
+    order.sort_by_key(|&i| ranges[i].0);
+
+    let mut spans: Vec<(u64, u64)> = Vec::new(); // [start, end)
+    let mut span_of: Vec<usize> = vec![usize::MAX; ranges.len()];
+    for &i in &order {
+        let (off, len) = ranges[i];
+        if len == 0 {
+            continue;
+        }
+        let end = off + len as u64;
+        match spans.last_mut() {
+            Some(last) if off <= last.1.saturating_add(gap) => {
+                if end > last.1 {
+                    last.1 = end;
+                }
+            }
+            _ => spans.push((off, end)),
+        }
+        span_of[i] = spans.len() - 1;
+    }
+
+    let reads = spans.iter().map(|&(s, e)| fetch.read(s, (e - s) as usize));
+    let datas = join_all(reads).await;
+    let mut bytes: Vec<Vec<u8>> = Vec::with_capacity(spans.len());
+    for d in datas {
+        bytes.push(d?);
+    }
+    Ok(ranges
+        .iter()
+        .enumerate()
+        .map(|(i, &(off, len))| {
+            if len == 0 {
+                return Vec::new();
+            }
+            let (s, _) = spans[span_of[i]];
+            let rel = (off - s) as usize;
+            bytes[span_of[i]][rel..rel + len].to_vec()
+        })
+        .collect())
+}
+
 /// A file-backed [`RangeFetch`] for native tooling (builders, benches,
 /// verifiers): positioned reads against a local file, mirroring the ranged-GET
 /// access pattern with no server. Cheap to clone — the open handle is shared.
@@ -160,6 +220,63 @@ mod tests {
         assert_eq!(block_on(f.read(0, 0)).unwrap(), Vec::<u8>::new());
         assert_eq!(f.len(), 6);
         assert!(!f.is_empty());
+    }
+
+    /// A [`RangeFetch`] wrapper counting how many reads reach the backing store.
+    struct CountingFetch {
+        inner: MemoryFetch,
+        reads: std::cell::Cell<usize>,
+    }
+
+    impl RangeFetch for CountingFetch {
+        async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
+            self.reads.set(self.reads.get() + 1);
+            self.inner.read(offset, len).await
+        }
+    }
+
+    #[test]
+    fn coalesced_reads_match_and_merge() {
+        let backing: Vec<u8> = (0..200u8).collect();
+        let f = CountingFetch {
+            inner: MemoryFetch::new(backing.clone()),
+            reads: std::cell::Cell::new(0),
+        };
+        // Unsorted, overlapping, adjacent, gapped, and zero-length ranges.
+        let ranges: Vec<(u64, usize)> = vec![
+            (50, 10), // merges with (40,15) (overlap) and (62,8) (gap 2)
+            (0, 4),   // own span (gap to 40 exceeds 16)
+            (40, 15),
+            (62, 8),
+            (10, 0),   // zero-length: no fetch, empty result
+            (150, 20), // far: own span
+        ];
+        let out = block_on(read_coalesced(&f, &ranges, 16)).unwrap();
+        for (i, &(off, len)) in ranges.iter().enumerate() {
+            assert_eq!(
+                out[i],
+                backing[off as usize..off as usize + len],
+                "range {i} bytes"
+            );
+        }
+        assert_eq!(
+            f.reads.get(),
+            3,
+            "five non-empty ranges merged into 3 spans"
+        );
+
+        // gap 0 still merges true overlaps/adjacency but not the 2-byte gap.
+        let f2 = CountingFetch {
+            inner: MemoryFetch::new(backing),
+            reads: std::cell::Cell::new(0),
+        };
+        let out2 = block_on(read_coalesced(&f2, &ranges, 0)).unwrap();
+        assert_eq!(out2[0], out[0]);
+        assert_eq!(
+            f2.reads.get(),
+            4,
+            "(62,8) splits off without the gap bridge"
+        );
     }
 
     #[test]

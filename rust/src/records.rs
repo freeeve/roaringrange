@@ -21,7 +21,6 @@
 
 use crate::fetch::RangeFetch;
 use crate::index::{read_u16, read_u32, read_u64, IndexError};
-use futures::future::join_all;
 
 /// `RRSR` index magic.
 const MAGIC: &[u8; 4] = b"RRSR";
@@ -207,15 +206,53 @@ impl<F: RangeFetch> RecordStore<F> {
     }
 
     /// Decoded record bytes for several doc IDs, aligned with `ids`. A results page
-    /// (ascending doc IDs in rank order) is the typical input. Every doc's `get`
-    /// is issued before any is awaited, so a page's reads proceed as a few
-    /// concurrent waves rather than one serial round-trip per doc; `join_all`
-    /// preserves order, keeping the output aligned with `ids`.
+    /// (ascending doc IDs in rank order) is the typical input, and rank-adjacent
+    /// docs sit adjacently in both files — so the reads run as two **coalesced**
+    /// waves (every offset pair, then every record slice), each merging
+    /// near-adjacent ranges into single requests: a 25-doc page costs a handful
+    /// of round trips instead of 50. An out-of-range id yields `None`.
     pub async fn get_many(&self, ids: &[u32]) -> Result<Vec<Option<Vec<u8>>>, IndexError> {
-        let results = join_all(ids.iter().map(|&id| self.get(id))).await;
-        let mut out = Vec::with_capacity(results.len());
-        for rec in results {
-            out.push(rec?);
+        use crate::fetch::{read_coalesced, COALESCE_GAP};
+        // Wave 1: the 16-byte offset pairs (zero-length marker = skip the read;
+        // the id-bounds check below decides the output, so the marker can't be
+        // confused with a real empty record).
+        let pair_ranges: Vec<(u64, usize)> = ids
+            .iter()
+            .map(|&id| {
+                if id < self.count {
+                    (HEADER_SIZE as u64 + id as u64 * 8, 16)
+                } else {
+                    (0, 0)
+                }
+            })
+            .collect();
+        let pairs = read_coalesced(&self.idx, &pair_ranges, COALESCE_GAP).await?;
+
+        // Wave 2: the record slices.
+        let mut rec_ranges: Vec<(u64, usize)> = Vec::with_capacity(ids.len());
+        for (i, &id) in ids.iter().enumerate() {
+            if id >= self.count {
+                rec_ranges.push((0, 0));
+                continue;
+            }
+            let start = read_u64(&pairs[i], 0);
+            let end = read_u64(&pairs[i], 8);
+            if end < start {
+                return Err(IndexError::Malformed("record offset pair has end < start"));
+            }
+            let len = usize::try_from(end - start)
+                .map_err(|_| IndexError::Malformed("record length exceeds the address space"))?;
+            rec_ranges.push((start, len));
+        }
+        let blobs = read_coalesced(&self.bin, &rec_ranges, COALESCE_GAP).await?;
+
+        let mut out = Vec::with_capacity(ids.len());
+        for (&id, blob) in ids.iter().zip(blobs) {
+            if id >= self.count {
+                out.push(None);
+            } else {
+                out.push(Some(self.decode(blob)?));
+            }
         }
         Ok(out)
     }

@@ -12,7 +12,6 @@
 
 use crate::fetch::RangeFetch;
 use crate::index::{read_u16, read_u32, read_u64, CatRange, IndexError, ResolvedFilter};
-use futures::future::join_all;
 use roaring::RoaringBitmap;
 use std::collections::BTreeMap;
 
@@ -240,10 +239,13 @@ impl<F: RangeFetch> FacetIndex<F> {
                     reqs.push((j, cats[j].range.head_off, cats[j].range.head_size as usize));
                 }
             }
-            let reads = reqs.iter().map(|&(_, off, len)| fetch.read(off, len));
-            let results = join_all(reads).await;
-            for (&(j, _, _), bytes) in reqs.iter().zip(results) {
-                cats[j].head = RoaringBitmap::deserialize_from(&bytes?[..])
+            // Coalesced: the top heads cluster near each field's region start,
+            // so the wave collapses to roughly one request per field.
+            let ranges: Vec<(u64, usize)> = reqs.iter().map(|&(_, off, len)| (off, len)).collect();
+            let datas =
+                crate::fetch::read_coalesced(&fetch, &ranges, crate::fetch::COALESCE_GAP).await?;
+            for (&(j, _, _), bytes) in reqs.iter().zip(datas) {
+                cats[j].head = RoaringBitmap::deserialize_from(&bytes[..])
                     .map_err(|err| IndexError::Roaring(err.to_string()))?;
             }
         }

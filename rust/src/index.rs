@@ -738,16 +738,17 @@ impl<F: RangeFetch> ResolvedFilter<F> {
                 flat.push((fi, range_of(c)));
             }
         }
-        let reads = flat
-            .iter()
-            .map(|(_, (off, len))| self.fetch.read(*off, *len));
-        let results = join_all(reads).await;
+        // Coalesced: one field's selected categories sit adjacently in the
+        // postings region, so several selections often cost one request.
+        let ranges: Vec<(u64, usize)> = flat.iter().map(|&(_, r)| r).collect();
+        let datas =
+            crate::fetch::read_coalesced(&self.fetch, &ranges, crate::fetch::COALESCE_GAP).await?;
 
         let mut per_field: Vec<RoaringBitmap> = (0..self.fields.len())
             .map(|_| RoaringBitmap::new())
             .collect();
-        for ((fi, _), bytes) in flat.iter().zip(results) {
-            per_field[*fi] |= deserialize(&bytes?)?;
+        for ((fi, _), bytes) in flat.iter().zip(datas) {
+            per_field[*fi] |= deserialize(&bytes)?;
         }
         per_field.sort_by_key(|b| b.len());
         let mut iter = per_field.into_iter();
