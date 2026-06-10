@@ -282,6 +282,28 @@ impl<F: RangeFetch> FacetIndex<F> {
         ResolvedFilter::new(self.fetch.clone(), by_field.into_values().collect())
     }
 
+    /// An upper bound on how many docs can satisfy the facet filter, from the
+    /// **resident** category counts alone (no fetch): within a field the
+    /// selected categories OR (bound = sum of their counts), across fields they
+    /// AND (bound = min over fields). A selected field whose categories all fail
+    /// to resolve bounds the filter at 0 (it matches nothing). `None` when
+    /// `pairs` is empty (no constraint).
+    pub fn filter_count_bound(&self, pairs: &[(String, String)]) -> Option<u64> {
+        if pairs.is_empty() {
+            return None;
+        }
+        let mut by_field: BTreeMap<&str, u64> = BTreeMap::new();
+        for (fname, cname) in pairs {
+            let sum = by_field.entry(fname.as_str()).or_insert(0);
+            if let Some(field) = self.fields.iter().find(|f| &f.name == fname) {
+                if let Some(c) = field.categories.iter().find(|c| &c.name == cname) {
+                    *sum += c.count as u64;
+                }
+            }
+        }
+        by_field.into_values().min()
+    }
+
     /// Total byte size of the selected categories' postings (head + tail) — the
     /// client-side cost a facet filter adds to a query, priced from the resident
     /// category table with **no fetch**. Unknown selections contribute 0 (they

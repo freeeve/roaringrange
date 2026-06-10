@@ -323,6 +323,42 @@ impl<F: RangeFetch> Index<F> {
         Ok(total)
     }
 
+    /// Exact match count for `key` without fetching its posting body — one
+    /// dict-block read plus the posting's descriptive header (KBs; roaring
+    /// stores per-container cardinalities there). `Ok(None)` when absent.
+    pub async fn term_count(&self, key: u64) -> Result<Option<u64>, IndexError> {
+        match self.lookup(key).await? {
+            None => Ok(None),
+            Some(rec) => Ok(Some(
+                crate::posting::posting_cardinality(&self.fetch, rec.offset, rec.size as usize)
+                    .await?,
+            )),
+        }
+    }
+
+    /// Exact-or-bounded match count for a strict-AND `query`, without fetching
+    /// any posting body: `(count, exact)`. A query with one n-gram key gets its
+    /// **exact** cardinality; several keys get the smallest per-key count — an
+    /// **upper bound** on the intersection (`exact == false`). `(0, true)` when
+    /// the query has no keys or any key is absent (the strict AND is empty).
+    /// Not valid for fuzzy (`max_missing > 0`) matching, where the min is no
+    /// longer a bound.
+    pub async fn count_estimate(&self, query: &str) -> Result<(u64, bool), IndexError> {
+        let keys = ngram_keys(query, self.gram_size as usize);
+        if keys.is_empty() {
+            return Ok((0, true));
+        }
+        let counts = join_all(keys.iter().map(|&k| self.term_count(k))).await;
+        let mut min = u64::MAX;
+        for c in counts {
+            match c? {
+                None => return Ok((0, true)),
+                Some(n) => min = min.min(n),
+            }
+        }
+        Ok((min, keys.len() == 1))
+    }
+
     /// Returns the full posting (all docs) for `key`, or `Ok(None)` if the key is absent. One
     /// ranged dict-block read plus one ranged posting read.
     pub async fn posting(&self, key: u64) -> Result<Option<RoaringBitmap>, IndexError> {

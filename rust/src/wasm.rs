@@ -422,6 +422,37 @@ impl RrsIndex {
         Ok(total as f64)
     }
 
+    /// Exact-or-bounded result count for a strict-AND `query` (+ optional facet
+    /// `filters`), **without fetching any posting body**: KB-scale dictionary +
+    /// posting-header reads, plus the resident facet counts. `exact` is true only
+    /// for a single-trigram unfiltered query; otherwise `count` is an upper bound
+    /// (the smallest per-trigram cardinality, min'd with the filter's resident
+    /// count bound). Not valid for fuzzy (`max_missing > 0`) matching.
+    #[wasm_bindgen(js_name = countEstimate)]
+    pub async fn count_estimate(
+        &self,
+        query: &str,
+        filters: Option<Array>,
+    ) -> Result<CountEstimate, JsError> {
+        let (mut count, mut exact) = self
+            .inner
+            .count_estimate(query)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        if let (Some(filters), Some(f)) = (filters, self.facets.as_ref()) {
+            if let Some(bound) = f.filter_count_bound(&filter_pairs(&filters)?) {
+                if bound < count {
+                    count = bound;
+                }
+                exact = false; // a filter bound is never exact
+            }
+        }
+        Ok(CountEstimate {
+            count: count as f64,
+            exact,
+        })
+    }
+
     /// Opens a stateful pagination cursor for `query` (one head fetch wave up
     /// front). Resolves to an `RrsCursor`.
     #[wasm_bindgen(js_name = searchCursor)]
@@ -481,6 +512,29 @@ impl RrsIndex {
     #[wasm_bindgen(js_name = ngramCount)]
     pub fn ngram_count(&self) -> u32 {
         self.inner.ngram_count()
+    }
+}
+
+/// Result of [`RrsIndex::count_estimate`]: a result count and whether it is
+/// exact (single-trigram unfiltered query) or an upper bound.
+#[wasm_bindgen]
+pub struct CountEstimate {
+    count: f64,
+    exact: bool,
+}
+
+#[wasm_bindgen]
+impl CountEstimate {
+    /// The exact count, or the upper bound when `exact` is false.
+    #[wasm_bindgen(getter)]
+    pub fn count(&self) -> f64 {
+        self.count
+    }
+
+    /// Whether `count` is exact rather than an upper bound.
+    #[wasm_bindgen(getter)]
+    pub fn exact(&self) -> bool {
+        self.exact
     }
 }
 

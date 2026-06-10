@@ -391,6 +391,85 @@ fn membership_bitmap_matches_full_bitmap_via_container_seeks() {
 }
 
 #[test]
+fn count_estimate_from_headers_matches_search() {
+    let abc = ngram_keys("abc", 3)[0];
+    let bcd = ngram_keys("bcd", 3)[0];
+    // abc: a posting large enough (multi-bucket, >4 KB serialized) that the
+    // count must come from the descriptive header, not a whole-posting read;
+    // bcd: a small posting exercising the whole-read fallback.
+    let mut abc_bm = RoaringBitmap::new();
+    for bk in [0u32, 2, 5, 9] {
+        abc_bm.insert_range(bk * 65_536..bk * 65_536 + 5_000);
+    }
+    let bcd_bm = bm(&[3, 5, 9, 70_000]);
+    let buf = build_rrs(3, 2, &[(abc, abc_bm.clone()), (bcd, bcd_bm.clone())]);
+    let idx = block_on(Index::open(MemoryFetch::new(buf))).unwrap();
+
+    // Per-key counts are exact.
+    assert_eq!(
+        block_on(idx.term_count(abc)).unwrap(),
+        Some(abc_bm.len()),
+        "header-derived cardinality"
+    );
+    assert_eq!(block_on(idx.term_count(bcd)).unwrap(), Some(bcd_bm.len()));
+    assert_eq!(
+        block_on(idx.term_count(ngram_keys("zzz", 3)[0])).unwrap(),
+        None
+    );
+
+    // Single-key query: exact. Multi-key: an upper bound >= the true intersection.
+    assert_eq!(
+        block_on(idx.count_estimate("abc")).unwrap(),
+        (abc_bm.len(), true)
+    );
+    let (bound, exact) = block_on(idx.count_estimate("abcd")).unwrap();
+    assert!(!exact);
+    let truth = block_on(idx.search("abcd", usize::MAX)).unwrap().len() as u64;
+    assert!(
+        bound >= truth,
+        "bound {bound} must cover the true count {truth}"
+    );
+    assert_eq!(
+        bound,
+        bcd_bm.len(),
+        "the smallest per-key count is the bound"
+    );
+    // An absent key makes the strict AND empty: exact zero.
+    assert_eq!(block_on(idx.count_estimate("abq")).unwrap(), (0, true));
+}
+
+#[test]
+fn filter_count_bound_uses_resident_counts() {
+    let facets = block_on(FacetIndex::open(MemoryFetch::new(build_rrsf(&[
+        (
+            "format",
+            vec![("ebook", bm(&[1, 3, 5])), ("audiobook", bm(&[2, 4]))],
+        ),
+        ("language", vec![("en", bm(&[1, 2]))]),
+    ]))))
+    .unwrap();
+    let pair = |f: &str, c: &str| (f.to_string(), c.to_string());
+
+    assert_eq!(facets.filter_count_bound(&[]), None);
+    assert_eq!(
+        facets.filter_count_bound(&[pair("format", "ebook")]),
+        Some(3)
+    );
+    // Within a field, selections OR: the bound is the sum.
+    assert_eq!(
+        facets.filter_count_bound(&[pair("format", "ebook"), pair("format", "audiobook")]),
+        Some(5)
+    );
+    // Across fields they AND: the bound is the min of the field sums.
+    assert_eq!(
+        facets.filter_count_bound(&[pair("format", "ebook"), pair("language", "en")]),
+        Some(2)
+    );
+    // An unresolvable field bounds the filter at zero.
+    assert_eq!(facets.filter_count_bound(&[pair("nope", "x")]), Some(0));
+}
+
+#[test]
 fn open_rejects_zero_stride_with_nonempty_dict() {
     // stride 0 with ngrams > 0 is corruption: sparse_count would silently be 0
     // and every query would return empty instead of surfacing an error.

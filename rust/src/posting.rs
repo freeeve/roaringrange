@@ -97,6 +97,44 @@ fn distinct_high_keys(bm: &RoaringBitmap) -> Vec<u16> {
     keys
 }
 
+/// The exact cardinality of the posting at `(off, len)` without fetching its
+/// body: roaring's NO_RUNCONTAINER descriptive header stores each container's
+/// cardinality (`[key u16][card-1 u16]` per container), so the count costs the
+/// 8-byte cookie plus `4·containers` bytes — KBs for a posting of any size. A
+/// small posting or a run-container layout (whose header has no fixed-stride
+/// cardinalities) falls back to reading and deserializing the whole posting.
+pub(crate) async fn posting_cardinality<F: RangeFetch>(
+    fetch: &F,
+    off: u64,
+    len: usize,
+) -> Result<u64, IndexError> {
+    let prefix = fetch.read(off, len.min(HEADER_PREFIX)).await?;
+    if prefix.len() >= len {
+        return Ok(deserialize(&prefix)?.len());
+    }
+    // prefix.len() == HEADER_PREFIX (4 KB) here, so the cookie is in hand.
+    if read_u32(&prefix, 0) != NO_RUNCONTAINER_COOKIE {
+        return Ok(deserialize(&fetch.read(off, len).await?)?.len());
+    }
+    let size = read_u32(&prefix, 4) as usize;
+    let desc_len = match size.checked_mul(4).and_then(|n| n.checked_add(8)) {
+        Some(d) if d <= len => d,
+        _ => {
+            return Err(IndexError::Malformed(
+                "posting descriptive header out of range",
+            ))
+        }
+    };
+    let desc = if desc_len <= prefix.len() {
+        prefix
+    } else {
+        fetch.read(off, desc_len).await?
+    };
+    Ok((0..size)
+        .map(|i| read_u16(&desc, 8 + i * 4 + 2) as u64 + 1)
+        .sum())
+}
+
 /// Reads the posting at `(off, len)` restricted to the containers whose high key
 /// is in `keys`, returned as a RoaringBitmap. Falls back to a full read when the
 /// posting is small enough that seeking saves nothing, or when its layout is not

@@ -979,6 +979,11 @@
       // it (no re-search, no extra index bytes). null in trigram/DOI mode.
       let rankedIds = null;
       let rankedSummary = "";   // search-phase summary prefix; goPageRanked appends each page's record-fetch ms
+      // Header-only result count for the current trigram query: roaring postings
+      // record per-container cardinalities in their descriptive header, so a
+      // single-trigram query's count is EXACT (and a multi-trigram one bounded)
+      // for KBs of reads. { count, exact } or null.
+      let countBound = null;
       const activeFilters = new Set();   // "field\tcategory"
       const recCache = new Map();        // docID -> record JSON
       const countSpans = new Map();      // "field\tname" -> count <span> (live, updated per search)
@@ -1420,15 +1425,27 @@
         const total = lastTotal;
         if (!total && !tailPending) { els.resultcount.textContent = ""; return; }
         if (tailPending) {
+          // A header-derived EXACT count (single-trigram query): show it outright —
+          // paging still materializes the tail incrementally underneath it.
+          if (countBound && countBound.exact) {
+            els.resultcount.innerHTML =
+              `<b>${fmt(countBound.count)}</b> result${countBound.count === 1 ? "" : "s"}` +
+              ` <span style="color:var(--ink-faint);font-size:12px" title="read from the posting's per-container cardinalities — no posting fetched">· counted from headers</span>`;
+            return;
+          }
           const lead = total
             ? `<b>${fmt(total)}</b>+ result${total === 1 ? "" : "s"}`
             : `Searching the full corpus`;
+          // A multi-trigram/filtered query gets a header-derived upper bound for free.
+          const bound = countBound
+            ? ` <span style="color:var(--ink-faint)" title="smallest per-trigram cardinality (∧ the filter's resident bound) — an upper bound, no posting fetched">of ≤ ${fmt(countBound.count)}</span>`
+            : "";
           // Seamless paging: Prev/Next page the tail incrementally (only the buckets
           // each page spans). The exact total needs a full scan, offered as a subtle
           // link — hundreds of MB over the 484M corpus — not a "load the rest" button.
           const exact =
             ` · <button type="button" id="loadall" title="scans every match — can be 100s of MB" style="background:none;border:none;padding:0;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;text-decoration:underline;text-underline-offset:2px">exact count</button>`;
-          els.resultcount.innerHTML = `${lead}${exact}`;
+          els.resultcount.innerHTML = `${lead}${bound}${exact}`;
         } else {
           els.resultcount.innerHTML = `<b>${fmt(total)}</b> result${total === 1 ? "" : "s"}`;
         }
@@ -1814,6 +1831,7 @@
         recCache.clear();
         rankedIds = null;     // a ranked mode (semantic/term/hybrid) sets this; trigram/DOI leave it null
         autoRouted = false;   // each query re-prices; only the trigram path below may set it
+        countBound = null;    // header-only count (exact or ≤ bound); trigram strict-AND only
         // DOI exact-lookup fast path: a DOI-shaped query resolves to the exact work
         // via the lookup sidecar, independent of client/server search mode.
         const bareDoi = lookup ? doiOf(q) : null;
@@ -2005,6 +2023,18 @@
         const openMs = performance.now() - t0;
         const openReqs = reqs;     // dict-block + head-posting reads from the cursor open
         const openBytes = bytes;
+        // Header-only count, off the render path: exact for a single-trigram
+        // query, an upper bound otherwise (smallest per-trigram cardinality,
+        // min'd with the filter's resident count bound) — KBs of reads instead
+        // of the 100s-of-MB full scan. Fuzzy tolerance changes the math, so
+        // only strict AND prices this way.
+        if (mm === 0) {
+          idx.countEstimate(q, filters.map((k) => k.split("\t"))).then((ce) => {
+            if (mySeq !== searchSeq) return;
+            countBound = { count: Number(ce.count), exact: ce.exact };
+            updateResultsHead();
+          }).catch(() => {});
+        }
         // Time the in-wasm facet count over the result set (compute only — no fetch).
         try {
           const fcT0 = performance.now();
