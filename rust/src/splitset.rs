@@ -1042,7 +1042,16 @@ pub(crate) fn bloom_k(bits_per_key: u32) -> u32 {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn bloom_build(keys: &[u64], bits_per_key: u32) -> Vec<u8> {
     let n = (keys.len() as u64).max(1);
-    let nbits = (n * bits_per_key as u64).max(64).next_multiple_of(8);
+    // The serialized nbits field is u32: clamp to the largest 8-multiple that
+    // fits, so a pathological vocabulary degrades to a higher false-positive
+    // rate instead of a filter whose truncated stored modulus disagrees with the
+    // build modulus — that disagreement yields FALSE NEGATIVES, and a Bloom
+    // false negative prunes splits that hold real matches. (Mirrors the Go
+    // builder's bloomBuild byte-for-byte.)
+    let nbits = (n * bits_per_key as u64)
+        .max(64)
+        .next_multiple_of(8)
+        .min(u32::MAX as u64 & !7);
     let k = bloom_k(bits_per_key);
     let mut bits = vec![0u8; (nbits / 8) as usize];
     for &key in keys {

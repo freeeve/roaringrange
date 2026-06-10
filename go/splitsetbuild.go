@@ -363,6 +363,14 @@ func bloomBuild(keys []uint64, bitsPerKey uint32) []byte {
 	if nbits%8 != 0 {
 		nbits += 8 - nbits%8
 	}
+	// The serialized nbits field is u32: clamp to the largest 8-multiple that fits,
+	// so a pathological vocabulary degrades to a higher false-positive rate instead
+	// of a filter whose truncated stored modulus disagrees with the build modulus —
+	// that disagreement yields FALSE NEGATIVES, which prune splits holding real
+	// matches. (Mirrors the Rust builder's bloom_build byte-for-byte.)
+	if nbits > 0xFFFF_FFF8 {
+		nbits = 0xFFFF_FFF8
+	}
 	k := bloomK(bitsPerKey)
 	bits := make([]byte, nbits/8)
 	for _, key := range keys {
