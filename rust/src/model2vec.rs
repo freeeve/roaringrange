@@ -57,6 +57,12 @@ impl Model2vec {
         if dim == 0 || vocab_size == 0 || quant != 0 {
             return Err(IndexError::Malformed("RRM2 dim/vocab/quant invalid"));
         }
+        // unk_id indexes scales/codes unchecked on every OOV token, so an
+        // out-of-range value must fail here at open — not as a panic (a wasm
+        // abort killing the page's reader) on the first unmatched word.
+        if unk_id as usize >= vocab_size {
+            return Err(IndexError::Malformed("RRM2 unk_id out of vocab range"));
+        }
 
         let scales_off = HEADER_SIZE;
         let codes_off = scales_off + vocab_size * 4;
@@ -379,6 +385,19 @@ mod tests {
         assert!(matches!(
             Model2vec::from_bytes(b"NOPE................................"),
             Err(IndexError::Malformed(_) | IndexError::BadVersion(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_out_of_range_unk_id() {
+        // unk_id is dereferenced unchecked on every OOV token; a malformed
+        // artifact must fail at open, not panic in embed().
+        let mut b = tiny();
+        let bad_unk = 5u32; // == vocab_size, one past the last id
+        b[16..20].copy_from_slice(&bad_unk.to_le_bytes());
+        assert!(matches!(
+            Model2vec::from_bytes(&b),
+            Err(IndexError::Malformed(_))
         ));
     }
 }
