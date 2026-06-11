@@ -55,6 +55,19 @@ for deleting the trigram monolith.
       ALSO: visit splits in **parallel waves** (e.g. 8 concurrent) — the 76 s
       "roaring bitmaps" descent above is latency (243 × ~6 serial round-trips),
       not bytes (675 KB). Both are prerequisites for term-split default.
+- [ ] **Geometric split sizing** (2026-06-11): worst-case descent scales with
+      split COUNT (fixed ~4–6 RTTs per split), so retarget from 243×~270 MB
+      flat to doubling tiers — 2M, 4M, 8M, … docs per split, byte-capped at
+      ~8 GiB (the streaming builder holds one open split in RAM) → **~12–15
+      splits**. Keeps a small cheap top split for common queries (fine pruning
+      where queries concentrate) while a FULL descent is ~12 visits ≈ 2–3 s
+      serial, sub-second with waves — vs 76 s today. Trade accepted: a
+      visited split's postings scale with its docs, so the common-query bytes
+      win shrinks ~5–10× (still well under mono's worst case). Implementation:
+      per-tier seal criterion in `SplitSetBuilder` (cap = f(tier) instead of
+      flat); rebuild term set first (the demonstrated pathology), AFTER the
+      .rrb build frees the box. Quickwit targets ~10M docs/split — flat 2M
+      was over-partitioned from the start.
 - [ ] Split cursor/count contract: `RrssIndex` exposes ranked lists only — no
       paging cursor, no `countEstimate`, no `facetCounts`. The demo's count line
       and facet checkboxes silently degrade in split mode.
