@@ -187,22 +187,23 @@ fn main() {
         VectorIndex::open(fetch("openalex-484m.rrvi"))
     );
     let facets = boot!("facets .rrf", FacetIndex::open(fetch("openalex-full.rrf")));
-    // The trigram split manifest is ~727 MB (Bloom-dominated), so opening it pulls that whole
-    // blob resident — opt in with SPLIT_BENCH=1 only.
-    let split = if std::env::var("SPLIT_BENCH").is_ok() {
-        Some(boot!(
-            "split .rrss",
-            SplitSet::open(fetch("openalex-trigram-split/openalex.rrss"))
-        ))
-    } else {
-        eprintln!(
-            "  {:<14} SKIPPED — set SPLIT_BENCH=1 (manifest ~727 MB resident at boot)",
-            "split .rrss"
-        );
-        None
-    };
+    // Both deployed split manifests are summary-stripped and tiny (trigram ~29 KB,
+    // term ~21 KB), so they always open. (The SPLIT_BENCH=1 gate guarded the old
+    // 727 MB Bloom-dominated trigram manifest, gone since the strip.)
+    let split = Some(boot!(
+        "tri split .rrss",
+        SplitSet::open(fetch("openalex-trigram-split/openalex.rrss"))
+    ));
+    let term_split = Some(boot!(
+        "term split .rrss",
+        SplitSet::open(fetch("openalex-split/openalex-484m-terms.rrss"))
+    ));
     let sres = CurlSplits {
         base: format!("{base}/openalex-trigram-split"),
+        c: c.clone(),
+    };
+    let tsres = CurlSplits {
+        base: format!("{base}/openalex-split"),
         c: c.clone(),
     };
     let m2v_bytes = curl_whole(&format!("{base}/potion.rrm2"));
@@ -279,6 +280,17 @@ fn main() {
         row("  term mono +facet", &|| {
             facet_filter(&block_on(term.search(qy, K)).unwrap()).len()
         });
+        if let Some(ts) = term_split.as_ref() {
+            row("  term split", &|| {
+                block_on(ts.search(&tsres, qy, K)).unwrap().len()
+            });
+            // Term-bodied splits don't support the per-split facet-filtered path
+            // (search_split_filtered is trigram-only); the shared-ID-space facet
+            // post-filter applies the same way the monolith rows do.
+            row("  term split +facet", &|| {
+                facet_filter(&block_on(ts.search(&tsres, qy, K)).unwrap()).len()
+            });
+        }
         let qv = m2v.embed(qy);
         row("  semantic", &|| {
             block_on(vidx.search(&qv, SEM_K, NPROBE)).unwrap().len()
