@@ -55,6 +55,22 @@ required-features = ["splits"]
 name = "derive_split_facets"
 required-features = ["splits"]
 
+# Out-of-core full-corpus RRSB (.rrb) BM25 impact-sidecar builder; records are
+# zstd-compressed, so the store needs the decode path.
+[[example]]
+name = "build_impacts"
+required-features = ["terms", "zstd"]
+
+# Local query harness for a .rrt + .rrb BM25 pair.
+[[example]]
+name = "bm25_query"
+required-features = ["terms"]
+
+# Unions split dict keys into the global term-Bloom sidecar; needs `splits`.
+[[example]]
+name = "build_global_bloom"
+required-features = ["splits"]
+
 # Native parallel, bounded-RAM term split-set builder over an RRSR record store
 # (records are zstd-compressed, so the reader needs the `zstd` decode path too).
 [[example]]

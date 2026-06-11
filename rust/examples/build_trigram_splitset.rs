@@ -22,6 +22,7 @@
 use rayon::prelude::*;
 use roaringrange::records::RecordStore;
 use roaringrange::{write_splitset_bundle, FileFetch, Policy, SplitBuildConfig, SplitSetBuilder};
+use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::time::Instant;

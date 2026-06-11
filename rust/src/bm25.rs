@@ -55,14 +55,28 @@ pub const DEFAULT_K1: f32 = 1.2;
 /// Default BM25 length-normalization strength.
 pub const DEFAULT_B: f32 = 0.75;
 
-const MAGIC: &[u8; 4] = b"RRSB";
-const VERSION: u16 = 1;
-const HEADER_SIZE: usize = 64;
-const ENTRY_SIZE: usize = 20;
+/// `RRSB` magic.
+pub const MAGIC: &[u8; 4] = b"RRSB";
+/// Format version written/accepted.
+pub const VERSION: u16 = 1;
+/// Fixed header size in bytes (layout in the module doc).
+pub const HEADER_SIZE: usize = 64;
+/// Entry-table record size: head_off u64 + impacts_rel u64 + card u32.
+pub const ENTRY_SIZE: usize = 20;
 /// Entries covered per resident sparse key — one ~10 KB ranged read per query
-/// term. Written by the (native-only) builder; the reader honors the header's.
-#[cfg(not(target_arch = "wasm32"))]
-const SPARSE_STRIDE: u32 = 512;
+/// term. What the builders write; the reader honors whatever the header says.
+pub const SPARSE_STRIDE: u32 = 512;
+
+/// Quantizes one (term, doc) BM25 impact: the tf component with the
+/// document-length norm folded in, scaled to a byte (1–255, never 0 — presence
+/// in the posting implies a nonzero contribution). The single source of the
+/// impact math, shared by [`write_impacts`] and any out-of-core builder; the
+/// header `scale` to pair with it is `k1 + 1.0` (the supremum of `s`).
+pub fn quantize_impact(tf: u32, dl: f32, avgdl: f32, k1: f32, b: f32) -> u8 {
+    let tf = tf as f32;
+    let s = tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * dl / avgdl));
+    ((s * 255.0 / (k1 + 1.0)).round() as i64).clamp(1, 255) as u8
+}
 
 fn read_f32(buf: &[u8], off: usize) -> f32 {
     f32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
@@ -390,10 +404,7 @@ mod native {
             let rel = impacts.len() as u64;
             for &(doc, tf) in tfs {
                 let dl = acc.doc_lens[doc as usize] as f32;
-                let tf = tf as f32;
-                let s = tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * dl / avgdl));
-                let q = ((s * 255.0 / scale).round() as i64).clamp(1, 255) as u8;
-                impacts.push(q);
+                impacts.push(super::quantize_impact(tf, dl, avgdl, k1, b));
             }
             entries.push((*head_off, rel, tfs.len() as u32));
         }

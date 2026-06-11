@@ -116,16 +116,14 @@ fn is_stop_word(t: &str) -> bool {
 pub struct Tokenizer {
     stemmer: Option<Stemmer>,
     stopwords: bool,
+    language: Option<Language>,
 }
 
 impl Tokenizer {
     /// The base SimpleTokenizer + LowerCaser with no stemming or stop-word removal
     /// (an unstemmed index, or a pre-stemming v1 file whose flags are zero).
     pub fn plain() -> Self {
-        Tokenizer {
-            stemmer: None,
-            stopwords: false,
-        }
+        Tokenizer::new(None, false)
     }
 
     /// A tokenizer with the given optional stemmer language and stop-word removal.
@@ -133,7 +131,14 @@ impl Tokenizer {
         Tokenizer {
             stemmer: language.map(|l| Stemmer::create(l.algorithm())),
             stopwords,
+            language,
         }
+    }
+
+    /// The `(language, stopwords)` pair this tokenizer was built with — lets build
+    /// tooling construct identical tokenizers (e.g. one per worker thread).
+    pub fn spec(&self) -> (Option<Language>, bool) {
+        (self.language, self.stopwords)
     }
 
     /// Builds the tokenizer the header describes from its `flags` + `language` byte.
@@ -158,6 +163,14 @@ impl Tokenizer {
             })
             .collect()
     }
+}
+
+/// Walks one front-coded dictionary block (fetched via the ranges
+/// [`TermIndex::dict_block_locs`] reports), yielding each `(term, head_off)` in
+/// term order. Build-tooling surface for streaming the full vocabulary without
+/// materializing it (see [`TermIndex::dict_terms`]).
+pub fn parse_dict_block(block: &[u8]) -> impl Iterator<Item = (Vec<u8>, u64)> + '_ {
+    iter_block(block).map(|(term, head_off, _)| (term, head_off))
 }
 
 /// A term's head posting plus the location of its (lazily fetched) tail.
@@ -436,20 +449,37 @@ impl<F: RangeFetch> TermIndex<F> {
     /// `.rrb` impact sidecar), not a query-path API.
     pub async fn dict_terms(&self) -> Result<Vec<(String, u64)>, IndexError> {
         let mut out = Vec::with_capacity(self.term_count as usize);
-        let mut stream = self.router.stream();
-        while let Some((_, packed)) = stream.next() {
-            let (block_off, block_len) = unpack_loc(packed);
-            let block = self
-                .fetch
-                .read(self.dict_start + block_off, block_len)
-                .await?;
-            for (term, head_off, _) in iter_block(&block) {
+        for (off, len) in self.dict_block_locs() {
+            let block = self.fetch.read(off, len).await?;
+            for (term, head_off) in parse_dict_block(&block) {
                 let term = String::from_utf8(term)
                     .map_err(|_| IndexError::Malformed("non-UTF-8 dictionary term"))?;
                 out.push((term, head_off));
             }
         }
         Ok(out)
+    }
+
+    /// Every dictionary block's absolute `(offset, len)`, in term order (== file
+    /// order), from the resident router — no fetches. O(#blocks) memory: the
+    /// streaming counterpart to [`dict_terms`](Self::dict_terms) for vocabularies
+    /// too large to hold as strings (the 484M corpus has ~187M terms) — fetch each
+    /// block and walk it with [`parse_dict_block`].
+    pub fn dict_block_locs(&self) -> Vec<(u64, usize)> {
+        let mut out = Vec::new();
+        let mut stream = self.router.stream();
+        while let Some((_, packed)) = stream.next() {
+            let (block_off, block_len) = unpack_loc(packed);
+            out.push((self.dict_start + block_off, block_len));
+        }
+        out
+    }
+
+    /// The tokenizer the index was built with (from its header flags) — build
+    /// tooling uses it to tokenize companion-artifact passes (e.g. the `.rrb`
+    /// impact build) identically to the indexed corpus.
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
     }
 
     /// Returns up to `limit` doc IDs matching **any** dictionary term that starts
