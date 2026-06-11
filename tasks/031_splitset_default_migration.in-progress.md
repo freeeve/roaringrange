@@ -24,13 +24,24 @@ for deleting the trigram monolith.
 - [x] Demo: split mode default-ON for trigram (`?split=0` = opt-out, URL encodes
       the exception; `forceSplit` datasets pinned on; server toggle re-engages
       the default on exit). Shipped in this commit; needs deploy.
-- [ ] Demo: migrate **term mode** to the term split set (it has no split toggle
-      today — either add one or hard-switch; bench says no parity gates needed).
-- [ ] Per-split facet sidecars: build with all 5 fields (today only `year`), so
-      split +facet stops returning empty for type/oa/lang/venue filters.
-- [ ] Manifest facet-presence dimension (TLV tag 2 already exists — populate it
-      in the full build) so an unsatisfiable filter is answered from the resident
-      manifest in **0 requests** (post-v0.9.1 it is 2 small reads × 389 splits).
+- [x] Demo: term mode routes through the term split set when the (default-on)
+      split toggle is set — lazy ~21 KB manifest boot, monolith fallback, the
+      same shared-ID-space facet post-filter, term-split file chips. Needs
+      deploy.
+- [x] Per-split facet sidecars with the bounded fields (year/type/oa/language):
+      `derive_split_facets` slices the monolith .rrf along split doc-ID ranges
+      (no corpus re-stream) — 389 sidecars, 1.2 GB, verified end-to-end locally
+      (`check_split_facet`: type=article → 4,896 filtered hits in split 0 where
+      the year-only sidecar gave 0). `topic` (54,631 cats) stays excluded: it
+      would bloat the per-split meta the filtered path reads per visited split;
+      the demo post-filters topic via the monolith .rrf (SPLIT_FACET_FIELDS).
+      **Built + verified locally; needs S3 upload to `openalex-trigram-split/`
+      + CloudFront invalidation.**
+- [~] Manifest facet-presence (tag 2): mostly MOOT once sidecars carry the
+      bounded fields — every split has all four, so presence prunes nothing;
+      the unsatisfiable case collapsed to "field not in sidecars", which the
+      demo now routes to the post-filter. Revisit only if a truly absent
+      (field, cat) filter shows up hot.
 - [ ] Budgeted/progressive tiered descent: a sparse query currently opens splits
       tier-by-tier with no first-paint bias or scan-cost cap — mirror the
       monolith cursor's `TAIL_WINDOWS_PER_CALL` contract so the UI can stream.

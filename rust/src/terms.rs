@@ -394,6 +394,64 @@ impl<F: RangeFetch> TermIndex<F> {
         Ok(acc.iter().take(limit).collect())
     }
 
+    /// Resolves every query term to its **full posting** (head ∪ tail) keyed by the
+    /// term's posting-region `head_off` — the stable per-term address the `.rrb`
+    /// BM25 impact sidecar is keyed by. Terms are tokenized/sorted/deduped exactly
+    /// like [`search`]; `Ok(None)` when any term is absent (the strict-AND result
+    /// is empty). Tails are fetched eagerly — the reranker needs full-posting
+    /// ranks for candidates past the head boundary, and full df for IDF.
+    pub async fn query_postings(
+        &self,
+        query: &str,
+    ) -> Result<Option<Vec<(u64, RoaringBitmap)>>, IndexError> {
+        let mut terms = self.tokenizer.tokenize(query);
+        terms.sort();
+        terms.dedup();
+        if terms.is_empty() {
+            return Ok(None);
+        }
+        let locs = match self.resolve_locs(&terms).await? {
+            Some(l) => l,
+            None => return Ok(None),
+        };
+        let heads = join_all(locs.iter().map(|&(off, size)| self.head_block(off, size))).await;
+        let mut blocks = Vec::with_capacity(locs.len());
+        for h in heads {
+            blocks.push(h?);
+        }
+        let tails = join_all(blocks.iter().map(|b| self.tail(b.tail_off, b.tail_size))).await;
+        let mut out = Vec::with_capacity(locs.len());
+        for ((block, tail), &(off, _)) in blocks.into_iter().zip(tails).zip(&locs) {
+            let mut full = block.head;
+            full |= &tail?;
+            out.push((off, full));
+        }
+        Ok(Some(out))
+    }
+
+    /// Streams the whole dictionary: every `(term, head_off)` in sorted term order
+    /// (which is also ascending `head_off` — postings are laid out in dictionary
+    /// order). One fetch per dict block. O(vocabulary), so this is build-tooling
+    /// surface (joining build-side term stats with the on-disk layout for the
+    /// `.rrb` impact sidecar), not a query-path API.
+    pub async fn dict_terms(&self) -> Result<Vec<(String, u64)>, IndexError> {
+        let mut out = Vec::with_capacity(self.term_count as usize);
+        let mut stream = self.router.stream();
+        while let Some((_, packed)) = stream.next() {
+            let (block_off, block_len) = unpack_loc(packed);
+            let block = self
+                .fetch
+                .read(self.dict_start + block_off, block_len)
+                .await?;
+            for (term, head_off, _) in iter_block(&block) {
+                let term = String::from_utf8(term)
+                    .map_err(|_| IndexError::Malformed("non-UTF-8 dictionary term"))?;
+                out.push((term, head_off));
+            }
+        }
+        Ok(out)
+    }
+
     /// Returns up to `limit` doc IDs matching **any** dictionary term that starts
     /// with `prefix` (the OR / union of every prefix-matching term's posting), most
     /// popular first (ascending doc ID == descending rank). The prefix is lowercased

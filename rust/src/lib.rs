@@ -44,6 +44,13 @@ pub(crate) mod terms_dict;
 #[cfg(all(feature = "terms", not(target_arch = "wasm32")))]
 pub mod terms_build;
 
+/// The `RRSB` BM25 impact sidecar (`.rrb`): additive quantized-impact scoring for
+/// the term index — candidate-window rerank, norms folded at build time, keyed by
+/// the terms' posting offsets so the `.rrt` itself is untouched. Reader is
+/// wasm-safe; the builder half is native-only. Behind the `terms` feature.
+#[cfg(feature = "terms")]
+pub mod bm25;
+
 /// The `RRHC` catalog-hotcache reader: a cross-format boot accelerator that front-loads
 /// every member's boot region into one small artifact, booting a composition in 1–2 round
 /// trips instead of N cold opens. Behind the `hotcache` feature; wasm-safe.
@@ -112,6 +119,10 @@ pub use vector_build::{
     VectorBuildError,
 };
 
+#[cfg(feature = "terms")]
+pub use bm25::{search_bm25, ImpactIndex, ScoredDoc};
+#[cfg(all(feature = "terms", not(target_arch = "wasm32")))]
+pub use bm25::{write_impacts, ImpactsAccumulator};
 #[cfg(feature = "terms")]
 pub use terms::{tokenize, Language, TermIndex, Tokenizer};
 #[cfg(all(feature = "terms", not(target_arch = "wasm32")))]

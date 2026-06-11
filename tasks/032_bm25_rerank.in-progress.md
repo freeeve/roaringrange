@@ -33,14 +33,30 @@ Sizing (484M docs, title+abstract, ~80–120 unique terms/doc → ~40–60 B pai
 
 ## Steps
 
-- [ ] Freeze `.rrb` format (`RRSB` magic): header + per-term offset table keyed
-      by the `.rrt` dictionary's term ordinals + container-aligned impact blocks.
-- [ ] Builder: one more pass over records-full emitting impacts + norms
-      (embarrassingly parallel like the other builds; reuse the tokenizer +
-      stemmer from `terms_build`).
-- [ ] Reader: `TermIndex::score_candidates(ids, terms, k)` — fetch impact
-      subsets + norms for the candidate window, BM25 score, reorder. Wasm
-      binding + a "relevance rerank" toggle in the demo.
+- [x] Freeze `.rrb` format (`RRSB` magic) — `src/bm25.rs` module doc. Design
+      deltas from the original sketch: keyed by each term's posting-region
+      `head_off` (the blocked dictionary has no cheap ordinals; head_off is
+      unique, ascending in dict order, and the term search already resolves it),
+      with an RRS-style resident sparse index (stride 512) over a sorted 20-byte
+      entry table. Norms FOLDED into the impact byte at build time — no separate
+      norms file, no extra per-query fetch. A candidate's byte address is
+      `impacts_rel + posting.rank(doc) − 1`: the posting bitmap the term search
+      already fetched IS the addressing structure.
+- [x] Core reader: `ImpactIndex` (open = header + resident sparse, wasm-safe) +
+      `rerank(postings, candidates, k)` (one coalesced entry-stripe wave + one
+      coalesced impact-byte wave) + `search_bm25(terms, impacts, q, m, k)`;
+      `TermIndex::query_postings` / `dict_terms` added. 6 tests incl.
+      brute-force BM25 equivalence on a 200-doc corpus; clippy/fmt/wasm-check
+      clean.
+- [x] Core builder: `ImpactsAccumulator` (same `Tokenizer` as the `.rrt` build)
+      + `write_impacts` joined against `dict_terms()` of the FINISHED index so
+      head_off keys are byte-true; loud error on tokenizer mismatch.
+- [ ] Full-corpus builder example over records-full: the in-RAM accumulator
+      does not scale to 484M docs — needs chunked spill-and-merge (sorted
+      (term, doc, tf) runs per chunk, k-way merge against the dict scan).
+      Estimated artifact ~15–50 GB (~$0.35–1.15/mo S3).
+- [ ] Wasm binding (`RrbIndex` or fold into `RrtIndex.searchScored`) + a
+      "relevance rerank" toggle in the demo's term mode.
 - [ ] Hybrid: fuse the reranked lexical list with the semantic list via
       `reciprocal_rank_fusion` (exists) — this is the Weaviate-parity mode.
 - [ ] Bench row in `live_bench`: bytes/latency of rerank vs rank-order-only,
