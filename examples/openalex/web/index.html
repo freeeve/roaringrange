@@ -882,6 +882,7 @@
       let rrss = null;              // RrssIndex — the split-set reader (non-null == available; shows the toggle)
       let splitRecords = null;      // the split set's RRSR record store (shared with the monolith when SPLIT.rec matches)
       let splitMode = false;        // the "Split-set index" toggle: swap the trigram backend to RrssIndex
+      let splitOff = false;         // user opted OUT of split mode (toggle or ?split=0) — split is the default
       let facetSrc = null;          // facet source: the text index, or a standalone .rrf when the .rrs isn't up yet
       const SEM_NPROBE = 8, SEM_K = 250, RRF_K = 60;  // vector probes (~1 MB/cluster over the 484M nlist=16384 index), ranked depth (≈10 pages), RRF constant
       // The ranked depth is the page-through ceiling, not a per-page cap: the nprobe
@@ -1046,7 +1047,11 @@
         if (q) params.set("q", q);
         const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
         if (mode !== "trigram") params.set("mode", mode);
-        if (splitMode) params.set("split", "1");
+        // Split is the trigram default, so the URL encodes the EXCEPTION: split=0
+        // when the user turned it off (split=1 in old deep links is a no-op). Keyed
+        // on the opt-out flag, not splitMode, so the choice survives a refresh taken
+        // before the split set finishes booting.
+        if (mode === "trigram" && !serverMode && splitOff) params.set("split", "0");
         if (serverMode) params.set("srv", "1");
         const mm = currentFuzz();
         if (mm) params.set("fuzz", String(mm));
@@ -1067,6 +1072,14 @@
         const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = triOnly ? "" : "none";
         els.splitmodeWrap.hidden = !(triOnly && rrss);
         if (!triOnly && splitMode) { splitMode = false; els.splitmode.checked = false; }
+        // Split is the trigram DEFAULT once the split set is open: entering trigram
+        // (or the split set landing) turns it on unless the user opted out or server
+        // mode owns the trigram path. A forceSplit dataset (?ds=lite has no monolith)
+        // pins it on regardless.
+        if (triOnly && rrss) {
+          splitMode = (!splitOff && !serverMode) || !!DATASETS[DS].forceSplit;
+          els.splitmode.checked = splitMode;
+        }
         // The Gemma embed toggle only applies to the vector modes: show it there
         // (when configured), never under trigram/term.
         els.lambdasemWrap.hidden =
@@ -1093,9 +1106,13 @@
             // Server and split are mutually exclusive; srv wins if both appear.
             serverMode = true;
             els.servermode.checked = true;
-          } else if (params.get("split") === "1" && rrss) {
-            splitMode = true;
-            els.splitmode.checked = true;
+            splitMode = false;
+            els.splitmode.checked = false;
+          } else if (params.get("split") === "0") {
+            // Split is the default; the param encodes the opt-out.
+            splitOff = true;
+            splitMode = false;
+            els.splitmode.checked = false;
           }
           const mm = Number.parseInt(params.get("fuzz") || "0", 10) || 0;
           const radio = document.querySelector(`input[name="fuzz"][value="${mm === 1 ? 1 : 0}"]`);
@@ -2223,13 +2240,16 @@
         }
         syncModeUi(searchMode);
 
-        // The split set is off the boot critical path — its boot reveals the toggle
-        // when it lands — EXCEPT when the URL restores split=1 or the dataset forces
-        // split mode (?ds=lite): those searches need the split set open first.
-        if (new URLSearchParams(location.search).get("split") === "1" || DATASETS[DS].forceSplit) {
-          await bootSplitSet();
+        // Split is the trigram default, so the first trigram search needs the split
+        // set open — boot it on the critical path unless the URL opts out (?split=0
+        // or srv=1, whose searches run elsewhere; the deferred boot below still
+        // reveals the toggle). The manifest + bundle boot is ~50 KB / 2 waves.
+        {
+          const up = new URLSearchParams(location.search);
+          if ((up.get("split") !== "0" && up.get("srv") !== "1") || DATASETS[DS].forceSplit) {
+            await bootSplitSet();
+          }
         }
-        if (DATASETS[DS].forceSplit && rrss) { splitMode = true; els.splitmode.checked = true; }
 
         const restored = applyUrlState();
         if (restored) {
@@ -2346,8 +2366,11 @@
       els.servermode.addEventListener("change", () => {
         serverMode = els.servermode.checked;
         // Mutually exclusive with split mode in BOTH directions (the split branch wins
-        // in runSearch, so leaving it set would silently ignore this toggle).
-        if (serverMode && splitMode) { splitMode = false; els.splitmode.checked = false; }
+        // in runSearch, so leaving it set would silently ignore this toggle). Leaving
+        // server mode re-engages the split default via the same recompute the mode
+        // radios use.
+        syncModeUi(document.querySelector('input[name="mode"]:checked')?.value || "trigram");
+        renderActiveFiles();
         syncUrl();   // land srv=1 immediately — a refresh mid-search must not lose it
         runSearch(true);   // filters + facet counts now work in server mode (via the Lambda)
       });
@@ -2356,6 +2379,7 @@
       // clears server mode so the two backends don't both claim the trigram path.
       els.splitmode.addEventListener("change", () => {
         splitMode = els.splitmode.checked;
+        splitOff = !splitMode;   // remember the user's choice across mode switches
         if (splitMode && serverMode) { serverMode = false; els.servermode.checked = false; }
         renderActiveFiles();
         syncUrl();   // land split=1 immediately — a refresh mid-search must not lose it
