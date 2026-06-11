@@ -57,8 +57,17 @@ Sizing (484M docs, title+abstract, ~80–120 unique terms/doc → ~40–60 B pai
       Estimated artifact ~15–50 GB (~$0.35–1.15/mo S3).
 - [ ] Wasm binding (`RrbIndex` or fold into `RrtIndex.searchScored`) + a
       "relevance rerank" toggle in the demo's term mode.
-- [ ] Hybrid: fuse the reranked lexical list with the semantic list via
-      `reciprocal_rank_fusion` (exists) — this is the Weaviate-parity mode.
+- [ ] Cross-mode rerank: score TRIGRAM-mode (and hybrid-tri) candidates with
+      the same term `.rrb` — the shared doc-ID space makes one sidecar serve
+      every mode. Glue only: trigram search yields candidate ids; resolve the
+      query's words via `TermIndex::query_postings`; feed both straight into
+      `ImpactIndex::rerank(postings, candidates, k)`. Query terms that don't
+      resolve in the `.rrt` (typos/partial words — trigram's specialty) just
+      contribute no BM25 component; zero resolvable terms degrades to static
+      rank. Decision record: trigram-level impacts were REJECTED — character
+      n-gram tf/idf is noise as a relevance signal, and the artifact would be
+      ~150–190 GB (every doc posts to ~300–500 distinct trigrams) vs the term
+      sidecar's ~35 GB.
 - [ ] Bench row in `live_bench`: bytes/latency of rerank vs rank-order-only,
       plus a relevance spot-check (the "roaring bitmaps" seminal-paper test).
 
