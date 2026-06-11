@@ -48,8 +48,19 @@ for deleting the trigram monolith.
 - [ ] Split cursor/count contract: `RrssIndex` exposes ranked lists only — no
       paging cursor, no `countEstimate`, no `facetCounts`. The demo's count line
       and facet checkboxes silently degrade in split mode.
-- [ ] Lambda: either repoint `/search` at the split set (new code path) or
-      accept that server mode dies with the monolith.
+- [x] DECISION (2026-06-11): **server (Lambda) is the trigram DEFAULT** on the
+      full dataset (~1–3 KB / sub-second warm vs dozens of client reads);
+      split set stays the client-side default behind the toggle (`?srv=0`).
+      Consequence: `openalex-full.rrs` STAYS on S3 — the Lambda reads it.
+- [ ] Lambda gaps (current handler is monolith-trigram-only — `INDEX_KEY`
+      + `INDEX_FACETS_KEY` env, `Index::open` + `FacetIndex`):
+      - no split-set path (the toggles are mutually exclusive because both
+        claim the trigram backend; in-region the split fan-out would be cheap,
+        nobody has written `SplitSet` support into the handler — and with the
+        monolith staying, the value is benchmarking, not necessity);
+      - no term mode (`?mode=term` param + `TermIndex::open` would add it;
+        client-side term is already 15–50 KB / sub-second, so the win is
+        exact totals + facet parity, not bytes).
 - [ ] S3 retirement, **only after the above** (≈ $0.023/GB·mo):
       - `openalex-full-v3.rrs` staging copy — 113.2 GB (~$2.60/mo). Pure
         duplicate of the live monolith; deletable immediately on confirmation.
