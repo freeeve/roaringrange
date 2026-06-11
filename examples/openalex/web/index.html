@@ -912,7 +912,13 @@
       let splitRecords = null;      // the split set's RRSR record store (shared with the monolith when SPLIT.rec matches)
       let rrssTerm = null;          // the term-bodied split set reader (lazy-booted on first term+split search)
       let splitMode = false;        // the "Split-set index" toggle: swap the trigram backend to RrssIndex
-      let splitOff = false;         // user opted OUT of split mode (toggle or ?split=0) — split is the client-side default
+      // The user's explicit split choice (toggle / ?split=): null = use the mode's
+      // default. Trigram defaults ON (when server mode is off) — tier pruning caps
+      // its worst case. Term defaults OFF: a present-but-rare query ("roaring
+      // bitmaps") matches nothing in the top tiers and descends all 243 splits
+      // sequentially — minutes of round-trips — where the monolith's global
+      // postings answer in ~6 reads; split stays one toggle away.
+      let splitPref = null;
       let serverOff = false;        // user opted OUT of server mode (toggle or ?srv=0) — server is the trigram default
       let facetSrc = null;          // facet source: the text index, or a standalone .rrf when the .rrs isn't up yet
       const SEM_NPROBE = 8, SEM_K = 250, RRF_K = 60;  // vector probes (~1 MB/cluster over the 484M nlist=16384 index), ranked depth (≈10 pages), RRF constant
@@ -1095,7 +1101,10 @@
         // booleans, so the choice survives a refresh taken before the split set
         // finishes booting.
         if (mode === "trigram" && SERVER_DEFAULT && serverOff) params.set("srv", "0");
-        if ((mode === "trigram" || mode === "term") && !serverMode && splitOff) params.set("split", "0");
+        // …and split= only when the user's choice differs from the mode's default
+        // (trigram: on; term: off), so URLs stay clean in the default state.
+        if (mode === "trigram" && !serverMode && splitPref === false) params.set("split", "0");
+        if (mode === "term" && splitPref === true) params.set("split", "1");
         const mm = currentFuzz();
         if (mm) params.set("fuzz", String(mm));
         for (const key of activeFilters) params.append("f", key);
@@ -1126,12 +1135,15 @@
         const splitCapable = triOnly ? !!rrss : (mode === "term" && !!TERM_SPLIT_RRSS_URL);
         els.splitmodeWrap.hidden = !splitCapable;
         if (!splitCapable && splitMode) { splitMode = false; els.splitmode.checked = false; }
-        // Split is the DEFAULT client-side path for the capable modes: entering one
-        // (or the split set landing) turns it on unless the user opted out or server
-        // mode owns the trigram path. A forceSplit dataset (?ds=lite has no
-        // monolith) pins it on.
+        // Split defaults: trigram ON for the client-side path (tier pruning caps
+        // its worst case; server mode owns the path when enabled), term OFF (a
+        // present-but-rare query descends every split — the monolith is the safe
+        // default). The user's explicit choice (splitPref) overrides the default;
+        // a forceSplit dataset (?ds=lite has no monolith) pins trigram on.
         if (splitCapable) {
-          splitMode = (!splitOff && !(triOnly && serverMode)) || (triOnly && !!DATASETS[DS].forceSplit);
+          splitMode = triOnly
+            ? (((splitPref ?? true) && !serverMode) || !!DATASETS[DS].forceSplit)
+            : splitPref === true;
           els.splitmode.checked = splitMode;
         }
         // The Gemma embed toggle only applies to the vector modes: show it there
@@ -1164,7 +1176,8 @@
           // clearing any opt-out rather than special-casing.
           if (params.get("srv") === "0") serverOff = true;
           if (params.get("srv") === "1") serverOff = false;
-          if (params.get("split") === "0") splitOff = true;
+          if (params.get("split") === "0") splitPref = false;
+          if (params.get("split") === "1") splitPref = true;
           syncModeUi(effective);
           const mm = Number.parseInt(params.get("fuzz") || "0", 10) || 0;
           const radio = document.querySelector(`input[name="fuzz"][value="${mm === 1 ? 1 : 0}"]`);
@@ -2094,6 +2107,9 @@
           const ok = useSplit || await ensureTermIndex();
           if (mySeq !== searchSeq) return;
           if (!ok) { els.mSummary.textContent = "term search unavailable for this dataset"; return; }
+          // The ensure* helpers leave their "loading …" text behind; the live
+          // in-flight row tracks activity from here.
+          els.mSummary.textContent = useSplit ? "searching the term split set…" : "searching…";
           const filters = Array.from(activeFilters);
           const t0 = performance.now(), r0 = reqs, b0 = bytes;
           let ids;
@@ -2549,7 +2565,7 @@
       // clears server mode so the two backends don't both claim the trigram path.
       els.splitmode.addEventListener("change", () => {
         splitMode = els.splitmode.checked;
-        splitOff = !splitMode;   // remember the user's choice across mode switches
+        splitPref = splitMode;   // remember the user's choice across mode switches
         if (splitMode && serverMode) { serverMode = false; els.servermode.checked = false; }
         renderActiveFiles();
         syncUrl();   // land split=1 immediately — a refresh mid-search must not lose it

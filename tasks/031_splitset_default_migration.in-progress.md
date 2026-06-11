@@ -24,10 +24,17 @@ for deleting the trigram monolith.
 - [x] Demo: split mode default-ON for trigram (`?split=0` = opt-out, URL encodes
       the exception; `forceSplit` datasets pinned on; server toggle re-engages
       the default on exit). Shipped in this commit; needs deploy.
-- [x] Demo: term mode routes through the term split set when the (default-on)
-      split toggle is set — lazy ~21 KB manifest boot, monolith fallback, the
-      same shared-ID-space facet post-filter, term-split file chips. Needs
-      deploy.
+- [x] Demo: term mode routes through the term split set when the split toggle
+      is set — lazy ~21 KB manifest boot, monolith fallback, the same
+      shared-ID-space facet post-filter, term-split file chips.
+      **2026-06-11 REVERT: term split is no longer default-on** (toggle stays;
+      `?split=1` deep-links it). A present-but-rare query — "roaring bitmaps",
+      live — matches nothing in the top tiers and descends all 243 splits
+      SEQUENTIALLY (~6 serial round-trips each → 114 reqs / 675 KB / 76 s and
+      climbing) where term mono answers in ~6 reads / ~1 s. The bench's
+      term-split wins were on common queries; rare queries invert it. The
+      term set also has NO Bloom (and Bloom can't prune present-but-rare
+      anyway). Re-defaulting needs the budgeted/parallel descent below.
 - [x] Per-split facet sidecars with the bounded fields (year/type/oa/language):
       `derive_split_facets` slices the monolith .rrf along split doc-ID ranges
       (no corpus re-stream) — 389 sidecars, 1.2 GB, verified end-to-end locally
@@ -45,6 +52,9 @@ for deleting the trigram monolith.
 - [ ] Budgeted/progressive tiered descent: a sparse query currently opens splits
       tier-by-tier with no first-paint bias or scan-cost cap — mirror the
       monolith cursor's `TAIL_WINDOWS_PER_CALL` contract so the UI can stream.
+      ALSO: visit splits in **parallel waves** (e.g. 8 concurrent) — the 76 s
+      "roaring bitmaps" descent above is latency (243 × ~6 serial round-trips),
+      not bytes (675 KB). Both are prerequisites for term-split default.
 - [ ] Split cursor/count contract: `RrssIndex` exposes ranked lists only — no
       paging cursor, no `countEstimate`, no `facetCounts`. The demo's count line
       and facet checkboxes silently degrade in split mode.
