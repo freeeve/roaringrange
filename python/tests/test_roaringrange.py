@@ -58,7 +58,7 @@ def test_write_term_index_writes_rrti(tmp_path):
     assert head[:4] == b"RRTI"
     version, _flags, nterms = struct.unpack_from("<HHI", head, 4)
     (head_boundary,) = struct.unpack_from("<I", head, 12)
-    assert version == 1
+    assert version == 2  # v2 = blocked dictionary with a router FST (task 009)
     assert nterms == 3  # hello, world, goodbye
     assert head_boundary == 65536
 

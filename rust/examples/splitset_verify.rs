@@ -19,7 +19,7 @@ struct DirResolver {
 impl SplitFetcher for DirResolver {
     type Fetch = FileFetch;
     fn fetch_named(&self, name: &str) -> FileFetch {
-        FileFetch::open(&self.dir.join(name)).expect("open split file")
+        FileFetch::open(self.dir.join(name)).expect("open split file")
     }
 }
 

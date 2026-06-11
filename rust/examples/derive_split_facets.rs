@@ -103,7 +103,7 @@ fn main() {
         let w = BufWriter::new(std::fs::File::create(&path).expect("create sidecar"));
         write_facets(w, out_fields).expect("write sidecar");
         written += 1;
-        if written % 50 == 0 {
+        if written.is_multiple_of(50) {
             eprintln!("  {written} sidecars written");
         }
     }
