@@ -1004,6 +1004,57 @@ mod tests {
     }
 }
 
+/// Cross-language conformance fixture for the TERM-bodied builder: a fixed corpus
+/// through `TermSplitSetBuilder` with English stemming + stop words + facets. The
+/// texts deliberately stress the tokenizer's Unicode contract — Turkish `İ`
+/// (U+0130, the one unconditional multi-char lowercase mapping), a circled digit
+/// (category `No`: numeric but not a digit), Greek capitals, and combining
+/// accents — exactly where an inexact Go port would diverge. Shared with
+/// `go/termsplitsetbuild_test.go` via `go/testdata/rrti_term_split_golden.txt`.
+#[cfg(all(test, feature = "terms"))]
+pub(crate) fn term_conformance_build() -> BuiltSplitSet {
+    let docs: [(&str, &[(&str, &str)]); 6] = [
+        (
+            "The running runner runs quickly",
+            &[("year", "2020"), ("kind", "a")],
+        ),
+        (
+            "İstanbul naïve cafés résumé",
+            &[("year", "2021"), ("kind", "b")],
+        ),
+        (
+            "status ① bitmap roaring bitmaps",
+            &[("year", "2020"), ("kind", "a")],
+        ),
+        (
+            "ΣΟΦΌΣ σοφός wisdom connection",
+            &[("year", "2022"), ("kind", "b")],
+        ),
+        (
+            "connected connecting connections",
+            &[("year", "2021"), ("kind", "a")],
+        ),
+        ("the a an and are", &[("year", "2022"), ("kind", "b")]), // all stop words → token-less doc
+    ];
+    let mut b = TermSplitSetBuilder::new(TermSplitBuildConfig {
+        policy: Policy::Tiered,
+        byte_cap: 400, // small enough that the corpus seals into several tiers
+        head_boundary: 0,
+        name_prefix: "tcorpus".to_string(),
+        sortcol: None,
+        language: Some(Language::English),
+        stopwords: true,
+    });
+    for (text, facets) in docs {
+        let pairs: Vec<(String, String)> = facets
+            .iter()
+            .map(|(f, c)| (f.to_string(), c.to_string()))
+            .collect();
+        b.add_faceted(text, &pairs).unwrap();
+    }
+    b.finish().unwrap()
+}
+
 #[cfg(test)]
 mod conformance_full_build {
     use super::conformance_build;
@@ -1062,26 +1113,97 @@ mod conformance_full_build {
     #[ignore]
     fn regen_shared_golden() {
         let built = conformance_build();
-        let mut out = String::new();
-        let mut line = |name: &str, bytes: &[u8]| {
-            out.push_str(name);
-            out.push(' ');
-            for b in bytes {
-                out.push_str(&format!("{b:02x}"));
-            }
-            out.push('\n');
-        };
-        line("manifest", &built.manifest);
-        for (name, bytes) in &built.splits {
-            line(name, bytes);
-        }
-        for (name, bytes) in &built.facets {
-            line(name, bytes);
-        }
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../go/testdata/rrss_build_golden.txt"
         );
-        std::fs::write(path, out).expect("write shared golden");
+        std::fs::write(path, super::golden_text(&built)).expect("write shared golden");
+    }
+}
+
+/// Serializes a built split set in the shared golden format (`name <hex>` per line).
+#[cfg(test)]
+pub(crate) fn golden_text(built: &BuiltSplitSet) -> String {
+    let mut out = String::new();
+    let mut line = |name: &str, bytes: &[u8]| {
+        out.push_str(name);
+        out.push(' ');
+        for b in bytes {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out.push('\n');
+    };
+    line("manifest", &built.manifest);
+    for (name, bytes) in &built.splits {
+        line(name, bytes);
+    }
+    for (name, bytes) in &built.facets {
+        line(name, bytes);
+    }
+    out
+}
+
+/// Term-bodied cross-language conformance: the same shared-golden discipline as the trigram
+/// builder, over `go/testdata/rrti_term_split_golden.txt`. Asserted byte-for-byte by Go's
+/// `termsplitsetbuild_test.go` — the guard for the Go RRTI writer (front-coded dict blocks,
+/// router FST, postings) AND its tokenizer (stemmer/stop-words/Unicode lowercasing).
+#[cfg(all(test, feature = "terms"))]
+mod term_conformance {
+    use super::term_conformance_build;
+    use std::collections::HashMap;
+
+    fn golden() -> HashMap<String, Vec<u8>> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../go/testdata/rrti_term_split_golden.txt"
+        );
+        let text = std::fs::read_to_string(path).expect("read shared term golden");
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let (name, hex) = l.split_once(' ').expect("`name <hex>` line");
+                let bytes = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                    .collect::<Vec<u8>>();
+                (name.to_string(), bytes)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn term_split_build_matches_shared_golden() {
+        let g = golden();
+        let built = term_conformance_build();
+        assert_eq!(
+            &built.manifest,
+            g.get("manifest").expect("manifest golden present"),
+            "term RRSS manifest drifted from the shared golden"
+        );
+        for (name, bytes) in built.splits.iter().chain(built.facets.iter()) {
+            assert_eq!(
+                bytes,
+                g.get(name)
+                    .unwrap_or_else(|| panic!("no golden for {name}")),
+                "{name} bytes drifted from the shared golden"
+            );
+        }
+        assert_eq!(
+            g.len(),
+            1 + built.splits.len() + built.facets.len(),
+            "term golden entry count drifted"
+        );
+    }
+
+    /// Regenerate with `cargo test --features "splits terms" regen_term_split_golden -- --ignored`.
+    #[test]
+    #[ignore]
+    fn regen_term_split_golden() {
+        let built = term_conformance_build();
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../go/testdata/rrti_term_split_golden.txt"
+        );
+        std::fs::write(path, super::golden_text(&built)).expect("write shared term golden");
     }
 }
