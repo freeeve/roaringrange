@@ -118,6 +118,7 @@ fn build(
     bloom_bits_per_key: u32,
 ) -> (Vec<u8>, HashMap<String, Arc<Vec<u8>>>) {
     let mut b = SplitSetBuilder::new(SplitBuildConfig {
+        byte_cap_max: 0,
         policy: Policy::Tiered,
         byte_cap,
         gram_size: 3,

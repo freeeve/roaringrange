@@ -34,13 +34,29 @@ const (
 // SplitBuildConfig is the build-time configuration for a SplitSetBuilder.
 type SplitBuildConfig struct {
 	Policy          int          // PolicyTiered | PolicyStableKey
-	ByteCap         uint64       // per-split seal target
+	ByteCap         uint64       // per-split seal target (the FIRST tier's cap when CapMax > 0)
+	CapMax          uint64       // geometric tiering: tier i's cap = min(ByteCap << i, CapMax); 0 = flat
 	GramSize        uint16       // n-gram window (e.g. 3)
 	HeadBoundary    uint32       // split head/tail boundary; 0 -> 65536
 	Stride          uint32       // sparse-index stride; 0 -> DefaultStride
 	NamePrefix      string       // split filenames: ‹prefix›-s00000.rrs, ...
 	SortCol         *SortColSpec // stable-key rank source, or nil
 	BloomBitsPerKey uint32       // per-split term Bloom bits/key (0 disables)
+}
+
+// capFor is the byte cap for the split at seal index tier: the flat ByteCap when
+// capMax is 0, else doubling per tier and clamped to capMax. Mirrors the Rust
+// cap_for exactly — the geometric conformance golden pins the boundary placement.
+func capFor(byteCap, capMax uint64, tier int) uint64 {
+	if capMax == 0 {
+		return byteCap
+	}
+	shift := min(uint(tier), 63)
+	shifted := byteCap << shift
+	if shift != 0 && shifted>>shift != byteCap { // overflow
+		shifted = ^uint64(0)
+	}
+	return min(shifted, max(capMax, byteCap))
 }
 
 // NamedSplit is one emitted split: its filename and RRS bytes.
@@ -125,7 +141,7 @@ func (b *SplitSetBuilder) addInner(keys []uint64, facets map[string][]string) (u
 		}
 	}
 	marginal := newKeys*perNewKeyBytes + uint64(len(keys))*perElementBytes
-	if b.openCount > 0 && b.estimate()+marginal > b.cfg.ByteCap {
+	if b.openCount > 0 && b.estimate()+marginal > capFor(b.cfg.ByteCap, b.cfg.CapMax, len(b.specs)) {
 		if err := b.seal(); err != nil {
 			return 0, err
 		}
@@ -301,11 +317,12 @@ func (b *SplitSetBuilder) Finish() (*BuiltSplitSet, error) {
 	if err := b.seal(); err != nil {
 		return nil, err
 	}
-	for _, s := range b.specs {
-		if s.DocCount == 1 && s.ByteSize > b.cfg.ByteCap {
+	for i, s := range b.specs {
+		cap := capFor(b.cfg.ByteCap, b.cfg.CapMax, i)
+		if s.DocCount == 1 && s.ByteSize > cap {
 			return nil, fmt.Errorf(
 				"RRSS split %q: a single document's postings (%d B) exceed the byte cap (%d B)",
-				s.DataFile, s.ByteSize, b.cfg.ByteCap)
+				s.DataFile, s.ByteSize, cap)
 		}
 	}
 	var tierCount uint16

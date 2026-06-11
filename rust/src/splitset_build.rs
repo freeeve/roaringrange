@@ -285,6 +285,7 @@ pub(crate) fn conformance_build() -> BuiltSplitSet {
         ("alpha gamma", &[("year", "2022"), ("kind", "a")]),
     ];
     let mut b = SplitSetBuilder::new(SplitBuildConfig {
+        byte_cap_max: 0,
         policy: Policy::Tiered,
         byte_cap: 600,
         gram_size: 3,
@@ -300,6 +301,40 @@ pub(crate) fn conformance_build() -> BuiltSplitSet {
             .map(|(f, c)| (f.to_string(), c.to_string()))
             .collect();
         b.add_faceted(text, &pairs).unwrap();
+    }
+    b.finish().unwrap()
+}
+
+/// Geometric-tiering conformance fixture: the same corpus repeated enough that the
+/// doubling caps (`byte_cap 300 → byte_cap_max 1200`) place several seal boundaries —
+/// each tier visibly larger than the last. Shared with Go via
+/// `go/testdata/rrss_geo_build_golden.txt`, pinning the per-tier cap arithmetic
+/// (`cap_for` ⇄ Go `capFor`) cross-language: a one-off divergence in the boundary
+/// placement changes every byte after it.
+#[cfg(test)]
+pub(crate) fn geo_conformance_build() -> BuiltSplitSet {
+    let words = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+    ];
+    let mut b = SplitSetBuilder::new(SplitBuildConfig {
+        policy: Policy::Tiered,
+        byte_cap: 300,
+        byte_cap_max: 1200,
+        gram_size: 3,
+        head_boundary: 0,
+        stride: 0,
+        name_prefix: "geo".to_string(),
+        sortcol: None,
+        bloom_bits_per_key: 8,
+    });
+    for i in 0..24 {
+        let text = format!(
+            "{} {}",
+            words[i % words.len()],
+            words[(i + 3) % words.len()]
+        );
+        let year = (2018 + (i % 5)).to_string();
+        b.add_faceted(&text, &[("year".to_string(), year)]).unwrap();
     }
     b.finish().unwrap()
 }
@@ -374,7 +409,14 @@ pub struct SplitBuildConfig {
     /// The serialized byte cap each split is sealed at. Splits are kept at or under this via
     /// an upper-bound size estimate (see [`SplitSetBuilder::add_keys`]). **Must be > 0** — a `0`
     /// cap seals every document into its own split and [`SplitSetBuilder::finish`] then errors.
+    /// With a non-zero [`byte_cap_max`](Self::byte_cap_max) this is the FIRST tier's cap.
     pub byte_cap: u64,
+    /// Geometric tiering: when non-zero, tier `i`'s cap is `min(byte_cap << i, byte_cap_max)` —
+    /// small splits at the top of the rank order (fine pruning where queries concentrate),
+    /// doubling down the tail so the whole set stays at a handful of splits and a full
+    /// worst-case descent pays per-split round-trip overhead only ~log-many times. `0` keeps
+    /// the flat single-cap behavior (and every existing manifest byte-identical).
+    pub byte_cap_max: u64,
     /// N-gram window the split `RRS` files are built with (e.g. `3`).
     pub gram_size: u16,
     /// Doc-ID head/tail split each split `RRS` uses (a multiple of 65536); pass `0` for
@@ -424,6 +466,7 @@ pub struct BuiltSplitSet {
 pub struct SplitSetBuilder {
     policy: Policy,
     byte_cap: u64,
+    byte_cap_max: u64,
     gram_size: u16,
     head_boundary: u32,
     stride: u32,
@@ -463,6 +506,21 @@ const PER_NEW_KEY_BYTES: u64 = 64;
 /// element; once a container turns bitmap this over-counts, keeping the estimate an upper bound.
 const PER_ELEMENT_BYTES: u64 = 2;
 
+/// The byte cap for the split at seal index `tier`: the flat `byte_cap` when
+/// `byte_cap_max` is `0`, else doubling per tier and clamped to `byte_cap_max`
+/// (geometric tiering — see [`SplitBuildConfig::byte_cap_max`]). Shared by the
+/// trigram and term builders so the two stay seal-identical (and mirrored by
+/// Go's `capFor` — the conformance goldens pin the boundary placement).
+fn cap_for(byte_cap: u64, byte_cap_max: u64, tier: usize) -> u64 {
+    if byte_cap_max == 0 {
+        return byte_cap;
+    }
+    let shifted = byte_cap
+        .checked_shl(tier.min(63) as u32)
+        .unwrap_or(u64::MAX);
+    shifted.min(byte_cap_max.max(byte_cap))
+}
+
 impl SplitSetBuilder {
     /// Creates an empty builder. `config.head_boundary`/`stride` of `0` take the `RRS`
     /// defaults.
@@ -470,6 +528,7 @@ impl SplitSetBuilder {
         SplitSetBuilder {
             policy: config.policy,
             byte_cap: config.byte_cap,
+            byte_cap_max: config.byte_cap_max,
             gram_size: config.gram_size,
             head_boundary: if config.head_boundary == 0 {
                 DEFAULT_HEAD_BOUNDARY
@@ -535,7 +594,10 @@ impl SplitSetBuilder {
         // doc would push the open split over the cap (and it already holds a document).
         let new_keys = keys.iter().filter(|k| !self.open.contains_key(k)).count() as u64;
         let marginal = new_keys * PER_NEW_KEY_BYTES + keys.len() as u64 * PER_ELEMENT_BYTES;
-        if self.open_count > 0 && self.estimate() + marginal > self.byte_cap {
+        if self.open_count > 0
+            && self.estimate() + marginal
+                > cap_for(self.byte_cap, self.byte_cap_max, self.specs.len())
+        {
             self.seal()?;
         }
 
@@ -660,11 +722,12 @@ impl SplitSetBuilder {
     /// alone exceed the byte cap (a degenerate corpus — the split cannot be made to fit).
     pub fn finish(mut self) -> io::Result<BuiltSplitSet> {
         self.seal()?;
-        for spec in &self.specs {
-            if spec.doc_count == 1 && spec.byte_size > self.byte_cap {
+        for (i, spec) in self.specs.iter().enumerate() {
+            let cap = cap_for(self.byte_cap, self.byte_cap_max, i);
+            if spec.doc_count == 1 && spec.byte_size > cap {
                 return Err(io::Error::other(format!(
                     "RRSS split {:?}: a single document's postings ({} B) exceed the byte cap ({} B)",
-                    spec.data_file, spec.byte_size, self.byte_cap
+                    spec.data_file, spec.byte_size, cap
                 )));
             }
         }
@@ -708,9 +771,14 @@ impl SplitSetBuilder {
 pub struct TermSplitBuildConfig {
     /// Base policy (tiered or stable-key) — identical cross-split semantics to the trigram builder.
     pub policy: Policy,
-    /// The per-split byte cap; the open split seals before a document would cross it. **Must be
-    /// > 0** (a `0` cap seals every document into its own split and `finish` then errors).
+    /// The per-split byte cap; the open split seals before a document would cross it.
+    /// **Must be nonzero** (a `0` cap seals every document into its own split and `finish`
+    /// then errors). With a nonzero [`byte_cap_max`](Self::byte_cap_max) this is the FIRST
+    /// tier's cap.
     pub byte_cap: u64,
+    /// Geometric tiering: when non-zero, tier `i`'s cap is `min(byte_cap << i, byte_cap_max)`.
+    /// `0` keeps the flat single-cap behavior. See [`SplitBuildConfig::byte_cap_max`].
+    pub byte_cap_max: u64,
     /// Doc-ID head/tail split (a multiple of 65536); `0` takes the `RRS` default.
     pub head_boundary: u32,
     /// Split data-file name prefix — sealed splits are `‹prefix›-s00000.rrt`, ….
@@ -752,6 +820,7 @@ const TERM_INDEX_HEADER_EST: u64 = 128;
 pub struct TermSplitSetBuilder {
     policy: Policy,
     byte_cap: u64,
+    byte_cap_max: u64,
     head_boundary: u32,
     name_prefix: String,
     sortcol: Option<SortColSpec>,
@@ -788,6 +857,7 @@ impl TermSplitSetBuilder {
         TermSplitSetBuilder {
             policy: config.policy,
             byte_cap: config.byte_cap,
+            byte_cap_max: config.byte_cap_max,
             head_boundary: if config.head_boundary == 0 {
                 DEFAULT_HEAD_BOUNDARY
             } else {
@@ -835,7 +905,10 @@ impl TermSplitSetBuilder {
             }
             marginal += PER_TERM_ELEMENT_BYTES;
         }
-        if self.open_count > 0 && self.estimate() + marginal > self.byte_cap {
+        if self.open_count > 0
+            && self.estimate() + marginal
+                > cap_for(self.byte_cap, self.byte_cap_max, self.specs.len())
+        {
             self.seal()?;
         }
 
@@ -948,11 +1021,12 @@ impl TermSplitSetBuilder {
     /// Errors if any single document's postings alone exceed the byte cap.
     pub fn finish(mut self) -> io::Result<BuiltSplitSet> {
         self.seal()?;
-        for spec in &self.specs {
-            if spec.doc_count == 1 && spec.byte_size > self.byte_cap {
+        for (i, spec) in self.specs.iter().enumerate() {
+            let cap = cap_for(self.byte_cap, self.byte_cap_max, i);
+            if spec.doc_count == 1 && spec.byte_size > cap {
                 return Err(io::Error::other(format!(
                     "RRSS term split {:?}: a single document's postings ({} B) exceed the byte cap ({} B)",
-                    spec.data_file, spec.byte_size, self.byte_cap
+                    spec.data_file, spec.byte_size, cap
                 )));
             }
         }
@@ -1037,6 +1111,7 @@ pub(crate) fn term_conformance_build() -> BuiltSplitSet {
         ("the a an and are", &[("year", "2022"), ("kind", "b")]), // all stop words → token-less doc
     ];
     let mut b = TermSplitSetBuilder::new(TermSplitBuildConfig {
+        byte_cap_max: 0,
         policy: Policy::Tiered,
         byte_cap: 400, // small enough that the corpus seals into several tiers
         head_boundary: 0,
@@ -1205,5 +1280,78 @@ mod term_conformance {
             "/../go/testdata/rrti_term_split_golden.txt"
         );
         std::fs::write(path, super::golden_text(&built)).expect("write shared term golden");
+    }
+}
+
+/// Geometric-cap conformance: the doubling seal boundaries shared with Go.
+#[cfg(test)]
+mod geo_conformance {
+    use super::geo_conformance_build;
+
+    fn golden_path() -> &'static str {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../go/testdata/rrss_geo_build_golden.txt"
+        )
+    }
+
+    #[test]
+    fn geometric_build_matches_shared_golden() {
+        let built = geo_conformance_build();
+        assert!(built.splits.len() >= 3, "fixture should seal several tiers");
+        let text = std::fs::read_to_string(golden_path()).expect("read geo golden");
+        assert_eq!(
+            text,
+            super::golden_text(&built),
+            "geometric split build drifted from the shared golden"
+        );
+    }
+
+    /// The behavioral half: doubling caps must seal FEWER splits than the same
+    /// corpus under the flat base cap — the whole point of geometric tiering.
+    #[test]
+    fn geometric_seals_fewer_splits_than_flat() {
+        use super::{Policy, SplitBuildConfig, SplitSetBuilder};
+        let build = |byte_cap_max: u64| {
+            let words = [
+                "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
+                "kappa",
+            ];
+            // Base 400: comfortably above the largest single document (the flat
+            // arm must not trip the degenerate single-doc-over-cap guard).
+            let mut b = SplitSetBuilder::new(SplitBuildConfig {
+                policy: Policy::Tiered,
+                byte_cap: 400,
+                byte_cap_max,
+                gram_size: 3,
+                head_boundary: 0,
+                stride: 0,
+                name_prefix: "geo".to_string(),
+                sortcol: None,
+                bloom_bits_per_key: 8,
+            });
+            for i in 0..24 {
+                let text = format!(
+                    "{} {}",
+                    words[i % words.len()],
+                    words[(i + 3) % words.len()]
+                );
+                b.add_faceted(&text, &[("year".to_string(), (2018 + (i % 5)).to_string())])
+                    .unwrap();
+            }
+            b.finish().unwrap().splits.len()
+        };
+        assert!(
+            build(1600) < build(0),
+            "doubling caps should reduce the split count"
+        );
+    }
+
+    /// Regenerate with `cargo test --features splits regen_geo_golden -- --ignored`.
+    #[test]
+    #[ignore]
+    fn regen_geo_golden() {
+        let built = geo_conformance_build();
+        std::fs::write(golden_path(), super::golden_text(&built)).expect("write geo golden");
     }
 }

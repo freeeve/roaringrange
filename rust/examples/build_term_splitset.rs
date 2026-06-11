@@ -51,10 +51,10 @@ fn flush_blobs(dir: &Path, blobs: Vec<(String, Vec<u8>)>) -> (usize, u64) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 6 || args.len() > 8 {
+    if args.len() < 6 || args.len() > 9 {
         eprintln!(
             "usage: build_term_splitset <records.idx> <records.bin> <records.dict> <N> <out_dir> \
-             [byte_cap_mb=256] [language=english]"
+             [byte_cap_mb=256] [language=english] [cap_max_mb=0 (geometric: caps double per tier up to this)]"
         );
         std::process::exit(2);
     }
@@ -76,6 +76,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let cap_max_mb: u64 = args
+        .get(8)
+        .map(|s| s.parse().expect("cap_max_mb"))
+        .unwrap_or(0);
 
     std::fs::create_dir_all(out_dir).expect("create out dir");
 
@@ -91,6 +95,7 @@ fn main() {
     let mut b = TermSplitSetBuilder::new(TermSplitBuildConfig {
         policy: Policy::Tiered,
         byte_cap,
+        byte_cap_max: cap_max_mb * 1024 * 1024,
         head_boundary: 0,
         name_prefix: "openalex-484m-terms".to_string(),
         sortcol: None,

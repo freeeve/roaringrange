@@ -35,6 +35,7 @@ impl SplitFetcher for BundleResolver {
 fn rrhc_bundle_boots_a_split_set() {
     // A tiered split set over 30 "abc"-bearing docs, small cap -> several tier-0 splits.
     let mut b = SplitSetBuilder::new(SplitBuildConfig {
+        byte_cap_max: 0,
         policy: Policy::Tiered,
         byte_cap: 2048,
         gram_size: 3,

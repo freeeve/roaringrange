@@ -28,7 +28,8 @@ const (
 // TermSplitBuildConfig configures a TermSplitSetBuilder.
 type TermSplitBuildConfig struct {
 	Policy       int          // PolicyTiered | PolicyStableKey
-	ByteCap      uint64       // per-split seal target (must be > 0)
+	ByteCap      uint64       // per-split seal target (the FIRST tier's cap when CapMax > 0)
+	CapMax       uint64       // geometric tiering: tier i's cap = min(ByteCap << i, CapMax); 0 = flat
 	HeadBoundary uint32       // head/tail doc-ID split; 0 -> 65536
 	NamePrefix   string       // split filenames: ‹prefix›-s00000.rrt, …
 	SortCol      *SortColSpec // stable-key rank source, or nil
@@ -91,7 +92,7 @@ func (b *TermSplitSetBuilder) AddFaceted(text string, facets map[string][]string
 		}
 		marginal += perTermElementBytes
 	}
-	if b.openCount > 0 && b.estimate()+marginal > b.cfg.ByteCap {
+	if b.openCount > 0 && b.estimate()+marginal > capFor(b.cfg.ByteCap, b.cfg.CapMax, len(b.specs)) {
 		if err := b.seal(); err != nil {
 			return 0, err
 		}
@@ -205,11 +206,12 @@ func (b *TermSplitSetBuilder) Finish() (*BuiltSplitSet, error) {
 	if err := b.seal(); err != nil {
 		return nil, err
 	}
-	for _, s := range b.specs {
-		if s.DocCount == 1 && s.ByteSize > b.cfg.ByteCap {
+	for i, s := range b.specs {
+		cap := capFor(b.cfg.ByteCap, b.cfg.CapMax, i)
+		if s.DocCount == 1 && s.ByteSize > cap {
 			return nil, fmt.Errorf(
 				"RRSS term split %q: a single document's postings (%d B) exceed the byte cap (%d B)",
-				s.DataFile, s.ByteSize, b.cfg.ByteCap)
+				s.DataFile, s.ByteSize, cap)
 		}
 	}
 	var tierCount uint16

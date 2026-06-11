@@ -59,6 +59,7 @@ fn main() {
     let mut records: Vec<Vec<u8>> = Vec::with_capacity(n);
 
     let mut b = SplitSetBuilder::new(SplitBuildConfig {
+        byte_cap_max: 0,
         policy: Policy::Tiered,
         byte_cap: 16 * 1024, // small -> several tiers
         gram_size: 3,

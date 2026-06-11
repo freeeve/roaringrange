@@ -581,6 +581,7 @@ mod tests {
     fn flush_supersession_and_compact_lifecycle() {
         // ---- base: 6 docs all matching "abc", built tiered ----
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 400,
             gram_size: 3,
@@ -643,6 +644,7 @@ mod tests {
     fn resume_continues_delta_names_and_id_space() {
         // Session 1: base + one delta flush named corpus-d00000.rrs.
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 1 << 20,
             gram_size: 3,
@@ -688,6 +690,7 @@ mod tests {
     #[test]
     fn deletes_only_flush_neither_claims_nor_skips_an_id() {
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 1 << 20,
             gram_size: 3,

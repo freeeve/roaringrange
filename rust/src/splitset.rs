@@ -1436,6 +1436,7 @@ mod tests {
         // 30 docs all containing "abc" (so the query matches every doc), each with a unique
         // token so distinct trigrams accumulate and a small byte cap forces several splits.
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 4096,
             gram_size: 3,
@@ -1487,6 +1488,7 @@ mod tests {
         // 60 docs all containing the token "abc" (matches every doc), each with a unique token so
         // distinct terms accumulate and a small cap forces several RRTI splits.
         let mut b = TermSplitSetBuilder::new(TermSplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 600,
             head_boundary: 0,
@@ -1540,6 +1542,7 @@ mod tests {
         // Six docs all matching "abc"; a small cap splits them across two splits so the
         // cross-split merge runs. Rank comes from an RRSC the manifest names.
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::StableKey,
             byte_cap: 300,
             gram_size: 3,
@@ -1592,6 +1595,7 @@ mod tests {
     fn builder_rejects_single_doc_over_cap() {
         // One document whose postings alone exceed a tiny cap is a degenerate corpus.
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 10,
             gram_size: 3,
@@ -1610,6 +1614,7 @@ mod tests {
         // A doc too short for any trigram keeps the global id space dense (alignment with
         // records/facets), but never appears in results.
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 1 << 20,
             gram_size: 3,
@@ -1689,6 +1694,7 @@ mod tests {
         // A summary-less (stripped-manifest-style) set: no per-split Blooms, so
         // an absent term would otherwise descend through every split.
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 4096,
             gram_size: 3,
@@ -1755,6 +1761,7 @@ mod tests {
         // Same 60-doc corpus built twice — without and with per-split Bloom filters.
         let build_ss = |bloom: u32| {
             let mut b = SplitSetBuilder::new(SplitBuildConfig {
+                byte_cap_max: 0,
                 policy: Policy::Tiered,
                 byte_cap: 4096,
                 gram_size: 3,
@@ -1863,6 +1870,7 @@ mod tests {
     fn inlined_boot_avoids_split_open_fetches() {
         // 30 docs all matching "abc", small cap -> several tiered splits (no Bloom here).
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 2048,
             gram_size: 3,
@@ -1914,6 +1922,7 @@ mod tests {
         // 4 docs all matching "abc"; a small cap puts the two "en" docs in split 0 and the two
         // "fr" docs in split 1, so a facet filter prunes the split that lacks the category.
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 250,
             gram_size: 3,
@@ -1982,6 +1991,7 @@ mod tests {
         // summaries no split may be facet-pruned — a missing facet TLV must read as "no
         // information", not "no facets" — and the filter must resolve via each split's .rrf.
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 250,
             gram_size: 3,
@@ -2066,6 +2076,7 @@ mod tests {
         // Same fixture: two "en" docs in split 0, two "fr" docs in split 1, each with its own
         // .rrf. facet_counts must sum each split's per-category counts into one name-keyed result.
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 250,
             gram_size: 3,
@@ -2128,6 +2139,7 @@ mod tests {
             .map(|i| format!("abc topic{} tok{i:03}", i % 5))
             .collect();
         let cfg = || SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 2048,
             gram_size: 3,

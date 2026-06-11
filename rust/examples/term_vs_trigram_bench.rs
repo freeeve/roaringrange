@@ -109,6 +109,7 @@ type Files = HashMap<String, Arc<Vec<u8>>>;
 /// Builds a tiered **trigram** (`RRS`) split set over `docs` at `byte_cap`.
 fn build_trigram(docs: &[String], byte_cap: u64) -> (Vec<u8>, Files) {
     let mut b = SplitSetBuilder::new(SplitBuildConfig {
+        byte_cap_max: 0,
         policy: Policy::Tiered,
         byte_cap,
         gram_size: 3,
@@ -127,6 +128,7 @@ fn build_trigram(docs: &[String], byte_cap: u64) -> (Vec<u8>, Files) {
 /// Builds a tiered **term/FST** (`RRTI`) split set over `docs` at `byte_cap`.
 fn build_term(docs: &[String], byte_cap: u64) -> (Vec<u8>, Files) {
     let mut b = TermSplitSetBuilder::new(TermSplitBuildConfig {
+        byte_cap_max: 0,
         policy: Policy::Tiered,
         byte_cap,
         head_boundary: 0,

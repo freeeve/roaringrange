@@ -95,6 +95,7 @@ mod tests {
     /// splits so the bundle has more than one member.
     fn built_corpus() -> crate::splitset_build::BuiltSplitSet {
         let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
             policy: Policy::Tiered,
             byte_cap: 2048,
             gram_size: 3,
