@@ -268,6 +268,15 @@
       .perftoggle:hover { background: #f3f6fb; color: #3b4658; }
       .perftoggle svg { transition: transform 0.2s ease; }
       .perftoggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+      /* Live in-flight activity: a spinner + ticking counters while requests are
+         outstanding — visible on the collapsed toggle row AND inside the panel. */
+      .spin { width: 11px; height: 11px; border: 2px solid #cbd5e1; border-top-color: var(--accent); border-radius: 50%; animation: rrspin 0.65s linear infinite; flex: none; }
+      @keyframes rrspin { to { transform: rotate(360deg); } }
+      .perftoggle .spin, .perftoggle .perftoggle-live { display: none; }
+      .perftoggle.busy .spin { display: inline-block; margin-left: 8px; }
+      .perftoggle.busy .perftoggle-live { display: inline; color: var(--ink-soft, #475569); font-variant-numeric: tabular-nums; }
+      .perflive { display: flex; align-items: center; gap: 8px; padding: 6px 0 10px; font-size: 12.5px; color: var(--ink-soft, #475569); font-variant-numeric: tabular-nums; }
+      .perflive[hidden] { display: none; }
       .perfbar {
         margin-top: 14px;
         font-family: var(--mono);
@@ -711,11 +720,17 @@
         <button class="perftoggle" id="perftoggle" type="button" aria-expanded="false" aria-controls="perfbar">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span class="perftoggle-label">Show performance &amp; request details</span>
+          <span class="spin" aria-hidden="true"></span>
+          <span class="perftoggle-live" id="perftoggle-live"></span>
         </button>
         <div class="perfbar" id="perfbar" aria-live="polite" hidden>
           <div class="perfbar-hdr">
             <span class="perfbar-title">How this search ran</span>
             <span class="perfbar-note" id="m-barnote">all data byte-ranged from static S3</span>
+          </div>
+          <div class="perflive" id="perflive" hidden>
+            <span class="spin" aria-hidden="true"></span>
+            <span id="perflive-text">working…</span>
           </div>
           <div class="perfcols"><span></span><span class="c-time">Time</span><span class="c-reqs">Requests</span><span class="c-net">Network</span></div>
           <div id="perfrows"></div>
@@ -856,12 +871,17 @@
       // counts would read zero; the panel keeps full-corpus counts (from the meta,
       // free) instead.
       let facetHeadsReady = true;
-      // Optional server-side search: the regional Lambda runs the same intersection
-      // over in-region S3 reads and returns only this page's IDs + the exact total,
-      // so the multi-MB postings never egress to the browser. Opt-in via the toggle.
-      // Same-origin via the CloudFront /search behavior (origin = the regional API
-      // Gateway in front of the search Lambda) — one host for every byte the demo moves.
+      // Server-side search: the regional Lambda runs the same intersection over
+      // in-region S3 reads and returns only this page's IDs + the exact total, so
+      // the multi-MB postings never egress to the browser. Same-origin via the
+      // CloudFront /search behavior (origin = the regional API Gateway in front of
+      // the search Lambda) — one host for every byte the demo moves.
       const LAMBDA_URL = "https://openalex.evefreeman.com/search";
+      // Server mode is the trigram DEFAULT on the full dataset (~1–3 KB and well
+      // under a second warm, vs dozens of ranged reads client-side); the toggle
+      // stays so the client-side paths remain one click away. The Lambda serves
+      // the FULL corpus only, so test datasets (?ds=poc/47m) never default to it.
+      const SERVER_DEFAULT = DS === "full";
       // Cost-based routing: a trigram query whose estimated client-side fetch exceeds
       // the threshold can route to the Lambda automatically (the same intersection,
       // in-region, only IDs cross the wire), priced BEFORE any posting is fetched —
@@ -892,7 +912,8 @@
       let splitRecords = null;      // the split set's RRSR record store (shared with the monolith when SPLIT.rec matches)
       let rrssTerm = null;          // the term-bodied split set reader (lazy-booted on first term+split search)
       let splitMode = false;        // the "Split-set index" toggle: swap the trigram backend to RrssIndex
-      let splitOff = false;         // user opted OUT of split mode (toggle or ?split=0) — split is the default
+      let splitOff = false;         // user opted OUT of split mode (toggle or ?split=0) — split is the client-side default
+      let serverOff = false;        // user opted OUT of server mode (toggle or ?srv=0) — server is the trigram default
       let facetSrc = null;          // facet source: the text index, or a standalone .rrf when the .rrs isn't up yet
       const SEM_NPROBE = 8, SEM_K = 250, RRF_K = 60;  // vector probes (~1 MB/cluster over the 484M nlist=16384 index), ranked depth (≈10 pages), RRF constant
       // The ranked depth is the page-through ceiling, not a per-page cap: the nprobe
@@ -928,6 +949,8 @@
         servermode: $("servermode"),
         lambdasem: $("lambdasem"), lambdasemWrap: $("lambdasem-wrap"),
         splitmode: $("splitmode"), splitmodeWrap: $("splitmode-wrap"),
+        perflive: $("perflive"), perfliveText: $("perflive-text"),
+        perftoggleLive: $("perftoggle-live"),
       };
 
       // Static file → URL, keyed for the per-mode size readout. A dataset may not
@@ -1066,12 +1089,13 @@
         if (q) params.set("q", q);
         const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
         if (mode !== "trigram") params.set("mode", mode);
-        // Split is the default for trigram AND term, so the URL encodes the
-        // EXCEPTION: split=0 when the user turned it off (split=1 in old deep links
-        // is a no-op). Keyed on the opt-out flag, not splitMode, so the choice
-        // survives a refresh taken before the split set finishes booting.
+        // Server (trigram) and split (client-side) are the defaults, so the URL
+        // encodes the EXCEPTIONS: srv=0 / split=0 opt-outs (srv=1 / split=1 in old
+        // deep links are no-ops). Keyed on the opt-out flags, not the live mode
+        // booleans, so the choice survives a refresh taken before the split set
+        // finishes booting.
+        if (mode === "trigram" && SERVER_DEFAULT && serverOff) params.set("srv", "0");
         if ((mode === "trigram" || mode === "term") && !serverMode && splitOff) params.set("split", "0");
-        if (serverMode) params.set("srv", "1");
         const mm = currentFuzz();
         if (mm) params.set("fuzz", String(mm));
         for (const key of activeFilters) params.append("f", key);
@@ -1092,12 +1116,20 @@
         // The split toggle applies wherever a split set exists for the mode's body:
         // trigram needs the booted reader (its search path uses it synchronously);
         // term only needs the config (the reader lazy-boots on first search).
+        // Server (Lambda) is the trigram DEFAULT on the full dataset; computed
+        // BEFORE the split default, which yields to it. Turning server off (or a
+        // forceSplit dataset) re-engages the split-set default below.
+        if (triOnly && SERVER_DEFAULT) {
+          serverMode = !serverOff && !DATASETS[DS].forceSplit;
+          els.servermode.checked = serverMode;
+        }
         const splitCapable = triOnly ? !!rrss : (mode === "term" && !!TERM_SPLIT_RRSS_URL);
         els.splitmodeWrap.hidden = !splitCapable;
         if (!splitCapable && splitMode) { splitMode = false; els.splitmode.checked = false; }
-        // Split is the DEFAULT for the capable modes: entering one (or the split set
-        // landing) turns it on unless the user opted out or server mode owns the
-        // trigram path. A forceSplit dataset (?ds=lite has no monolith) pins it on.
+        // Split is the DEFAULT client-side path for the capable modes: entering one
+        // (or the split set landing) turns it on unless the user opted out or server
+        // mode owns the trigram path. A forceSplit dataset (?ds=lite has no
+        // monolith) pins it on.
         if (splitCapable) {
           splitMode = (!splitOff && !(triOnly && serverMode)) || (triOnly && !!DATASETS[DS].forceSplit);
           els.splitmode.checked = splitMode;
@@ -1121,21 +1153,19 @@
           // backend that produced it — its page offset indexes that backend's ranking.
           // Legacy deep links: "hybrid" predates the two-arm split — treat as tri+sem.
           const mode = params.get("mode") === "hybrid" ? "hybrid-tri" : params.get("mode");
+          let effective = "trigram";
           if (["term", "semantic", "hybrid-tri", "hybrid-term"].includes(mode)) {
             const r = $(`mode-${mode}`);
-            if (r) { r.checked = true; syncModeUi(mode); }
-          } else if (params.get("srv") === "1") {
-            // Server and split are mutually exclusive; srv wins if both appear.
-            serverMode = true;
-            els.servermode.checked = true;
-            splitMode = false;
-            els.splitmode.checked = false;
-          } else if (params.get("split") === "0") {
-            // Split is the default; the param encodes the opt-out.
-            splitOff = true;
-            splitMode = false;
-            els.splitmode.checked = false;
+            if (r) { r.checked = true; effective = mode; }
           }
+          // Server and split are both DEFAULTS now (server first, split when server
+          // is off), so the params encode the EXCEPTIONS — srv=0 / split=0 opt-outs.
+          // Legacy srv=1 deep links assert the (current) default; honor them by
+          // clearing any opt-out rather than special-casing.
+          if (params.get("srv") === "0") serverOff = true;
+          if (params.get("srv") === "1") serverOff = false;
+          if (params.get("split") === "0") splitOff = true;
+          syncModeUi(effective);
           const mm = Number.parseInt(params.get("fuzz") || "0", 10) || 0;
           const radio = document.querySelector(`input[name="fuzz"][value="${mm === 1 ? 1 : 0}"]`);
           if (radio) radio.checked = true;
@@ -1184,7 +1214,7 @@
          boot holds just ms (a number) or null.
          Calling setPerf({ ... }) patches the model and re-renders.
          tail: null clears/hides the tail page's row. */
-      const perfModel = { index: null, facets: null, recstore: null, lookup: null, vecindex: null, embedder: null, search: null, embed: null, vsearch: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null, headN: null, query: null, summary: null };
+      const perfModel = { index: null, facets: null, recstore: null, lookup: null, vecindex: null, embedder: null, search: null, embed: null, vsearch: null, doilookup: null, facetcount: null, results: null, tail: null, tailresults: null, pageLast: null, pageAgg: null, headN: null, query: null, summary: null };
 
       /** Render the "How this search ran" rows from perfModel. */
       function renderPerf() {
@@ -1192,6 +1222,7 @@
           { key: "startup", title: "Startup · ran once" },
           { key: "popular", title: "First page" },
           { key: "rest", title: "This page · paged into the tail" },
+          { key: "paging", title: "Paging · Prev / Next" },
         ];
         const steps = [
           { g: "startup", name: "Open index", desc: bundleBoot ? "catalog .rrhc — one GET, every boot region" : "index header + dictionary", get: () => perfModel.index },
@@ -1218,6 +1249,15 @@
             get: () => (!serverMode && perfModel.tail != null) ? perfModel.tail : null,
           },
           { g: "rest", name: "Records fetch", desc: "this page's records", get: () => perfModel.tailresults },
+          // Pagination accumulates in its OWN section — the "First page" rows above
+          // keep the original query's numbers instead of being overwritten by nav.
+          { g: "paging", name: "Last move", desc: "index pages + records for that page", get: () => perfModel.pageLast },
+          {
+            g: "paging",
+            name: "All moves",
+            desc: perfModel.pageAgg ? `cumulative · ${perfModel.pageAgg.moves} move${perfModel.pageAgg.moves === 1 ? "" : "s"} this query` : "cumulative",
+            get: () => perfModel.pageAgg,
+          },
         ];
 
         /* Phases split into one-time startup opens (boot) and per-search work. Each
@@ -1303,7 +1343,7 @@
        * row, and omitting a key leaves its prior value untouched.
        */
       function setPerf(patch = {}) {
-        for (const k of ["index", "facets", "recstore", "lookup", "vecindex", "embedder", "search", "embed", "vsearch", "doilookup", "facetcount", "results", "tail", "tailresults", "headN", "query", "summary"]) {
+        for (const k of ["index", "facets", "recstore", "lookup", "vecindex", "embedder", "search", "embed", "vsearch", "doilookup", "facetcount", "results", "tail", "tailresults", "pageLast", "pageAgg", "headN", "query", "summary"]) {
           if (patch[k] !== undefined) perfModel[k] = patch[k];   // null clears the row
         }
         renderPerf();
@@ -1627,9 +1667,13 @@
             : "no results";
           const io = { ms: idxMs, reqs: idxReqs, bytes: idxBytes };
           const rec = { ms: recMsTotal, reqs: recReqsTotal, bytes: recBytesTotal };
+          // During Prev/Next the first-page rows keep the original query's numbers;
+          // the move itself reports under the Paging group (pageTo measures it).
           setPerf(intoTail
             ? { tail: io, tailresults: rec, headN: c.headCount(), summary }
-            : { search: io, results: rec, headN: c.headCount(), tail: null, tailresults: null, summary });
+            : pagingNav
+              ? { headN: c.headCount(), summary }
+              : { search: io, results: rec, headN: c.headCount(), tail: null, tailresults: null, summary });
 
           if (!scanning) break;
           try { ids = await c.page(offset, PAGE); }
@@ -1713,12 +1757,14 @@
         const summary = (lastTotal || tailPending)
           ? `${fmt(lastTotal)}${tailPending ? "+" : ""} result${lastTotal === 1 && !tailPending ? "" : "s"} in ${(lamMs + recMs).toFixed(0)} ms · server-side${autoRouted ? " (auto-routed by cost)" : ""}`
           : "no results";
-        setPerf({
-          search: { ms: lamMs, reqs: 1, bytes: res.bytes },
-          results: { ms: recMs, reqs: recReqs, bytes: recBytes },
-          tail: null,
-          summary,
-        });
+        setPerf(pagingNav
+          ? { summary }
+          : {
+              search: { ms: lamMs, reqs: 1, bytes: res.bytes },
+              results: { ms: recMs, reqs: recReqs, bytes: recBytes },
+              tail: null,
+              summary,
+            });
       }
 
       /* Page over a ranked doc-ID list (semantic / term / hybrid). The vector or term
@@ -1743,18 +1789,34 @@
         for (const [id, rec] of map) recCache.set(id, rec);
         lastPage = page; lastTotal = rankedIds.length; tailPending = false;
         renderCards(recCache); updateResultsHead(); updatePager(); syncUrl();
-        setPerf({ results: { ms: recMs, reqs: recReqs, bytes: recBytes }, summary: `${rankedSummary} · ${recMs.toFixed(0)} ms` });
+        setPerf(pagingNav
+          ? { summary: `${rankedSummary} · ${recMs.toFixed(0)} ms` }
+          : { results: { ms: recMs, reqs: recReqs, bytes: recBytes }, summary: `${rankedSummary} · ${recMs.toFixed(0)} ms` });
       }
 
       // One page in flight at a time: the wasm cursor's page() takes &mut self, so a
       // double-clicked Next during a slow tail fetch would reject the second call
       // with wasm-bindgen's "recursive use of an object" instead of paging.
       let pageBusy = false;
+      // True while a Prev/Next move runs: the page functions then leave the
+      // first-page perf rows alone and the move reports under the Paging group.
+      let pagingNav = false;
       const pageTo = async (o) => {
         if (pageBusy) return;
         pageBusy = true;
+        pagingNav = true;
+        const tok = startLive();
+        const seq = searchSeq;
+        const r0 = reqs, b0 = bytes, t0 = performance.now();
         try { await (rankedIds ? goPageRanked(o) : (serverMode || autoRouted) ? goPageServer(o) : goPage(o)); }
-        finally { pageBusy = false; }
+        finally { pageBusy = false; pagingNav = false; stopLive(tok); }
+        if (seq !== searchSeq) return;
+        const d = { ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 };
+        const agg = perfModel.pageAgg || { ms: 0, reqs: 0, bytes: 0, moves: 0 };
+        setPerf({
+          pageLast: d,
+          pageAgg: { ms: agg.ms + d.ms, reqs: agg.reqs + d.reqs, bytes: agg.bytes + d.bytes, moves: agg.moves + 1 },
+        });
       };
 
       /* -------- explicit full scan: materialize the entire tail intersection so the
@@ -1763,20 +1825,56 @@
          calls this — page() loads the tail incrementally. -------- */
       async function loadAll() {
         if (!cur || !cur.pendingTail()) return;
-        const seq = searchSeq;
-        els.resultcount.innerHTML =
-          `<b>${fmt(lastTotal)}</b>+ result${lastTotal === 1 ? "" : "s"} <span style="color:var(--ink-faint)">· scanning every match…</span>`;
-        const r0 = reqs, b0 = bytes, t0 = performance.now();
-        try { await cur.loadTail(); }
-        catch (e) { els.mSummary.textContent = `error: ${e}`; return; }
-        if (seq !== searchSeq) return;
-        const tailMs = performance.now() - t0, tailReqs = reqs - r0, tailBytes = bytes - b0;
-        await goPage(offset);   // re-render the current page; total is now exact and the pager spans the full set
-        if (seq !== searchSeq) return;
-        setPerf({ tail: { ms: tailMs, reqs: tailReqs, bytes: tailBytes } });
+        const tok = startLive();
+        try {
+          const seq = searchSeq;
+          els.resultcount.innerHTML =
+            `<b>${fmt(lastTotal)}</b>+ result${lastTotal === 1 ? "" : "s"} <span style="color:var(--ink-faint)">· scanning every match…</span>`;
+          const r0 = reqs, b0 = bytes, t0 = performance.now();
+          try { await cur.loadTail(); }
+          catch (e) { els.mSummary.textContent = `error: ${e}`; return; }
+          if (seq !== searchSeq) return;
+          const tailMs = performance.now() - t0, tailReqs = reqs - r0, tailBytes = bytes - b0;
+          await goPage(offset);   // re-render the current page; total is now exact and the pager spans the full set
+          if (seq !== searchSeq) return;
+          setPerf({ tail: { ms: tailMs, reqs: tailReqs, bytes: tailBytes } });
+        } finally {
+          stopLive(tok);
+        }
       }
 
       let searchSeq = 0;   // bumped per query so a stale, slower earlier search can bail before rendering
+
+      /* Live in-flight activity: while a search / page / tail pull is running, tick
+         the per-query request+byte counters (the wrapped fetch updates them as each
+         Range read is ISSUED) into the perf bar and the collapsed toggle row, so a
+         long scan visibly makes progress instead of appearing hung. Token-guarded:
+         a newer operation re-arms the shared ticker and the older owner's stop is
+         then a no-op, so overlapping searches can't kill each other's indicator. */
+      let liveToken = 0, liveTimer = null;
+      function startLive() {
+        const tok = ++liveToken;
+        const t0 = performance.now();
+        els.perflive.hidden = false;
+        els.perftoggle.classList.add("busy");
+        clearInterval(liveTimer);
+        const tick = () => {
+          const line = `${reqs} request${reqs === 1 ? "" : "s"} · ${fmtBytes(bytes)} · ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+          els.perfliveText.textContent = `in flight — ${line}`;
+          els.perftoggleLive.textContent = line;
+        };
+        tick();
+        liveTimer = setInterval(tick, 120);
+        return tok;
+      }
+      function stopLive(tok) {
+        if (tok !== liveToken) return;
+        clearInterval(liveTimer);
+        liveTimer = null;
+        els.perflive.hidden = true;
+        els.perftoggle.classList.remove("busy");
+        els.perftoggleLive.textContent = "";
+      }
 
       /* The bare DOI (10.xxxx/…) if q is DOI-shaped (optionally a doi.org URL), else
          null. The URL-prefix strip mirrors the builder's normalize_doi; the reader's
@@ -1940,6 +2038,13 @@
 
       /* -------- run a query (resetPaging=true on new query / fuzz change) -------- */
       async function runSearch(resetPaging = true) {
+        // Thin wrapper so every exit path (and there are many early returns in the
+        // body) stops the live in-flight indicator without touching a newer run's.
+        const tok = startLive();
+        try { await runSearchInner(resetPaging); }
+        finally { stopLive(tok); }
+      }
+      async function runSearchInner(resetPaging = true) {
         searchMode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
         clearTimeout(autoPullTimer);
         const q = els.q.value.trim();
@@ -1954,6 +2059,8 @@
           return;
         }
         perfModel.query = q;   // shown in the "First page" group header
+        perfModel.pageLast = null;   // paging stats are per query
+        perfModel.pageAgg = null;
         const mySeq = ++searchSeq;
         reqs = 0; bytes = 0;
         recCache.clear();
@@ -2297,13 +2404,18 @@
         }
         syncModeUi(searchMode);
 
-        // Split is the trigram default, so the first trigram search needs the split
-        // set open — boot it on the critical path unless the URL opts out (?split=0
-        // or srv=1, whose searches run elsewhere; the deferred boot below still
-        // reveals the toggle). The manifest + bundle boot is ~50 KB / 2 waves.
+        // The split set is only on the first search's critical path when that
+        // search runs client-side split — i.e. server mode (the trigram default)
+        // is opted out and split isn't. Everything else takes the deferred boot
+        // below, which still reveals the toggle when it lands. The manifest +
+        // bundle boot is ~50 KB / 2 waves.
         {
           const up = new URLSearchParams(location.search);
-          if ((up.get("split") !== "0" && up.get("srv") !== "1") || DATASETS[DS].forceSplit) {
+          const m = up.get("mode");
+          const triFirst = !m || m === "trigram";
+          const clientSplitFirst =
+            (!SERVER_DEFAULT || up.get("srv") === "0") && up.get("split") !== "0";
+          if ((triFirst && clientSplitFirst) || DATASETS[DS].forceSplit) {
             await bootSplitSet();
           }
         }
@@ -2422,6 +2534,7 @@
       // facet filters (no client cursor), so clear any and dim the panel.
       els.servermode.addEventListener("change", () => {
         serverMode = els.servermode.checked;
+        serverOff = !serverMode;   // remember the user's choice across mode switches
         // Mutually exclusive with split mode in BOTH directions (the split branch wins
         // in runSearch, so leaving it set would silently ignore this toggle). Leaving
         // server mode re-engages the split default via the same recompute the mode
