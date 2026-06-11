@@ -854,6 +854,7 @@
           <div class="facet"><div class="fname">Vector index</div><span class="fkey">.rrvi (+ .rrm2) · RRVI · ~16 GB</span><div class="fdesc">IVFPQ semantic search; in-browser model2vec, or a Gemma Lambda embedder.</div></div>
           <div class="facet"><div class="fname">DOI lookup</div><span class="fkey">.rril · RRIL · ~4.5 GB</span><div class="fdesc">A DOI, or a <code>doi.org</code> URL, straight to its doc ID in a couple of reads.</div></div>
           <div class="facet"><div class="fname">Record store</div><span class="fkey">.idx / .bin (+ .dict) · RRSR · ~119 GB</span><div class="fdesc">Doc ID → the stored card fields, zstd-compressed against a trained dictionary.</div></div>
+          <div class="facet"><div class="fname">BM25 impacts</div><span class="fkey">.rrb · RRSB · ~35 GB</span><div class="fdesc">Lexical-relevance rerank for the term index — one quantized impact byte per (word, doc).</div></div>
           <div class="facet"><div class="fname">Split sets</div><span class="fkey">.rrss + .rrhc · RRSS</span><div class="fdesc">Byte-capped immutable splits, pruned queries — a 120 GB / 389-split trigram set and a 61 GB / 243-split term set.</div></div>
           <div class="facet"><div class="fname">Sort columns</div><span class="fkey">.rrsc · RRSC</span><div class="fdesc">Secondary sort keys &amp; full second indexes — client-side re-rank, e.g. newest-first.</div></div>
         </div>
@@ -1316,6 +1317,64 @@
   <text x="32" y="500" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">TermIndex::open(f).search(query, limit) → ranked doc IDs   ·   .complete(prefix) → autocomplete</tspan></text>
 </svg></div>
           <figcaption>A whole-word inverted index: the dictionary is a <b>blocked, front-coded sorted-string table</b> (the Quickwit/<code>tantivy-sstable</code> shape) with a small <b>resident FST</b> routing over block boundaries — only the router (O(#blocks)) stays in memory while the dictionary blocks range-fetch on demand, so a full-corpus vocabulary loads in a browser. Each query word costs one block read plus one posting read, versus ~(L−2) trigram fetches; stemming and stop-word removal are recorded in the header so the reader tokenizes queries identically. The postings region is byte-identical to the trigram <code>.rrs</code>, so doc IDs and the head/tail rank split carry straight over.</figcaption>
+        </figure>
+
+        <figure class="fig reveal">
+          <div class="fig-head"><span class="chip">.rrb</span><span class="fig-name">BM25 impacts <span class="muted">· lexical relevance as a sidecar</span></span></div>
+          <div class="fig-canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 568" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, sans-serif" role="img" aria-label="RRSB BM25 impact sidecar layout and rerank flow">
+  <defs><marker id="arB" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#475569"></path></marker></defs>
+
+  <text x="32" y="38" class="title">BM25 impact sidecar — companion file (<tspan class="mono">.rrb</tspan>)</text>
+  <text x="32" y="60" class="sub">lexical relevance for the term index — one precomputed impact byte per (word, doc), addressed by the posting bitmap itself</text>
+
+  <rect x="648" y="26" width="12" height="12" rx="3" fill="#3b5bdb"></rect><text x="666" y="36" class="note">loaded at boot</text>
+  <rect x="792" y="26" width="12" height="12" rx="3" fill="#64748b"></rect><text x="810" y="36" class="note">range-fetched</text>
+
+  <rect x="32" y="86" width="96" height="56" rx="6" fill="#3b5bdb"></rect>
+  <rect x="132" y="86" width="180" height="56" rx="6" fill="#3b5bdb"></rect>
+  <rect x="316" y="86" width="290" height="56" rx="6" fill="#64748b"></rect>
+  <rect x="610" y="86" width="338" height="56" rx="6" fill="#64748b"></rect>
+  <text x="80" y="112" class="seg" text-anchor="middle">Header</text>
+  <text x="80" y="128" class="seg mono" text-anchor="middle" font-size="11">64 B</text>
+  <text x="222" y="112" class="seg" text-anchor="middle">Sparse index</text>
+  <text x="222" y="128" class="seg mono" text-anchor="middle" font-size="11">every 512th key · 8 B</text>
+  <text x="461" y="112" class="seg" text-anchor="middle">Entry table</text>
+  <text x="461" y="128" class="seg mono" text-anchor="middle" font-size="11">20 B/term · sorted by head_off</text>
+  <text x="779" y="112" class="seg" text-anchor="middle">Impacts</text>
+  <text x="779" y="128" class="seg mono" text-anchor="middle" font-size="11">1 B per (word, doc) · posting order</text>
+  <text x="32" y="172" class="lbl mono">magic &#34;RRSB&#34; · ver 1 · scale · k1 · b · avgdl · termCount · stride · docCount</text>
+
+  <line x1="222" y1="142" x2="222" y2="206" stroke="#3b5bdb" stroke-width="1.5"></line>
+  <rect x="32" y="206" width="430" height="178" rx="8" fill="#eef0fd" stroke="#3b5bdb"></rect>
+  <text x="48" y="230" class="lbl" font-weight="700">The impact byte — BM25&#39;s per-doc half, baked at build</text>
+  <text x="48" y="258" class="note mono" font-size="13">s = tf·(k1+1) / (tf + k1·(1 − b + b·dl/avgdl))</text>
+  <text x="48" y="282" class="note mono" font-size="13">byte = round(255 · s / (k1+1))     ∈ 1…255</text>
+  <text x="48" y="310" class="note">term frequency <tspan class="mono">tf</tspan> AND the doc-length norm <tspan class="mono">dl/avgdl</tspan> are</text>
+  <text x="48" y="328" class="note">folded into the byte — no tf file, no norms file, no per-query math</text>
+  <text x="48" y="346" class="note">beyond a weighted sum.</text>
+  <rect x="48" y="356" width="398" height="16" rx="3" fill="#dbe3fb"></rect>
+  <text x="60" y="368" class="note mono" font-size="10">idf is free too: df is the posting cardinality the reader already has</text>
+
+  <line x1="610" y1="142" x2="700" y2="206" stroke="#64748b" stroke-width="1.5" marker-end="url(#arB)"></line>
+  <rect x="496" y="206" width="452" height="178" rx="8" fill="#f1f5f9" stroke="#64748b"></rect>
+  <text x="512" y="230" class="lbl" font-weight="700">Addressing — the posting bitmap IS the index</text>
+  <text x="512" y="256" class="note">the <tspan class="mono">.rrt</tspan> lookup already resolved each query word to its posting</text>
+  <text x="512" y="274" class="note">offset <tspan class="mono">head_off</tspan> (unique per word) and its roaring bitmap, so:</text>
+  <text x="512" y="300" class="note mono" font-size="12">entry:  sparse → one ~10 KB stripe → (impactsOff, df)</text>
+  <text x="512" y="320" class="note mono" font-size="12">byte:   impactsOff + rank(doc) − 1</text>
+  <text x="512" y="344" class="note" fill="#64748b" font-size="12"><tspan class="mono">rank(doc)</tspan> = how many of the word&#39;s docs precede this one — an O(1)</text>
+  <text x="512" y="362" class="note" fill="#64748b" font-size="12">roaring query. No term IDs, no second dictionary: the <tspan class="mono">.rrt</tspan> is untouched.</text>
+
+  <rect x="32" y="404" width="916" height="104" rx="8" fill="#f8fafc" stroke="#cbd5e1"></rect>
+  <text x="48" y="426" class="note" font-weight="700">Reader — candidate-window rerank</text>
+  <text x="48" y="448" class="note" font-size="13"><tspan font-weight="700" fill="#3b5bdb">boot</tspan>  header + sparse index (~3 MB for 187M terms) → kept in memory.</text>
+  <text x="48" y="468" class="note" font-size="13"><tspan font-weight="700" fill="#64748b">per query</tspan>  term search → first M candidates in citation-rank order → one entry-stripe wave + one coalesced impact-byte wave →</text>
+  <text x="48" y="488" class="note" font-size="13"><tspan class="mono">score(doc) = Σ idf(word) · byte · scale/255</tspan> → top-K by relevance, ties keep citation rank.</text>
+  <text x="48" y="503" class="note" font-size="11" fill="#94a3b8">doc ID == citation rank is authority, not aboutness — the rerank reorders the most-cited matches by lexical relevance; hybrid&#39;s vector arm covers docs outside the window.</text>
+
+  <text x="32" y="548" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">search_bm25(terms, impacts, query, m, k) → [(doc_id, score)]   ·   ImpactIndex::rerank scores ANY mode&#39;s candidates (shared doc-ID space)</tspan></text>
+</svg></div>
+          <figcaption>Search results arrive in <b>citation-rank order</b> — that&rsquo;s authority, not how well a doc matches the words you typed. The <code>.rrb</code> sidecar adds the missing relevance signal: at build time, BM25&rsquo;s per-document half (term frequency saturated by <code>k1</code>, normalized by document length) is computed and quantized into <b>one byte per (word, doc)</b>; at query time the reader takes the first M matches, fetches just those candidates&rsquo; bytes, and reorders them by <code>Σ idf × impact</code>. The trick that keeps it additive: impact bytes are stored in each word&rsquo;s posting order, so the <b>roaring bitmap the search already fetched is the addressing structure</b> (<code>rank(doc)</code> names the byte) — no term IDs, no norms file, and the <code>.rrt</code> itself is byte-identical to before. Because every index shares the doc-ID space, the same sidecar can rerank trigram and hybrid candidates too.</figcaption>
         </figure>
 
         <figure class="fig reveal">
