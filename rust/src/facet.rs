@@ -125,6 +125,19 @@ impl<F: RangeFetch> FacetIndex<F> {
         Self::open_tuned(fetch, EAGER_REGION_LIMIT, LAZY_TOP_N).await
     }
 
+    /// Boots the **meta region only** (header + tables + string blob, KBs) —
+    /// no head postings. Sufficient for [`resolve`](Self::resolve)/filtering and
+    /// full-corpus counts; search-filtered [`counts`](Self::counts) read zero
+    /// until [`load_heads`](Self::load_heads). The per-split filtered path uses
+    /// this: filtering never touches heads, so eagerly loading a sidecar's whole
+    /// postings region per split (the `open` default) is pure waste there.
+    pub async fn open_meta(fetch: F) -> Result<Self, IndexError> {
+        let header = fetch.read(0, HEADER_SIZE).await?;
+        let meta_len = rrsf_boot_len(&header)?;
+        let buf = fetch.read(0, meta_len).await?;
+        Ok(FacetMeta::parse(buf)?.attach(fetch))
+    }
+
     /// [`FacetIndex::open`] with explicit tuning: `eager_limit` is the
     /// postings-region byte size at or below which the whole region is read in one
     /// request; above it only the `top_n` highest-count category heads per field

@@ -985,6 +985,17 @@ impl SplitSet {
         query: &str,
         filter: &[(String, String)],
     ) -> Result<Vec<u32>, IndexError> {
+        // Resolve the filter from the sidecar's META alone (KBs) and bail BEFORE opening
+        // anything else: filtering never reads head postings, and an unsatisfiable arm — a
+        // field this split's sidecar doesn't carry — skips the split without touching its
+        // body. The previous order (open split, then `FacetIndex::open` with its eager
+        // whole-region head load) paid ~MBs × splits to answer such a filter with zero hits.
+        let facets =
+            FacetIndex::open_meta(resolver.fetch_named(&facet_file_name(&split.data_file))).await?;
+        let resolved = facets.resolve(filter);
+        if resolved.has_empty_arm() {
+            return Ok(Vec::new());
+        }
         // Only the trigram body exposes the filtered cursor; the `Term` arm is absent without the
         // `terms` feature, so the match collapses to one infallible pattern there.
         #[allow(clippy::infallible_destructuring_match)]
@@ -997,9 +1008,6 @@ impl SplitSet {
                 ))
             }
         };
-        let facets =
-            FacetIndex::open(resolver.fetch_named(&facet_file_name(&split.data_file))).await?;
-        let resolved = facets.resolve(filter);
         let mut cursor = idx.search_cursor_filtered(query, 0, Some(resolved)).await?;
         cursor.load_tail().await?;
         let local = cursor.page(0, usize::MAX).await?;
