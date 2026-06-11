@@ -798,7 +798,11 @@
                   // bloom: a GLOBAL term-Bloom sidecar (range-probed, never downloaded) restoring
                   // the absent-term prune the 29 KB summary-stripped manifest gave up: a term
                   // missing from the whole corpus ends the tier descent in ~k one-byte reads.
-                  split: { rrss: "openalex-trigram-split/openalex.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full", bloom: "openalex-global.bloom" } },
+                  split: { rrss: "openalex-trigram-split/openalex.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full", bloom: "openalex-global.bloom" },
+                  // termSplit: the term-bodied (.rrt) split set over the same corpus/ranking —
+                  // the split toggle under Term mode routes through it. Shares records-full
+                  // (same doc-ID space); no boot bundle (its manifest is ~21 KB, one open).
+                  termSplit: { rrss: "openalex-split/openalex-484m-terms.rrss", base: "openalex-split" } },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
         // ?ds=lite — the SAME deployed artifacts, searched through a 3.4 KB manifest listing
@@ -808,7 +812,8 @@
         // term/semantic stay full-corpus (their indexes aren't tiered).
         "lite": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrviGemma: null,
                   forceSplit: true,
-                  split: { rrss: "openalex-trigram-split/openalex-lite.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full", bloom: "openalex-global.bloom" } },
+                  split: { rrss: "openalex-trigram-split/openalex-lite.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full", bloom: "openalex-global.bloom" },
+                  termSplit: { rrss: "openalex-split/openalex-484m-terms.rrss", base: "openalex-split" } },
       };
       const dsParam = new URLSearchParams(location.search).get("ds");
       const DS = DATASETS[dsParam] ? dsParam : "full";
@@ -830,6 +835,10 @@
       const SPLIT_RRHC_URL = SPLIT ? new URL(SPLIT.rrhc, location.href).href : null;
       const SPLIT_REC_IDX_URL = SPLIT ? new URL(`${SPLIT.rec}.idx`, location.href).href : null;
       const SPLIT_REC_BIN_URL = SPLIT ? new URL(`${SPLIT.rec}.bin`, location.href).href : null;
+      // Term-bodied split set (null unless the dataset declares `termSplit`).
+      const TERM_SPLIT = DATASETS[DS].termSplit || null;
+      const TERM_SPLIT_RRSS_URL = TERM_SPLIT ? new URL(TERM_SPLIT.rrss, location.href).href : null;
+      const TERM_SPLIT_BASE_URL = TERM_SPLIT ? new URL(TERM_SPLIT.base, location.href).href : null;
       const PAGE = 25;
       // Catalog boot bundle (RRHC): ONE content-hashed GET carrying every member's
       // boot region (index sparse, facet meta, record header, zstd dict, lookup
@@ -881,6 +890,7 @@
       let rterm = null;             // RrtIndex — the FST term-index reader (whole-word/stemmed)
       let rrss = null;              // RrssIndex — the split-set reader (non-null == available; shows the toggle)
       let splitRecords = null;      // the split set's RRSR record store (shared with the monolith when SPLIT.rec matches)
+      let rrssTerm = null;          // the term-bodied split set reader (lazy-booted on first term+split search)
       let splitMode = false;        // the "Split-set index" toggle: swap the trigram backend to RrssIndex
       let splitOff = false;         // user opted OUT of split mode (toggle or ?split=0) — split is the default
       let facetSrc = null;          // facet source: the text index, or a standalone .rrf when the .rrs isn't up yet
@@ -922,7 +932,7 @@
 
       // Static file → URL, keyed for the per-mode size readout. A dataset may not
       // ship every file (e.g. no vector/term index), in which case its URL is null.
-      const FILE_URLS = { rrs: RRS_URL, rrf: RRF_URL, idx: IDX_URL, bin: BIN_URL, rril: LOOKUP_URL, dict: DICT_URL, rrvi: RRVI_URL, rrm2: RRM2_URL, rrt: RRT_URL, rrss: SPLIT_RRSS_URL };
+      const FILE_URLS = { rrs: RRS_URL, rrf: RRF_URL, idx: IDX_URL, bin: BIN_URL, rril: LOOKUP_URL, dict: DICT_URL, rrvi: RRVI_URL, rrm2: RRM2_URL, rrt: RRT_URL, rrss: SPLIT_RRSS_URL, trrss: TERM_SPLIT_RRSS_URL };
       const fileSizes = {};   // file key → byte length (0 = unknown / not reachable)
 
       /* True object size via a 1-byte ranged GET's Content-Range ("bytes 0-0/<total>").
@@ -971,7 +981,12 @@
         } else if (mode === "trigram" || mode === "hybrid-tri") {
           add(".rrs", fileSizes.rrs); add(".rrf", fileSizes.rrf);
         }
-        if (mode === "term" || mode === "hybrid-term") add(".rrt", fileSizes.rrt);
+        if (mode === "term" && splitMode && rrssTerm) {
+          add(".rrss manifest", fileSizes.trrss);
+          add(`${rrssTerm.splitCount()} splits · ${fmtCount(Number(rrssTerm.docCount()))} docs`, Number(rrssTerm.totalBytes()));
+        } else if (mode === "term" || mode === "hybrid-term") {
+          add(".rrt", fileSizes.rrt);
+        }
         if (mode.startsWith("hybrid") || mode === "semantic") { add(".rrvi", fileSizes.rrvi); add(".rrm2", fileSizes.rrm2); }
         const records = (fileSizes.idx || 0) + (fileSizes.bin || 0);
         if (records) add("records", records);
@@ -1010,6 +1025,10 @@
       };
       const catLabel = (field, name) => (field === "language" ? LANGUAGE_NAMES[name] || name : name);
       const SCROLLABLE = new Set(["year", "language", "topic"]);
+      // The facet fields the per-split .rrf sidecars carry (derive_split_facets
+      // excludes topic: its ~55k categories would bloat every sidecar's meta
+      // region, which the filtered path reads per visited split).
+      const SPLIT_FACET_FIELDS = new Set(["year", "type", "oa", "language"]);
       const FACET_CAP = 100;             // max categories rendered per field (real fields run to tens of thousands)
 
       let idx = null, cur = null, records = null, lookup = null;
@@ -1047,11 +1066,11 @@
         if (q) params.set("q", q);
         const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
         if (mode !== "trigram") params.set("mode", mode);
-        // Split is the trigram default, so the URL encodes the EXCEPTION: split=0
-        // when the user turned it off (split=1 in old deep links is a no-op). Keyed
-        // on the opt-out flag, not splitMode, so the choice survives a refresh taken
-        // before the split set finishes booting.
-        if (mode === "trigram" && !serverMode && splitOff) params.set("split", "0");
+        // Split is the default for trigram AND term, so the URL encodes the
+        // EXCEPTION: split=0 when the user turned it off (split=1 in old deep links
+        // is a no-op). Keyed on the opt-out flag, not splitMode, so the choice
+        // survives a refresh taken before the split set finishes booting.
+        if ((mode === "trigram" || mode === "term") && !serverMode && splitOff) params.set("split", "0");
         if (serverMode) params.set("srv", "1");
         const mm = currentFuzz();
         if (mm) params.set("fuzz", String(mm));
@@ -1070,14 +1089,17 @@
         const triOnly = mode === "trigram";
         $("fuzzmode").style.display = triOnly ? "" : "none";
         const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = triOnly ? "" : "none";
-        els.splitmodeWrap.hidden = !(triOnly && rrss);
-        if (!triOnly && splitMode) { splitMode = false; els.splitmode.checked = false; }
-        // Split is the trigram DEFAULT once the split set is open: entering trigram
-        // (or the split set landing) turns it on unless the user opted out or server
-        // mode owns the trigram path. A forceSplit dataset (?ds=lite has no monolith)
-        // pins it on regardless.
-        if (triOnly && rrss) {
-          splitMode = (!splitOff && !serverMode) || !!DATASETS[DS].forceSplit;
+        // The split toggle applies wherever a split set exists for the mode's body:
+        // trigram needs the booted reader (its search path uses it synchronously);
+        // term only needs the config (the reader lazy-boots on first search).
+        const splitCapable = triOnly ? !!rrss : (mode === "term" && !!TERM_SPLIT_RRSS_URL);
+        els.splitmodeWrap.hidden = !splitCapable;
+        if (!splitCapable && splitMode) { splitMode = false; els.splitmode.checked = false; }
+        // Split is the DEFAULT for the capable modes: entering one (or the split set
+        // landing) turns it on unless the user opted out or server mode owns the
+        // trigram path. A forceSplit dataset (?ds=lite has no monolith) pins it on.
+        if (splitCapable) {
+          splitMode = (!splitOff && !(triOnly && serverMode)) || (triOnly && !!DATASETS[DS].forceSplit);
           els.splitmode.checked = splitMode;
         }
         // The Gemma embed toggle only applies to the vector modes: show it there
@@ -1821,6 +1843,20 @@
         } catch (e) { els.mSummary.textContent = `term index load failed: ${e}`; return false; }
       }
 
+      /* Lazily open the term-bodied split set (its ~21 KB manifest, one open) on
+         first term+split search. Mirrors ensureTermIndex; the monolith term index
+         stays the fallback if the manifest fails to open. */
+      async function ensureTermSplit() {
+        if (rrssTerm) return true;
+        if (!TERM_SPLIT_RRSS_URL) return false;
+        try {
+          els.mSummary.textContent = "loading term split set…";
+          rrssTerm = await RrssIndex.open(TERM_SPLIT_RRSS_URL, TERM_SPLIT_BASE_URL);
+          renderActiveFiles();   // the chips can show split count/footprint now
+          return true;
+        } catch (e) { rrssTerm = null; return false; }
+      }
+
       /* Lazily open the Gemma vector index (mode 1). The query is embedded by the
          embed-lambda (EmbeddingGemma), not in-browser, so there is no local matrix to
          load — only the IVFPQ boot is range-fetched here. Returns false (gracefully)
@@ -1942,13 +1978,23 @@
         // is resident, so a query range-fetches only the matched terms' postings. Renders
         // through the same showDocs() doc-ID path; facets filter it like the others.
         if (searchMode === "term") {
-          const ok = await ensureTermIndex();
+          // Split is the term default: route through the term-bodied split set when
+          // the toggle is on (lazy boot, monolith fallback on failure). Filters use
+          // the same shared-ID-space post-filter either way — term bodies have no
+          // per-split filtered cursor, and the doc-ID space is the monolith's.
+          const useSplit = splitMode && (await ensureTermSplit());
+          if (mySeq !== searchSeq) return;
+          const ok = useSplit || await ensureTermIndex();
           if (mySeq !== searchSeq) return;
           if (!ok) { els.mSummary.textContent = "term search unavailable for this dataset"; return; }
           const filters = Array.from(activeFilters);
           const t0 = performance.now(), r0 = reqs, b0 = bytes;
           let ids;
-          try { ids = Array.from(await rterm.search(q, filters.length ? SEM_K_FILTER : SEM_K)); }
+          try {
+            ids = Array.from(useSplit
+              ? await rrssTerm.search(q, filters.length ? SEM_K_FILTER : SEM_K)
+              : await rterm.search(q, filters.length ? SEM_K_FILTER : SEM_K));
+          }
           catch (e) { els.mSummary.textContent = `term error: ${e}`; return; }
           if (mySeq !== searchSeq) return;
           const searchMs = performance.now() - t0, searchReqs = reqs - r0, searchBytes = bytes - b0;
@@ -1956,7 +2002,7 @@
           if (mySeq !== searchSeq) return;
           cur = null;
           rankedIds = ff.ids;
-          rankedSummary = `term${filters.length ? " + facets" : ""} · ${ff.ids.length} match${ff.ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`;
+          rankedSummary = `term${useSplit ? ` split set · ${rrssTerm.splitCount()} splits` : ""}${filters.length ? " + facets" : ""} · ${ff.ids.length} match${ff.ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`;
           setPerf({
             search: { ms: searchMs, reqs: searchReqs, bytes: searchBytes },
             facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
@@ -2051,11 +2097,22 @@
           const filters = Array.from(activeFilters);
           const pairs = filters.map((k) => k.split("\t"));
           const t0 = performance.now(), r0 = reqs, b0 = bytes;
+          // Per-split sidecars carry only the bounded fields (topic's ~55k categories
+          // would bloat every sidecar's meta region); a filter touching any other
+          // field post-filters the unfiltered split ranking against the monolith
+          // .rrf instead — same doc-ID space, same semantics as term/semantic mode.
+          const sidecarable = pairs.every((p) => SPLIT_FACET_FIELDS.has(p[0]));
           let sids;
           try {
-            sids = Array.from(filters.length
-              ? await rrss.searchFiltered(q, SEM_K_FILTER, pairs)
-              : await rrss.search(q, SEM_K));
+            if (filters.length && sidecarable) {
+              sids = Array.from(await rrss.searchFiltered(q, SEM_K_FILTER, pairs));
+            } else if (filters.length) {
+              const raw = Array.from(await rrss.search(q, SEM_K_FILTER));
+              if (mySeq !== searchSeq) return;
+              sids = (await facetFilter(raw, filters)).ids;
+            } else {
+              sids = Array.from(await rrss.search(q, SEM_K));
+            }
           } catch (e) { els.mSummary.textContent = `split error: ${e}`; return; }
           if (mySeq !== searchSeq) return;
           const searchMs = performance.now() - t0, searchReqs = reqs - r0, searchBytes = bytes - b0;

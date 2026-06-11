@@ -50,6 +50,11 @@ required-features = ["splits"]
 name = "splitset_demo_data"
 required-features = ["splits"]
 
+# Slices the monolith .rrf into full per-split facet sidecars; needs `splits`.
+[[example]]
+name = "derive_split_facets"
+required-features = ["splits"]
+
 # Native parallel, bounded-RAM term split-set builder over an RRSR record store
 # (records are zstd-compressed, so the reader needs the `zstd` decode path too).
 [[example]]
