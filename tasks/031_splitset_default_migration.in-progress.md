@@ -66,10 +66,22 @@ for deleting the trigram monolith.
       case). Quickwit targets ~10M docs/split — flat 2M was over-partitioned.
       **Builder support SHIPPED v0.12.0** (`byte_cap_max` in Rust + Go +
       Python, `cap_for`/`capFor` pinned by the shared geometric golden;
-      examples take `cap_max_mb`). Term-set rebuild (512 MiB base / 8 GiB
-      max → `/tmp/oa-out/splitset-term-geo`) is CHAINED to start when the
-      .rrb impacts build exits (`/tmp/oa-out/rebuild_term_geo.{sh,log}`);
-      trigram rebuild + upload/cutover after that.
+      examples take `cap_max_mb`).
+      **TERM GEO SET BUILT 2026-06-11** — but NOT via the greedy builder: at
+      multi-GiB caps its open-split map crawled (~1.9K docs/s, 71 h ETA;
+      killed). `slice_term_monolith` instead slices the existing mono `.rrt`
+      by doc range in ONE sequential pass (selftest: byte-identical to the
+      builder given the same ranges) — **12 splits / 53 GB in 32 min**
+      (2M docs doubling to 64M; 240 MB → ~10 GB). Verified: "roaring
+      bitmaps" = same hits as mono through 12 splits in 3.2 s local (was
+      243 splits / 76 s live); "machine learning" 29 ms. Upload to
+      `s3://openalex-eve/openalex-term-geo/` (NEW prefix — immutable names
+      never overwritten) chained behind the .rrb upload.
+      REMAINING: trigram sibling (`slice_trigram_monolith` over the local
+      105 GB .rrs → ~18 splits, same streaming pattern over the v3
+      sorted-u64 dict), demo cutover to the geo prefixes, global Bloom +
+      facet sidecars (derive_split_facets works off the new manifest),
+      lite manifest regen.
 - [ ] Split cursor/count contract: `RrssIndex` exposes ranked lists only — no
       paging cursor, no `countEstimate`, no `facetCounts`. The demo's count line
       and facet checkboxes silently degrade in split mode.
