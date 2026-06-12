@@ -174,10 +174,11 @@ pub fn parse_dict_block(block: &[u8]) -> impl Iterator<Item = (Vec<u8>, u64)> + 
 }
 
 /// A term's head posting plus the location of its (lazily fetched) tail.
-struct HeadBlock {
-    head: RoaringBitmap,
-    tail_off: u64,
-    tail_size: usize,
+/// Crate-visible so the BM25 path can rerank head candidates without tails.
+pub(crate) struct HeadBlock {
+    pub(crate) head: RoaringBitmap,
+    pub(crate) tail_off: u64,
+    pub(crate) tail_size: usize,
 }
 
 /// A range-fetchable `RRTI` term index. Boot holds only the small **router FST**
@@ -417,6 +418,29 @@ impl<F: RangeFetch> TermIndex<F> {
         &self,
         query: &str,
     ) -> Result<Option<Vec<(u64, RoaringBitmap)>>, IndexError> {
+        let heads = match self.query_head_postings(query).await? {
+            Some(h) => h,
+            None => return Ok(None),
+        };
+        let tails = join_all(heads.iter().map(|(_, b)| self.tail(b.tail_off, b.tail_size))).await;
+        let mut out = Vec::with_capacity(heads.len());
+        for ((off, block), tail) in heads.into_iter().zip(tails) {
+            let mut full = block.head;
+            full |= &tail?;
+            out.push((off, full));
+        }
+        Ok(Some(out))
+    }
+
+    /// The head-wave half of [`query_postings`]: each query term's head posting
+    /// (docs below the head boundary) plus its tail location, fetched in one
+    /// concurrent wave — the same bytes [`search`]'s first wave moves. Head docs
+    /// are a PREFIX of full posting order, so a head bitmap's `rank()` addresses
+    /// the `.rrb` impact bytes for head candidates without touching any tail.
+    pub(crate) async fn query_head_postings(
+        &self,
+        query: &str,
+    ) -> Result<Option<Vec<(u64, HeadBlock)>>, IndexError> {
         let mut terms = self.tokenizer.tokenize(query);
         terms.sort();
         terms.dedup();
@@ -428,18 +452,22 @@ impl<F: RangeFetch> TermIndex<F> {
             None => return Ok(None),
         };
         let heads = join_all(locs.iter().map(|&(off, size)| self.head_block(off, size))).await;
-        let mut blocks = Vec::with_capacity(locs.len());
-        for h in heads {
-            blocks.push(h?);
-        }
-        let tails = join_all(blocks.iter().map(|b| self.tail(b.tail_off, b.tail_size))).await;
         let mut out = Vec::with_capacity(locs.len());
-        for ((block, tail), &(off, _)) in blocks.into_iter().zip(tails).zip(&locs) {
-            let mut full = block.head;
-            full |= &tail?;
-            out.push((off, full));
+        for (h, &(off, _)) in heads.into_iter().zip(&locs) {
+            out.push((off, h?));
         }
         Ok(Some(out))
+    }
+
+    /// Fetches one tail posting by location — the lazy second wave companion to
+    /// [`query_head_postings`] (crate-internal: the BM25 path upgrades to full
+    /// postings only when the head intersection can't fill the candidate window).
+    pub(crate) async fn fetch_tail(
+        &self,
+        tail_off: u64,
+        tail_size: usize,
+    ) -> Result<RoaringBitmap, IndexError> {
+        self.tail(tail_off, tail_size).await
     }
 
     /// Streams the whole dictionary: every `(term, head_off)` in sorted term order

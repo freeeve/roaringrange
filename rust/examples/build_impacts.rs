@@ -408,7 +408,7 @@ fn merge(
             term_i += 1;
             if term_i % 10_000_000 == 0 {
                 log(format!(
-                    "merged {term_i}M-term checkpoint: {term_i} terms, {impacts_len} impact bytes"
+                    "merge checkpoint: {term_i} terms, {impacts_len} impact bytes"
                 ));
             }
         }

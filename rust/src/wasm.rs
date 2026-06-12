@@ -1617,6 +1617,84 @@ impl RrtIndex {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
+
+    /// BM25 search via the `.rrb` impact sidecar: intersect the query terms'
+    /// postings, take the first `m` candidates in static-rank order (the
+    /// candidate window bounding the rerank cost), and return the top `k` doc IDs
+    /// by BM25 score (ties keep static rank). Resolves to a `Uint32Array`.
+    #[wasm_bindgen(js_name = searchBm25)]
+    pub async fn search_bm25(
+        &self,
+        impacts: &RrbIndex,
+        query: &str,
+        m: usize,
+        k: usize,
+    ) -> Result<Vec<u32>, JsError> {
+        let scored = crate::bm25::search_bm25(&self.inner, &impacts.inner, query, m, k)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(scored.into_iter().map(|s| s.doc_id).collect())
+    }
+
+    /// Reranks caller-supplied candidate doc IDs (ANY mode's results — the shared
+    /// doc-ID space makes one sidecar serve trigram/term/hybrid) by BM25 against
+    /// this index's resolution of `query`. Query terms missing from the dictionary
+    /// contribute no score; if NO term resolves the candidates come back unchanged
+    /// (truncated to `k`) — a typo'd query degrades to static rank, never errors.
+    /// Resolves to a `Uint32Array`.
+    #[wasm_bindgen(js_name = rerankIds)]
+    pub async fn rerank_ids(
+        &self,
+        impacts: &RrbIndex,
+        query: &str,
+        ids: Vec<u32>,
+        k: usize,
+    ) -> Result<Vec<u32>, JsError> {
+        let postings = match self
+            .inner
+            .query_postings(query)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?
+        {
+            Some(p) => p,
+            None => return Ok(ids.into_iter().take(k).collect()),
+        };
+        let scored = impacts
+            .inner
+            .rerank(&postings, &ids, k)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(scored.into_iter().map(|s| s.doc_id).collect())
+    }
+}
+
+/// The `RRSB` BM25 impact sidecar (`.rrb`): one quantized impact byte per
+/// (word, doc), addressed through the posting bitmaps the term search already
+/// fetched. Boot is the 64 B header plus the resident sparse entry index
+/// (~8 B per 512 terms — ~3 MB for the 187M-term OpenAlex corpus).
+#[cfg(feature = "terms")]
+#[wasm_bindgen]
+pub struct RrbIndex {
+    inner: crate::bm25::ImpactIndex<WasmFetch>,
+}
+
+#[cfg(feature = "terms")]
+#[wasm_bindgen]
+impl RrbIndex {
+    /// Boots the sidecar at `url` (header + resident sparse index). Returns a
+    /// `Promise<RrbIndex>`.
+    pub async fn open(url: String) -> Result<RrbIndex, JsError> {
+        let inner = crate::bm25::ImpactIndex::open(WasmFetch::new(url))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RrbIndex { inner })
+    }
+
+    /// Total documents in the corpus the sidecar was built over (BM25's N).
+    #[wasm_bindgen(js_name = docCount)]
+    pub fn doc_count(&self) -> f64 {
+        self.inner.doc_count() as f64
+    }
 }
 
 /// A [`SplitFetcher`] for the browser: resolves each split's `data_file` name (and the

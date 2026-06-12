@@ -285,6 +285,15 @@ impl<F: RangeFetch> ImpactIndex<F> {
 /// outside the static-rank top-`m` is invisible to the reranker (hybrid's vector
 /// arm is the usual recovery). The two indexes may live behind different fetchers
 /// (two files of one composition).
+///
+/// **Head-first**: wave 1 fetches only the head postings — the same bytes a plain
+/// [`TermIndex::search`] moves — and when the head intersection alone fills `m`
+/// (or `k`, when no tail exists) the rerank runs on head bitmaps directly: head
+/// docs are a PREFIX of full posting order, so a head bitmap's `rank()` addresses
+/// the impact bytes identically, and df for idf comes from the sidecar's stored
+/// cardinality either way. Tails are fetched only when the head can't fill the
+/// window (rare queries — where tails are small), so a common-word query pays
+/// KBs over the plain search, not its multi-MB full postings.
 pub async fn search_bm25<F: RangeFetch, G: RangeFetch>(
     terms: &TermIndex<F>,
     impacts: &ImpactIndex<G>,
@@ -292,10 +301,43 @@ pub async fn search_bm25<F: RangeFetch, G: RangeFetch>(
     m: usize,
     k: usize,
 ) -> Result<Vec<ScoredDoc>, IndexError> {
-    let postings = match terms.query_postings(query).await? {
-        Some(p) => p,
+    let heads = match terms.query_head_postings(query).await? {
+        Some(h) => h,
         None => return Ok(Vec::new()),
     };
+
+    let mut acc = heads
+        .iter()
+        .map(|(_, b)| &b.head)
+        .min_by_key(|b| b.len())
+        .cloned()
+        .unwrap_or_default();
+    for (_, b) in &heads {
+        acc &= &b.head;
+        if acc.is_empty() {
+            break;
+        }
+    }
+    let has_tail = heads.iter().any(|(_, b)| b.tail_size > 0);
+    if acc.len() as usize >= m || !has_tail {
+        let candidates: Vec<u32> = acc.iter().take(m).collect();
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let postings: Vec<(u64, RoaringBitmap)> =
+            heads.into_iter().map(|(off, b)| (off, b.head)).collect();
+        return impacts.rerank(&postings, &candidates, k).await;
+    }
+
+    // Head underfilled and tails exist: upgrade to full postings (the same lazy
+    // second wave the plain search takes).
+    let mut postings = Vec::with_capacity(heads.len());
+    for (off, b) in heads {
+        let tail = terms.fetch_tail(b.tail_off, b.tail_size).await?;
+        let mut full = b.head;
+        full |= &tail;
+        postings.push((off, full));
+    }
     let mut sorted: Vec<&RoaringBitmap> = postings.iter().map(|(_, b)| b).collect();
     sorted.sort_by_key(|b| b.len());
     let mut acc = sorted[0].clone();

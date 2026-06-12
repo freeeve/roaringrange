@@ -717,6 +717,15 @@
           <span class="srvnote">swaps the monolithic <code>RRS</code> for the <code>RRSS</code> split set — many byte-capped immutable splits, queried with tier/Bloom/facet pruning, booted from one <code>.rrhc</code> bundle</span>
         </div>
 
+        <div class="srvtoggle" id="bm25mode-wrap" hidden>
+          <label class="switch">
+            <input type="checkbox" id="bm25mode" />
+            <span class="track"></span>
+            <span>BM25 relevance</span>
+          </label>
+          <span class="srvnote">reranks the most-cited matches by <b>lexical relevance</b> via the <code>.rrb</code> impact sidecar — one precomputed tf/length byte per (word, doc), addressed through the posting bitmaps the search already fetched, scored <code>Σ idf × impact</code>. Without it, order is citation rank alone.</span>
+        </div>
+
         <button class="perftoggle" id="perftoggle" type="button" aria-expanded="false" aria-controls="perfbar">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span class="perftoggle-label">Show performance &amp; request details</span>
@@ -773,7 +782,7 @@
     </main>
 
     <script type="module">
-      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex, RrssIndex, RrhcBundle, rangeCacheStats, reciprocalRankFusion } from "./roaringrange.js";
+      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex, RrbIndex, RrssIndex, RrhcBundle, rangeCacheStats, reciprocalRankFusion } from "./roaringrange.js";
 
       /* -------- byte/request accounting via fetch interception (from webtest) -------- */
       const realFetch = self.fetch.bind(self);
@@ -805,7 +814,7 @@
       // `.rrhc` boot bundle. Because it shares the monolith's rank-ordered doc-ID space (doc id ==
       // citation rank), it reuses the monolith `records-full` store. Enables the "Split-set index" toggle.
       const DATASETS = {
-        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrviGemma: null,
+        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrb: "openalex-484m-stem.rrb", rrviGemma: null,
                   // split: re-enabled on the v3 wasm cutover — manifest stripped to ~29 KB (Bloom summaries
                   // dropped), split bodies are RRSI v3 (readable by the v3 wasm), records shared with the
                   // monolith's rank-ordered doc-ID space (records-full). The empty .rrhc makes openBundle
@@ -825,7 +834,7 @@
         // so a tier-prefix manifest IS the top slice of the corpus: per-query bytes drop ~10x
         // (the economics page's "1/10th scale" column, live). Boots straight into split mode;
         // term/semantic stay full-corpus (their indexes aren't tiered).
-        "lite": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrviGemma: null,
+        "lite": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrb: "openalex-484m-stem.rrb", rrviGemma: null,
                   forceSplit: true,
                   split: { rrss: "openalex-trigram-split/openalex-lite.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full", bloom: "openalex-global.bloom" },
                   termSplit: { rrss: "openalex-split/openalex-484m-terms.rrss", base: "openalex-split" } },
@@ -841,6 +850,7 @@
       const RRVI_URL = DATASETS[DS].rrvi ? new URL(DATASETS[DS].rrvi, location.href).href : null;
       const RRM2_URL = DATASETS[DS].rrm2 ? new URL(DATASETS[DS].rrm2, location.href).href : null;
       const RRT_URL = DATASETS[DS].rrt ? new URL(DATASETS[DS].rrt, location.href).href : null;
+      const RRB_URL = DATASETS[DS].rrb ? new URL(DATASETS[DS].rrb, location.href).href : null;
       const RRVI_GEMMA_URL = DATASETS[DS].rrviGemma ? new URL(DATASETS[DS].rrviGemma, location.href).href : null;
       // Split-set artifacts (null unless the dataset declares a `split`): the manifest, the
       // per-split base URL, the `.rrhc` boot bundle, and the split set's own record store.
@@ -911,6 +921,9 @@
       let rrss = null;              // RrssIndex — the split-set reader (non-null == available; shows the toggle)
       let splitRecords = null;      // the split set's RRSR record store (shared with the monolith when SPLIT.rec matches)
       let rrssTerm = null;          // the term-bodied split set reader (lazy-booted on first term+split search)
+      let rrb = null;               // RrbIndex — the .rrb BM25 impact sidecar (lazy-booted on first rerank)
+      let bm25Mode = false;         // the "BM25 relevance" toggle — defaults ON for the word modes when an .rrb is configured
+      let bm25Off = false;          // user opted OUT (toggle or ?bm25=0)
       let splitMode = false;        // the "Split-set index" toggle: swap the trigram backend to RrssIndex
       // The user's explicit split choice (toggle / ?split=): null = use the mode's
       // default. Trigram defaults ON (when server mode is off) — tier pruning caps
@@ -926,6 +939,11 @@
       // clusters are already range-fetched, so returning a deeper top-K is essentially
       // free (a larger heap over the same ADC scores — no extra network).
       const SEM_K_FILTER = 600;  // over-fetch depth when facets filter vector results (the extra depth is free — same nprobe clusters)
+      // BM25 candidate window: the rerank scores the first M intersection hits in
+      // citation-rank order; a relevant doc outside the window is invisible to it
+      // (hybrid's vector arm is the recovery). Head-first in the reader: common
+      // queries pay only the impact bytes for these M candidates.
+      const BM25_M = 2000;
 
       const $ = (id) => document.getElementById(id);
       const dec = new TextDecoder();
@@ -955,13 +973,14 @@
         servermode: $("servermode"),
         lambdasem: $("lambdasem"), lambdasemWrap: $("lambdasem-wrap"),
         splitmode: $("splitmode"), splitmodeWrap: $("splitmode-wrap"),
+        bm25mode: $("bm25mode"), bm25modeWrap: $("bm25mode-wrap"),
         perflive: $("perflive"), perfliveText: $("perflive-text"),
         perftoggleLive: $("perftoggle-live"),
       };
 
       // Static file → URL, keyed for the per-mode size readout. A dataset may not
       // ship every file (e.g. no vector/term index), in which case its URL is null.
-      const FILE_URLS = { rrs: RRS_URL, rrf: RRF_URL, idx: IDX_URL, bin: BIN_URL, rril: LOOKUP_URL, dict: DICT_URL, rrvi: RRVI_URL, rrm2: RRM2_URL, rrt: RRT_URL, rrss: SPLIT_RRSS_URL, trrss: TERM_SPLIT_RRSS_URL };
+      const FILE_URLS = { rrs: RRS_URL, rrf: RRF_URL, idx: IDX_URL, bin: BIN_URL, rril: LOOKUP_URL, dict: DICT_URL, rrvi: RRVI_URL, rrm2: RRM2_URL, rrt: RRT_URL, rrb: RRB_URL, rrss: SPLIT_RRSS_URL, trrss: TERM_SPLIT_RRSS_URL };
       const fileSizes = {};   // file key → byte length (0 = unknown / not reachable)
 
       /* True object size via a 1-byte ranged GET's Content-Range ("bytes 0-0/<total>").
@@ -1015,6 +1034,9 @@
           add(`${rrssTerm.splitCount()} splits · ${fmtCount(Number(rrssTerm.docCount()))} docs`, Number(rrssTerm.totalBytes()));
         } else if (mode === "term" || mode === "hybrid-term") {
           add(".rrt", fileSizes.rrt);
+        }
+        if ((mode === "term" || mode === "hybrid-term") && bm25Mode && RRB_URL) {
+          add(".rrb impacts", fileSizes.rrb);
         }
         if (mode.startsWith("hybrid") || mode === "semantic") { add(".rrvi", fileSizes.rrvi); add(".rrm2", fileSizes.rrm2); }
         const records = (fileSizes.idx || 0) + (fileSizes.bin || 0);
@@ -1105,6 +1127,7 @@
         // (trigram: on; term: off), so URLs stay clean in the default state.
         if (mode === "trigram" && !serverMode && splitPref === false) params.set("split", "0");
         if (mode === "term" && splitPref === true) params.set("split", "1");
+        if ((mode === "term" || mode === "hybrid-term") && RRB_URL && bm25Off) params.set("bm25", "0");
         const mm = currentFuzz();
         if (mm) params.set("fuzz", String(mm));
         for (const key of activeFilters) params.append("f", key);
@@ -1146,6 +1169,14 @@
             : splitPref === true;
           els.splitmode.checked = splitMode;
         }
+        // BM25 relevance applies to the word modes (term + hybrid-term — the
+        // sidecar is keyed by the .rrt's postings) and defaults ON there: a
+        // couple of KB-scale extra waves buy relevance ordering instead of
+        // citation rank alone. ?bm25=0 / the toggle opt out.
+        const bm25Capable = (mode === "term" || mode === "hybrid-term") && !!RRB_URL;
+        els.bm25modeWrap.hidden = !bm25Capable;
+        bm25Mode = bm25Capable && !bm25Off;
+        els.bm25mode.checked = bm25Mode;
         // The Gemma embed toggle only applies to the vector modes: show it there
         // (when configured), never under trigram/term.
         els.lambdasemWrap.hidden =
@@ -1178,6 +1209,8 @@
           if (params.get("srv") === "1") serverOff = false;
           if (params.get("split") === "0") splitPref = false;
           if (params.get("split") === "1") splitPref = true;
+          if (params.get("bm25") === "0") bm25Off = true;
+          if (params.get("bm25") === "1") bm25Off = false;
           syncModeUi(effective);
           const mm = Number.parseInt(params.get("fuzz") || "0", 10) || 0;
           const radio = document.querySelector(`input[name="fuzz"][value="${mm === 1 ? 1 : 0}"]`);
@@ -1954,6 +1987,20 @@
         } catch (e) { els.mSummary.textContent = `term index load failed: ${e}`; return false; }
       }
 
+      /* Lazily open the .rrb BM25 impact sidecar (header + resident sparse index,
+         ~3 MB for 187M terms) on first reranked search. A failed open clears
+         bm25Mode gracefully — the search runs in static rank order instead. */
+      async function ensureRrb() {
+        if (rrb) return true;
+        if (!RRB_URL) return false;
+        try {
+          els.mSummary.textContent = "loading BM25 impacts…";
+          rrb = await RrbIndex.open(RRB_URL);
+          renderActiveFiles();
+          return true;
+        } catch (_) { rrb = null; return false; }
+      }
+
       /* Lazily open the term-bodied split set (its ~21 KB manifest, one open) on
          first term+split search. Mirrors ensureTermIndex; the monolith term index
          stays the fallback if the manifest fails to open. */
@@ -2107,16 +2154,28 @@
           const ok = useSplit || await ensureTermIndex();
           if (mySeq !== searchSeq) return;
           if (!ok) { els.mSummary.textContent = "term search unavailable for this dataset"; return; }
+          // BM25 needs the monolith .rrt (its postings address the impact bytes)
+          // even when the candidates come from the split set.
+          const useBm25 = bm25Mode && (await ensureRrb()) && (await ensureTermIndex());
+          if (mySeq !== searchSeq) return;
           // The ensure* helpers leave their "loading …" text behind; the live
           // in-flight row tracks activity from here.
           els.mSummary.textContent = useSplit ? "searching the term split set…" : "searching…";
           const filters = Array.from(activeFilters);
+          const depth = filters.length ? SEM_K_FILTER : SEM_K;
           const t0 = performance.now(), r0 = reqs, b0 = bytes;
           let ids;
           try {
-            ids = Array.from(useSplit
-              ? await rrssTerm.search(q, filters.length ? SEM_K_FILTER : SEM_K)
-              : await rterm.search(q, filters.length ? SEM_K_FILTER : SEM_K));
+            if (useSplit) {
+              ids = Array.from(await rrssTerm.search(q, depth));
+              // Rerank the split set's candidates with the shared sidecar (same
+              // doc-ID space); a query the .rrt can't resolve returns them as-is.
+              if (useBm25 && ids.length) ids = Array.from(await rterm.rerankIds(rrb, q, Uint32Array.from(ids), depth));
+            } else if (useBm25) {
+              ids = Array.from(await rterm.searchBm25(rrb, q, BM25_M, depth));
+            } else {
+              ids = Array.from(await rterm.search(q, depth));
+            }
           }
           catch (e) { els.mSummary.textContent = `term error: ${e}`; return; }
           if (mySeq !== searchSeq) return;
@@ -2125,7 +2184,7 @@
           if (mySeq !== searchSeq) return;
           cur = null;
           rankedIds = ff.ids;
-          rankedSummary = `term${useSplit ? ` split set · ${rrssTerm.splitCount()} splits` : ""}${filters.length ? " + facets" : ""} · ${ff.ids.length} match${ff.ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`;
+          rankedSummary = `term${useSplit ? ` split set · ${rrssTerm.splitCount()} splits` : ""}${useBm25 ? " · bm25" : ""}${filters.length ? " + facets" : ""} · ${ff.ids.length} match${ff.ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`;
           setPerf({
             search: { ms: searchMs, reqs: searchReqs, bytes: searchBytes },
             facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
@@ -2177,6 +2236,10 @@
           const termArm = searchMode === "hybrid-term";
           const textReady = termArm ? await ensureTermIndex() : !!idx;
           if (mySeq !== searchSeq) return;
+          // BM25-ranked term arm (the Weaviate-style hybrid: lexical relevance +
+          // vector similarity, fused by reciprocal rank).
+          const hybridBm25 = termArm && bm25Mode && textReady && (await ensureRrb());
+          if (mySeq !== searchSeq) return;
           const t0 = performance.now();
           let sem = null, text = [];
           if (ok) { try { sem = await semanticIds(q, depth); } catch (_) {} }
@@ -2184,7 +2247,9 @@
           if (textReady) {
             const tr0 = reqs, tb0 = bytes, tt0 = performance.now();
             try {
-              text = Array.from(termArm ? await rterm.search(q, depth) : await idx.search(q, depth));
+              text = Array.from(termArm
+                ? (hybridBm25 ? await rterm.searchBm25(rrb, q, BM25_M, depth) : await rterm.search(q, depth))
+                : await idx.search(q, depth));
             } catch (_) {}
             txMs = performance.now() - tt0; txReqs = reqs - tr0; txBytes = bytes - tb0;
           }
@@ -2197,7 +2262,7 @@
           if (mySeq !== searchSeq) return;
           cur = null;
           rankedIds = ff.ids;
-          rankedSummary = `hybrid ${termArm ? "term" : "trigram"}+semantic (RRF)${filters.length ? " + facets" : ""} · ${ff.ids.length} result${ff.ids.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`;
+          rankedSummary = `hybrid ${termArm ? (hybridBm25 ? "bm25" : "term") : "trigram"}+semantic (RRF)${filters.length ? " + facets" : ""} · ${ff.ids.length} result${ff.ids.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`;
           // Both arms shown side by side: embed + vector fetch (semantic) and the
           // text arm (the existing "ID fetch" row); facets filter the fusion.
           setPerf({
@@ -2569,6 +2634,15 @@
         if (splitMode && serverMode) { serverMode = false; els.servermode.checked = false; }
         renderActiveFiles();
         syncUrl();   // land split=1 immediately — a refresh mid-search must not lose it
+        runSearch(true);
+      });
+      // BM25 relevance rerank (term + hybrid-term): default ON when the .rrb is
+      // configured; the opt-out persists across mode switches and lands in the URL.
+      els.bm25mode.addEventListener("change", () => {
+        bm25Mode = els.bm25mode.checked;
+        bm25Off = !bm25Mode;
+        renderActiveFiles();
+        syncUrl();
         runSearch(true);
       });
       // Mode-1 opt-in: embed queries with the EmbeddingGemma Lambda against the Gemma
