@@ -166,11 +166,13 @@ impl Tokenizer {
 }
 
 /// Walks one front-coded dictionary block (fetched via the ranges
-/// [`TermIndex::dict_block_locs`] reports), yielding each `(term, head_off)` in
-/// term order. Build-tooling surface for streaming the full vocabulary without
-/// materializing it (see [`TermIndex::dict_terms`]).
-pub fn parse_dict_block(block: &[u8]) -> impl Iterator<Item = (Vec<u8>, u64)> + '_ {
-    iter_block(block).map(|(term, head_off, _)| (term, head_off))
+/// [`TermIndex::dict_block_locs`] reports), yielding each
+/// `(term, head_off, head_size)` in term order. Build-tooling surface for
+/// streaming the full vocabulary without materializing it (see
+/// [`TermIndex::dict_terms`]); `head_size` lets a sequential consumer pace a
+/// lockstep read of the postings region.
+pub fn parse_dict_block(block: &[u8]) -> impl Iterator<Item = (Vec<u8>, u64, usize)> + '_ {
+    iter_block(block)
 }
 
 /// A term's head posting plus the location of its (lazily fetched) tail.
@@ -422,7 +424,12 @@ impl<F: RangeFetch> TermIndex<F> {
             Some(h) => h,
             None => return Ok(None),
         };
-        let tails = join_all(heads.iter().map(|(_, b)| self.tail(b.tail_off, b.tail_size))).await;
+        let tails = join_all(
+            heads
+                .iter()
+                .map(|(_, b)| self.tail(b.tail_off, b.tail_size)),
+        )
+        .await;
         let mut out = Vec::with_capacity(heads.len());
         for ((off, block), tail) in heads.into_iter().zip(tails) {
             let mut full = block.head;
@@ -479,7 +486,7 @@ impl<F: RangeFetch> TermIndex<F> {
         let mut out = Vec::with_capacity(self.term_count as usize);
         for (off, len) in self.dict_block_locs() {
             let block = self.fetch.read(off, len).await?;
-            for (term, head_off) in parse_dict_block(&block) {
+            for (term, head_off, _) in parse_dict_block(&block) {
                 let term = String::from_utf8(term)
                     .map_err(|_| IndexError::Malformed("non-UTF-8 dictionary term"))?;
                 out.push((term, head_off));

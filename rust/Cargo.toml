@@ -240,3 +240,8 @@ hotcache = []
 # builder is native-only (excluded from wasm32 via a cfg in lib.rs). Off by default;
 # enable with `--features splits`.
 splits = []
+
+# Slices a monolithic .rrt into a geometric term split set by doc range.
+[[example]]
+name = "slice_term_monolith"
+required-features = ["terms", "splits"]

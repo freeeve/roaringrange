@@ -150,28 +150,80 @@ impl TermIndexBuilder {
 /// dict block byte cap (`0` selects [`DEFAULT_DICT_BLOCK_CAP`]). Shared by
 /// [`TermIndexBuilder::finish`] and the split-set term builder.
 pub(crate) fn write_term_index_from_postings<W: Write>(
-    mut w: W,
+    w: W,
     postings: BTreeMap<String, RoaringBitmap>,
     head_boundary: u32,
     language: Option<Language>,
     stopwords: bool,
     block_cap: usize,
 ) -> io::Result<()> {
-    let term_count = postings.len() as u32;
-
-    // Lay out the (unchanged) postings region and front-code the dictionary into
-    // blocks in one sorted, draining pass. Each posting block is
-    // `[tail_size: u32 LE][head bytes][tail bytes]`; the dict records each term's
-    // `(head_off within the postings region, head_size)`.
     let mut region: Vec<u8> = Vec::new();
-    let mut blocks = BlockWriter::new(block_cap);
+    let mut sw =
+        TermIndexStreamWriter::new(&mut region, head_boundary, language, stopwords, block_cap);
     for (term, bm) in postings {
         let (head, tail) = split_posting(&bm, head_boundary);
-        let head_off = region.len() as u64;
-        let head_size = head.len();
-        if head_size >= (1usize << SIZE_BITS) {
+        sw.push(&term, &head, &tail)?;
+    }
+    let (header, router_bytes, blocks) = sw.finish_meta()?;
+    let mut w = w;
+    w.write_all(&header)?;
+    w.write_all(&router_bytes)?;
+    for b in &blocks {
+        w.write_all(b)?;
+    }
+    w.write_all(&region)?;
+    Ok(())
+}
+
+/// Streaming `RRTI` writer: terms arrive in sorted byte order with their already
+/// split-and-serialized head/tail postings; the postings region streams to the
+/// caller's sink (typically a temp file — the multi-GB half of a big index), while
+/// the dictionary blocks accumulate in memory (term-proportional, small).
+/// [`finish_into`](Self::finish_into) then assembles
+/// `[header][router FST][dict blocks][region]`. The batch
+/// `write_term_index_from_postings` is a thin wrapper, so the two cannot drift.
+pub struct TermIndexStreamWriter<W: Write> {
+    region: W,
+    region_len: u64,
+    blocks: BlockWriter,
+    term_count: u64,
+    head_boundary: u32,
+    language: Option<Language>,
+    stopwords: bool,
+    block_cap: usize,
+}
+
+impl<W: Write> TermIndexStreamWriter<W> {
+    /// Creates a writer streaming the postings region to `region_sink`.
+    /// `block_cap` of `0` selects the default dictionary block cap.
+    pub fn new(
+        region_sink: W,
+        head_boundary: u32,
+        language: Option<Language>,
+        stopwords: bool,
+        block_cap: usize,
+    ) -> Self {
+        TermIndexStreamWriter {
+            region: region_sink,
+            region_len: 0,
+            blocks: BlockWriter::new(block_cap),
+            term_count: 0,
+            head_boundary,
+            language,
+            stopwords,
+            block_cap,
+        }
+    }
+
+    /// Appends one term's posting block (`[tail_size u32 LE][head][tail]`,
+    /// the halves from [`split_posting`]). Terms MUST arrive in ascending byte
+    /// order — the dictionary's required order.
+    pub fn push(&mut self, term: &str, head: &[u8], tail: &[u8]) -> io::Result<()> {
+        let head_off = self.region_len;
+        if head.len() >= (1usize << SIZE_BITS) {
             return Err(io::Error::other(format!(
-                "term {term:?}: head posting {head_size} B exceeds the 24-bit size limit"
+                "term {term:?}: head posting {} B exceeds the 24-bit size limit",
+                head.len()
             )));
         }
         if head_off >= (1u64 << (64 - SIZE_BITS)) {
@@ -179,64 +231,104 @@ pub(crate) fn write_term_index_from_postings<W: Write>(
                 "postings region exceeds the 40-bit offset limit",
             ));
         }
-        region.extend_from_slice(&(tail.len() as u32).to_le_bytes());
-        region.extend_from_slice(&head);
-        region.extend_from_slice(&tail);
-        blocks.push(term.as_bytes(), head_off, head_size as u64);
+        self.region.write_all(&(tail.len() as u32).to_le_bytes())?;
+        self.region.write_all(head)?;
+        self.region.write_all(tail)?;
+        self.region_len += 4 + head.len() as u64 + tail.len() as u64;
+        self.blocks
+            .push(term.as_bytes(), head_off, head.len() as u64);
+        self.term_count += 1;
+        Ok(())
     }
-    let blocks = blocks.finish();
 
-    // Router FST: each block's last term -> `(block_off << 24) | block_len`, where
-    // `block_off` is relative to the dict region. Keys are already sorted (blocks
-    // are in term order) and distinct, as `MapBuilder` requires.
-    let mut router = MapBuilder::memory();
-    let mut dict_len: u64 = 0;
-    for b in &blocks {
-        let block_len = b.bytes.len() as u64;
-        if block_len >= (1u64 << SIZE_BITS) {
-            return Err(io::Error::other(
-                "dict block exceeds the 24-bit block-length limit",
-            ));
-        }
-        if b.off >= (1u64 << (64 - SIZE_BITS)) {
-            return Err(io::Error::other(
-                "dict region exceeds the 40-bit block-offset limit",
-            ));
-        }
-        router
-            .insert(&b.last_term, pack_loc(b.off, block_len))
-            .map_err(|e| io::Error::other(format!("router fst insert: {e}")))?;
-        dict_len += block_len;
+    /// Number of terms pushed so far.
+    pub fn term_count(&self) -> u64 {
+        self.term_count
     }
-    let router_bytes = router
-        .into_inner()
-        .map_err(|e| io::Error::other(format!("router fst finish: {e}")))?;
 
-    // Header (40 B): `flags` records the tokenizer (stemmed / stop-words); the
-    // first reserved byte (offset 36) carries the stemmer language so the reader
-    // rebuilds it. `routerLen`/`dictLen` locate the dict region and postings.
-    let flags = (if language.is_some() { FLAG_STEMMED } else { 0 })
-        | (if stopwords { FLAG_STOPWORDS } else { 0 });
-    let block_cap_used = if block_cap == 0 {
-        DEFAULT_DICT_BLOCK_CAP
-    } else {
-        block_cap
-    } as u32;
-    let mut reserved = [0u8; 4];
-    reserved[0] = language.map_or(0, |l| l.to_u8());
-    w.write_all(MAGIC)?;
-    w.write_all(&VERSION.to_le_bytes())?;
-    w.write_all(&flags.to_le_bytes())?;
-    w.write_all(&term_count.to_le_bytes())?;
-    w.write_all(&head_boundary.to_le_bytes())?;
-    w.write_all(&(router_bytes.len() as u64).to_le_bytes())?;
-    w.write_all(&dict_len.to_le_bytes())?;
-    w.write_all(&block_cap_used.to_le_bytes())?;
-    w.write_all(&reserved)?; // reserved[0] (offset 36) = stemmer language; pads to 40 B
-    w.write_all(&router_bytes)?;
-    for b in &blocks {
-        w.write_all(&b.bytes)?;
+    /// Bytes streamed into the postings region so far.
+    pub fn region_len(&self) -> u64 {
+        self.region_len
     }
-    w.write_all(&region)?;
-    Ok(())
+
+    /// Finishes the dictionary + router and writes the COMPLETE index to `w`:
+    /// `[header][router][dict blocks]` followed by `region` — the caller hands
+    /// back the postings-region bytes it sank (e.g. by copying its temp file in;
+    /// pass the sink's contents here, or use this with an in-memory region).
+    pub fn finish_into<O: Write>(self, mut w: O, region: &[u8]) -> io::Result<()> {
+        debug_assert_eq!(region.len() as u64, self.region_len);
+        let (header, router_bytes, blocks) = self.finish_meta()?;
+        w.write_all(&header)?;
+        w.write_all(&router_bytes)?;
+        for b in &blocks {
+            w.write_all(b)?;
+        }
+        w.write_all(region)?;
+        Ok(())
+    }
+
+    /// Finishes the dictionary + router, returning `(header, router, dict block
+    /// bytes)` for callers that assemble the file themselves (header + router +
+    /// blocks, then their streamed region — e.g. an `io::copy` from the temp file).
+    #[allow(clippy::type_complexity)]
+    pub fn finish_meta(self) -> io::Result<(Vec<u8>, Vec<u8>, Vec<Vec<u8>>)> {
+        let blocks = self.blocks.finish();
+        let mut router = MapBuilder::memory();
+        let mut dict_len: u64 = 0;
+        for b in &blocks {
+            let block_len = b.bytes.len() as u64;
+            if block_len >= (1u64 << SIZE_BITS) {
+                return Err(io::Error::other(
+                    "dict block exceeds the 24-bit block-length limit",
+                ));
+            }
+            if b.off >= (1u64 << (64 - SIZE_BITS)) {
+                return Err(io::Error::other(
+                    "dict region exceeds the 40-bit block-offset limit",
+                ));
+            }
+            router
+                .insert(&b.last_term, pack_loc(b.off, block_len))
+                .map_err(|e| io::Error::other(format!("router fst insert: {e}")))?;
+            dict_len += block_len;
+        }
+        let router_bytes = router
+            .into_inner()
+            .map_err(|e| io::Error::other(format!("router fst finish: {e}")))?;
+
+        // Header (40 B): `flags` records the tokenizer (stemmed / stop-words); the
+        // first reserved byte (offset 36) carries the stemmer language so the reader
+        // rebuilds it. `routerLen`/`dictLen` locate the dict region and postings.
+        let flags = (if self.language.is_some() {
+            FLAG_STEMMED
+        } else {
+            0
+        }) | (if self.stopwords { FLAG_STOPWORDS } else { 0 });
+        let block_cap_used = if self.block_cap == 0 {
+            DEFAULT_DICT_BLOCK_CAP
+        } else {
+            self.block_cap
+        } as u32;
+        let term_count: u32 = self
+            .term_count
+            .try_into()
+            .map_err(|_| io::Error::other("term count exceeds the 32-bit limit"))?;
+        let mut reserved = [0u8; 4];
+        reserved[0] = self.language.map_or(0, |l| l.to_u8());
+        let mut header = Vec::with_capacity(40);
+        header.extend_from_slice(MAGIC);
+        header.extend_from_slice(&VERSION.to_le_bytes());
+        header.extend_from_slice(&flags.to_le_bytes());
+        header.extend_from_slice(&term_count.to_le_bytes());
+        header.extend_from_slice(&self.head_boundary.to_le_bytes());
+        header.extend_from_slice(&(router_bytes.len() as u64).to_le_bytes());
+        header.extend_from_slice(&dict_len.to_le_bytes());
+        header.extend_from_slice(&block_cap_used.to_le_bytes());
+        header.extend_from_slice(&reserved); // reserved[0] (offset 36) = stemmer language; pads to 40 B
+        Ok((
+            header,
+            router_bytes,
+            blocks.into_iter().map(|b| b.bytes).collect(),
+        ))
+    }
 }

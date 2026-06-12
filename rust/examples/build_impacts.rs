@@ -356,7 +356,7 @@ fn merge(
     for &(off, len) in &locs {
         let block = block_on(RangeFetch::read(&dfetch, off, len))
             .map_err(|e| io::Error::other(format!("dict block read: {e:?}")))?;
-        for (dterm, head_off) in parse_dict_block(&block) {
+        for (dterm, head_off, _) in parse_dict_block(&block) {
             let head = match heap.peek() {
                 Some(Reverse((t, _))) => t,
                 None => {
