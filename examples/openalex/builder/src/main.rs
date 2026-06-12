@@ -746,6 +746,7 @@ fn build_split_set(
         SplitBody::Trigram => SplitBuilder::Trigram(SplitSetBuilder::new(SplitBuildConfig {
             policy: Policy::Tiered,
             byte_cap: cap,
+            byte_cap_max: 0,
             gram_size: GRAM as u16,
             head_boundary: 0,
             stride: 0,
@@ -756,6 +757,7 @@ fn build_split_set(
         SplitBody::Term => SplitBuilder::Term(TermSplitSetBuilder::new(TermSplitBuildConfig {
             policy: Policy::Tiered,
             byte_cap: cap,
+            byte_cap_max: 0,
             head_boundary: 0,
             name_prefix: prefix.clone(),
             sortcol: None,
