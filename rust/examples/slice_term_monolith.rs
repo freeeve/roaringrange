@@ -152,12 +152,9 @@ fn slice(
 
     let t0 = Instant::now();
     let mut terms_done: u64 = 0;
-    for &(abs_off, len) in &block_locs {
-        debug_assert_eq!(abs_off - dict_start, {
-            let mut sum = 0u64;
-            sum // block offsets are contiguous; the sequential read is positioned by construction
-                + (abs_off - dict_start)
-        });
+    // Block offsets are contiguous in file order, so the sequential dict reader is
+    // positioned at each block by construction; only the lengths matter here.
+    for &(_abs_off, len) in &block_locs {
         let mut block = vec![0u8; len];
         dict_r.read_exact(&mut block)?;
         for (term, head_off, head_size) in parse_dict_block(&block) {
@@ -195,7 +192,7 @@ fn slice(
                 sinks[si].writer.push(&term, &h, &t)?;
             }
             terms_done += 1;
-            if terms_done % 20_000_000 == 0 {
+            if terms_done.is_multiple_of(20_000_000) {
                 eprintln!(
                     "  {terms_done}/{term_count} terms in {:.0}s",
                     t0.elapsed().as_secs_f64()
