@@ -51,10 +51,16 @@ Sizing (484M docs, title+abstract, ~80–120 unique terms/doc → ~40–60 B pai
 - [x] Core builder: `ImpactsAccumulator` (same `Tokenizer` as the `.rrt` build)
       + `write_impacts` joined against `dict_terms()` of the FINISHED index so
       head_off keys are byte-true; loud error on tokenizer mismatch.
-- [ ] Full-corpus builder example over records-full: the in-RAM accumulator
-      does not scale to 484M docs — needs chunked spill-and-merge (sorted
-      (term, doc, tf) runs per chunk, k-way merge against the dict scan).
-      Estimated artifact ~15–50 GB (~$0.35–1.15/mo S3).
+- [x] Full-corpus builder (`build_impacts`, chunked spill + dict-lockstep
+      merge) RAN 2026-06-11: 484,369,476 docs / 186,934,488 terms, all in
+      lockstep; 15.3 h (14.8 h spill at ~350–650 s per 4M-doc chunk, ~32 min
+      merge). Artifact `/tmp/oa-out/openalex-484m-stem.rrb` = **24.3 GB**
+      (~$0.56/mo S3) — ~20.4B (term, doc) pairs; the 87M-term hapax tail is
+      ~1 byte/term. **Relevance spot-check PASSED**: "roaring bitmaps" m=2000
+      rerank = all top-5 explicitly Roaring papers (the generic bitmap-
+      compression survey demoted from #2), 57 ms local incl. process spawn.
+      Needs S3 upload. (Cosmetic: the merge checkpoint log format prints
+      "NM-term" wrong — fix on next builder touch.)
 - [ ] Wasm binding (`RrbIndex` or fold into `RrtIndex.searchScored`) + a
       "relevance rerank" toggle in the demo's term mode.
 - [ ] Cross-mode rerank: score TRIGRAM-mode (and hybrid-tri) candidates with
