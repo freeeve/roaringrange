@@ -61,8 +61,15 @@ Sizing (484M docs, title+abstract, ~80–120 unique terms/doc → ~40–60 B pai
       compression survey demoted from #2), 57 ms local incl. process spawn.
       Needs S3 upload. (Cosmetic: the merge checkpoint log format prints
       "NM-term" wrong — fix on next builder touch.)
-- [ ] Wasm binding (`RrbIndex` or fold into `RrtIndex.searchScored`) + a
-      "relevance rerank" toggle in the demo's term mode.
+- [x] **LIVE 2026-06-12**: `.rrb` uploaded (24.3 GB, immutable); wasm
+      `RrbIndex` + `RrtIndex.searchBm25/rerankIds` deployed; demo "BM25
+      relevance" toggle default-ON under term + hybrid-term (`?bm25=0`
+      opt-out). Verified live: "roaring bitmaps" → `term · bm25 · 27
+      matches · 60 ms`, all top hits Roaring-specific; `bm25=0` falls back
+      to citation order. search_bm25 is HEAD-FIRST (reranks head candidates
+      from the bytes plain search already moves; tails only when the head
+      can't fill the window) so common queries pay ~KBs extra.
+      Hybrid-term's text arm feeds BM25-ranked ids into the RRF fusion.
 - [ ] Cross-mode rerank: score TRIGRAM-mode (and hybrid-tri) candidates with
       the same term `.rrb` — the shared doc-ID space makes one sidecar serve
       every mode. Glue only: trigram search yields candidate ids; resolve the
