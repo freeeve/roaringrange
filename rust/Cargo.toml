@@ -245,3 +245,8 @@ splits = []
 [[example]]
 name = "slice_term_monolith"
 required-features = ["terms", "splits"]
+
+# Slices a monolithic v3 .rrs into a geometric trigram split set by doc range.
+[[example]]
+name = "slice_trigram_monolith"
+required-features = ["splits"]
