@@ -815,18 +815,23 @@
       // citation rank), it reuses the monolith `records-full` store. Enables the "Split-set index" toggle.
       const DATASETS = {
         "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrb: "openalex-484m-stem.rrb", rrviGemma: null,
-                  // split: re-enabled on the v3 wasm cutover — manifest stripped to ~29 KB (Bloom summaries
-                  // dropped), split bodies are RRSI v3 (readable by the v3 wasm), records shared with the
-                  // monolith's rank-ordered doc-ID space (records-full). The empty .rrhc makes openBundle
-                  // fall back to a plain manifest open (29 KB, cheap).
-                  // bloom: a GLOBAL term-Bloom sidecar (range-probed, never downloaded) restoring
-                  // the absent-term prune the 29 KB summary-stripped manifest gave up: a term
-                  // missing from the whole corpus ends the tier descent in ~k one-byte reads.
-                  split: { rrss: "openalex-trigram-split/openalex.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full", bloom: "openalex-global.bloom" },
+                  // split: GEOMETRIC trigram tiers (19 splits, 498 MB top doubling to ~8 GiB, capped at
+                  // 32M docs/split) sliced from the v3 monolith — a worst-case full descent is ~19 visits
+                  // instead of the flat set's 389. Manifest is ~1.5 KB (no per-split summaries), split
+                  // bodies are RRSI v3, records shared with the monolith's rank-ordered doc-ID space
+                  // (records-full). No .rrhc: each geo split's sparse index is ~1.8 MB, so the big tiers
+                  // cold-open regardless — a plain manifest open (one cheap GET) is the whole boot.
+                  // bloom: the GLOBAL term-Bloom sidecar (range-probed, never downloaded, resolved
+                  // base-relative) restoring the absent-term prune the summary-less manifest gives up: a
+                  // term missing from the whole corpus ends the tier descent in ~k one-byte reads. It is
+                  // corpus-wide (same trigrams as the flat set), copied into this prefix unchanged.
+                  split: { rrss: "openalex-trigram-geo/openalex.rrss", base: "openalex-trigram-geo", rec: "records-full", bloom: "openalex-global.bloom" },
                   // termSplit: the term-bodied (.rrt) split set over the same corpus/ranking —
-                  // the split toggle under Term mode routes through it. Shares records-full
-                  // (same doc-ID space); no boot bundle (its manifest is ~21 KB, one open).
-                  termSplit: { rrss: "openalex-split/openalex-484m-terms.rrss", base: "openalex-split" } },
+                  // the split toggle under Term mode routes through it. GEOMETRIC tiers
+                  // (12 splits, 240 MB top doubling to ~10 GB): a worst-case full descent is
+                  // ~12 visits instead of the flat set's 243. Shares records-full (same
+                  // doc-ID space); no boot bundle (its manifest is ~1 KB, one open).
+                  termSplit: { rrss: "openalex-term-geo/openalex-484m-terms.rrss", base: "openalex-term-geo" } },
         "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
         "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
         // ?ds=lite — the SAME deployed artifacts, searched through a 3.4 KB manifest listing
@@ -857,7 +862,7 @@
       const SPLIT = DATASETS[DS].split || null;
       const SPLIT_RRSS_URL = SPLIT ? new URL(SPLIT.rrss, location.href).href : null;
       const SPLIT_BASE_URL = SPLIT ? new URL(SPLIT.base, location.href).href : null;
-      const SPLIT_RRHC_URL = SPLIT ? new URL(SPLIT.rrhc, location.href).href : null;
+      const SPLIT_RRHC_URL = SPLIT && SPLIT.rrhc ? new URL(SPLIT.rrhc, location.href).href : null;
       const SPLIT_REC_IDX_URL = SPLIT ? new URL(`${SPLIT.rec}.idx`, location.href).href : null;
       const SPLIT_REC_BIN_URL = SPLIT ? new URL(`${SPLIT.rec}.bin`, location.href).href : null;
       // Term-bodied split set (null unless the dataset declares `termSplit`).
