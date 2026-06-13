@@ -77,11 +77,34 @@ for deleting the trigram monolith.
       243 splits / 76 s live); "machine learning" 29 ms. Upload to
       `s3://openalex-eve/openalex-term-geo/` (NEW prefix — immutable names
       never overwritten) chained behind the .rrb upload.
-      REMAINING: trigram sibling (`slice_trigram_monolith` over the local
-      105 GB .rrs → ~18 splits, same streaming pattern over the v3
-      sorted-u64 dict), demo cutover to the geo prefixes, global Bloom +
-      facet sidecars (derive_split_facets works off the new manifest),
-      lite manifest regen.
+      **TRIGRAM GEO SET BUILT + VERIFIED 2026-06-13** via `slice_trigram_monolith`
+      (commit b8e84f9): one sequential read of the 113 GB v3 monolith fanned into
+      19 streaming split writers — base 2M doubling to a 32M-docs cap (half the
+      term slicer's, since trigram postings run ~2x bytes/doc), 498 MB → 11.5 GB
+      per split (the [126M,158M] mid-tier heaviest), 109 GB total, **13 min**.
+      `--selftest` asserts byte-identical to `SplitSetBuilder`; plain split search
+      returns the SAME top hits as the monolith ("machine learning"/"quantum
+      computing"/"crispr") and faceted split search filters correctly off the
+      derived sidecars. Manifest is 1.5 KB (flags=0, no per-split summaries — the
+      `.rrf` sidecars resolve filters with no `FLAG_FACET` gate; the deployed flat
+      manifest was summary-stripped anyway). `derive_split_facets` wrote 19
+      `.rrf` sidecars (year/type/oa/language; topic excluded). NO `.rrhc`: each geo
+      split's sparse index is ~1.8 MB so the big tiers cold-open regardless, and a
+      plain manifest open is one cheap GET (demo `SPLIT_RRHC_URL` now guards on
+      `SPLIT.rrhc` so an absent bundle is null, not a 404). Local dir
+      `/tmp/oa-out/splitset-trigram-geo`.
+      **DONE + LIVE 2026-06-13**: 109 GB uploaded to `s3://openalex-eve/openalex-trigram-geo/`
+      (40 objects = 19 `.rrs` + 19 `.rrf` + manifest + corpus-wide global Bloom,
+      byte-sizes verified against local). Demo cutover committed (9223c96, full
+      dataset trigram `split` → `openalex-trigram-geo`; no `.rrhc`; `SPLIT_RRHC_URL`
+      guarded) + deployed via `deploy.sh` (reader hash `87eb44ad1a`, CloudFront
+      invalidation `I32ZL7FTEL6JNQK88ZXFPZE07L`). Live-verified over CloudFront:
+      manifest 200/1489 B, split `RRSI` v3 magic + correct sizes via range read,
+      sidecar + bloom 200, deployed `index.html` references the geo prefix. Tagged
+      `v0.13.0`. **The default trigram split now descends 19 geo tiers, not 389.**
+      REMAINING (separate, non-blocking): lite manifest regen — the `?ds=lite`
+      config still points at the flat `openalex-trigram-split/`, which keeps working,
+      so the flat set stays on S3 for `?ds=lite` + `?split=0` deep links.
 - [ ] Split cursor/count contract: `RrssIndex` exposes ranked lists only — no
       paging cursor, no `countEstimate`, no `facetCounts`. The demo's count line
       and facet checkboxes silently degrade in split mode.
