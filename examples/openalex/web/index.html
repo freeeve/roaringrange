@@ -878,6 +878,13 @@
       // Term server backend: a separate regional Lambda (TermIndex + BM25 + facets) behind
       // CloudFront /search-term — same JSON shape as /search, so it reuses lambdaSearch/goPageServer.
       const TERM_LAMBDA_URL = "https://openalex.evefreeman.com/search-term";
+      // Hybrid server backends: two regional Lambdas (one crate, TEXT_MODE=trigram|term)
+      // behind CloudFront /search-hybrid-{tri,term}. Each runs BOTH arms in-region — the
+      // text arm (trigram intersection or BM25 term) fused with the Gemma vector arm by
+      // reciprocal rank — and returns just the page's IDs + facet counts (same JSON shape
+      // as /search, so they reuse lambdaSearch/goPageServer). hybrid-term is "BM25 + semantic".
+      const HYBRID_TRI_LAMBDA_URL = "https://openalex.evefreeman.com/search-hybrid-tri";
+      const HYBRID_TERM_LAMBDA_URL = "https://openalex.evefreeman.com/search-hybrid-term";
       // Server mode is the trigram DEFAULT on the full dataset (~1–3 KB and well
       // under a second warm, vs dozens of ranged reads client-side); the toggle
       // stays so the client-side paths remain one click away.
@@ -1112,7 +1119,10 @@
         // flags, not the live booleans, so the choice survives a refresh taken before the
         // split set finishes booting. (srv=1 / split=1 in old deep links are no-ops.)
         const wordMode = mode === "trigram" || mode === "term";
-        if (wordMode && SERVER_DEFAULT && serverOff) params.set("srv", "0");
+        // Server is the default for the word modes AND both hybrid modes, so srv=0 (the
+        // opt-out) must survive a refresh for any of them; split is a word-mode-only fallback.
+        const serverable = wordMode || mode.startsWith("hybrid");
+        if (serverable && SERVER_DEFAULT && serverOff) params.set("srv", "0");
         if (wordMode && !serverMode && splitPref === false) params.set("split", "0");
         if ((mode === "term" || mode === "hybrid-term") && RRB_URL && bm25Off) params.set("bm25", "0");
         // Gemma (Lambda) embeddings opt-IN on the vector modes (model2vec is the default).
@@ -1134,11 +1144,12 @@
       function syncModeUi(mode) {
         const triOnly = mode === "trigram";
         $("fuzzmode").style.display = triOnly ? "" : "none";
-        // Server (Lambda) mode applies to BOTH word backends via a regional search Lambda:
-        // trigram (/search) and term (/search-term, BM25-reranked + facet counts). It is the
-        // DEFAULT for both, computed BEFORE the split default, which yields to it. Turning
-        // server off re-engages the client-side split-set default below.
-        const serverCapable = (triOnly || mode === "term") && SERVER_DEFAULT;
+        // Server (Lambda) mode applies to every backend that has a regional Lambda: trigram
+        // (/search), term (/search-term, BM25 + facet counts), and the two hybrid modes
+        // (/search-hybrid-{tri,term} — both arms + RRF, in-region). It is the DEFAULT for all,
+        // computed BEFORE the split default, which yields to it. Turning server off re-engages
+        // the client-side path below (split set for the word modes, in-browser fusion for hybrid).
+        const serverCapable = (triOnly || mode === "term" || mode.startsWith("hybrid")) && SERVER_DEFAULT;
         const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = serverCapable ? "" : "none";
         if (serverCapable) {
           serverMode = !serverOff;
@@ -1727,8 +1738,14 @@
          counters (it has no Range header anyway); the response size is measured for
          the perf bar. total is exact only on page 0 — the client caches it. */
       async function lambdaSearch(q, off, limit, mm, filters) {
-        // Term mode routes to the term Lambda (/search-term); trigram to /search.
-        const u = new URL(searchMode === "term" ? TERM_LAMBDA_URL : LAMBDA_URL);
+        // Route to the Lambda for the active mode: term → /search-term, the two hybrid
+        // modes → /search-hybrid-{tri,term} (text arm + Gemma, RRF-fused, in-region),
+        // trigram (and the auto-route fallback) → /search. All share the JSON shape.
+        const u = new URL(
+          searchMode === "term" ? TERM_LAMBDA_URL :
+          searchMode === "hybrid-tri" ? HYBRID_TRI_LAMBDA_URL :
+          searchMode === "hybrid-term" ? HYBRID_TERM_LAMBDA_URL :
+          LAMBDA_URL);
         u.searchParams.set("q", q);
         u.searchParams.set("offset", off);
         u.searchParams.set("limit", limit);
@@ -2200,6 +2217,17 @@
         // Semantic / hybrid: embed the query in-browser (model2vec) and search the
         // vector index; render through the same showDocs() doc-ID path.
         if (searchMode === "semantic" || searchMode.startsWith("hybrid")) {
+          // Server (Lambda) hybrid: the hybrid Lambda runs BOTH arms (text by mode +
+          // Gemma vector) + RRF + facet counts in-region, returning only this page's
+          // IDs + counts — no client vector/term boot. Same page-0 contract as the other
+          // server modes (goPageServer + lambdaSearch route to the hybrid URL). Semantic
+          // has no server Lambda, so it always takes the client path below.
+          if (searchMode.startsWith("hybrid") && serverMode) {
+            serverTotal = 0;
+            setPerf({ tail: null, tailresults: null, facetcount: null, embed: null, vsearch: null });
+            await goPageServer(0);
+            return;
+          }
           const ok = lambdaSemantic ? await ensureGemmaVector() : await ensureVector();
           if (mySeq !== searchSeq) return;
           // Active facets filter the ranked vector results (vector_id == doc_id, so
