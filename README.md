@@ -257,9 +257,8 @@ Honest conclusions:
   ([`examples/search-lambda`](examples/search-lambda) is the server side) stay to
   demonstrate the *no-backend* story and its tradeoffs, not as the speed default.
 - **The sweet spot is large corpus × modest traffic, and it widens as the corpus shrinks.**
-  At a tenth of the corpus an average client query is well under ~0.4 MB / ~200 ms; that
-  smaller-scale operating point is illustrative — the demo serves only the full corpus now
-  (the earlier `?ds=lite` 1/10th tier was retired).
+  Per-query bytes scale with the corpus, so a smaller index makes the client-side path cheaper
+  and the CDN free tier go further; the demo runs the full 484M corpus.
 
 The two paths compose — the same artifacts serve both — so the demo's production shape is
 now **server-side by default** with the client-side range-read modes as the no-backend

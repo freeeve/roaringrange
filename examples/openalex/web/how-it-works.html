@@ -1479,9 +1479,9 @@
           candidates occupy (container-granularity seeks on the <code>.rrf</code>), not the whole category bitmap
           &mdash; so a category that's tens of MB whole costs ~tens of KB here, and counts come free from the
           resident facet heads. The server&rsquo;s facet edge is <b>exact totals + counts</b>, not bytes. The
-          sweet spot is <b>large corpus &times; modest traffic</b>, and it widens as the corpus
-          shrinks: at a tenth of the corpus an average client query is well under ~0.4&nbsp;MB / ~200&nbsp;ms (the
-          demo serves only the full corpus &mdash; the earlier 1/10th-scale tier was retired).
+          sweet spot is <b>large corpus &times; modest traffic</b>, and it widens as the corpus shrinks:
+          per-query bytes scale with the corpus, so a smaller index makes the client-side path cheaper and
+          the CDN free tier go further. The demo runs the full 484M corpus.
         </p>
 
         <h3 class="sub">The monthly bill, vs a backend</h3>
