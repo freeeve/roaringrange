@@ -1,0 +1,21 @@
+[package]
+name = "term-search-lambda"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The custom runtime expects a binary named `bootstrap`.
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+# Reuse the reader as-is: the same TermIndex / ImpactIndex / FacetIndex the browser
+# runs. `terms` gates the term index + BM25 impact sidecar.
+roaringrange = { path = "../../rust", features = ["terms"] }
+roaring = "0.11"
+lambda_http = "0.13"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+serde_json = "1"
