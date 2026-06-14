@@ -875,6 +875,9 @@
       // CloudFront /search behavior (origin = the regional API Gateway in front of
       // the search Lambda) — one host for every byte the demo moves.
       const LAMBDA_URL = "https://openalex.evefreeman.com/search";
+      // Term server backend: a separate regional Lambda (TermIndex + BM25 + facets) behind
+      // CloudFront /search-term — same JSON shape as /search, so it reuses lambdaSearch/goPageServer.
+      const TERM_LAMBDA_URL = "https://openalex.evefreeman.com/search-term";
       // Server mode is the trigram DEFAULT on the full dataset (~1–3 KB and well
       // under a second warm, vs dozens of ranged reads client-side); the toggle
       // stays so the client-side paths remain one click away.
@@ -1103,16 +1106,14 @@
         if (q) params.set("q", q);
         const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
         if (mode !== "trigram") params.set("mode", mode);
-        // Server (trigram) and split (client-side) are the defaults, so the URL
-        // encodes the EXCEPTIONS: srv=0 / split=0 opt-outs (srv=1 / split=1 in old
-        // deep links are no-ops). Keyed on the opt-out flags, not the live mode
-        // booleans, so the choice survives a refresh taken before the split set
-        // finishes booting.
-        if (mode === "trigram" && SERVER_DEFAULT && serverOff) params.set("srv", "0");
-        // …and split= only when the user's choice differs from the mode's default
-        // (trigram: on; term: off), so URLs stay clean in the default state.
-        if (mode === "trigram" && !serverMode && splitPref === false) params.set("split", "0");
-        if (mode === "term" && splitPref === true) params.set("split", "1");
+        // Both word modes (trigram + term) default to server, with the client split set as
+        // the fallback, so the URL encodes only the EXCEPTIONS: srv=0 (opt out of the Lambda)
+        // and, once client-side, split=0 (opt out of the split set). Keyed on the opt-out
+        // flags, not the live booleans, so the choice survives a refresh taken before the
+        // split set finishes booting. (srv=1 / split=1 in old deep links are no-ops.)
+        const wordMode = mode === "trigram" || mode === "term";
+        if (wordMode && SERVER_DEFAULT && serverOff) params.set("srv", "0");
+        if (wordMode && !serverMode && splitPref === false) params.set("split", "0");
         if ((mode === "term" || mode === "hybrid-term") && RRB_URL && bm25Off) params.set("bm25", "0");
         const mm = currentFuzz();
         if (mm) params.set("fuzz", String(mm));
@@ -1130,29 +1131,30 @@
       function syncModeUi(mode) {
         const triOnly = mode === "trigram";
         $("fuzzmode").style.display = triOnly ? "" : "none";
-        const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = triOnly ? "" : "none";
+        // Server (Lambda) mode applies to BOTH word backends via a regional search Lambda:
+        // trigram (/search) and term (/search-term, BM25-reranked + facet counts). It is the
+        // DEFAULT for both, computed BEFORE the split default, which yields to it. Turning
+        // server off re-engages the client-side split-set default below.
+        const serverCapable = (triOnly || mode === "term") && SERVER_DEFAULT;
+        const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = serverCapable ? "" : "none";
+        if (serverCapable) {
+          serverMode = !serverOff;
+          els.servermode.checked = serverMode;
+        } else {
+          serverMode = false;
+        }
         // The split toggle applies wherever a split set exists for the mode's body:
         // trigram needs the booted reader (its search path uses it synchronously);
         // term only needs the config (the reader lazy-boots on first search).
-        // Server (Lambda) is the trigram DEFAULT; computed BEFORE the split default,
-        // which yields to it. Turning server off re-engages the split-set default below.
-        if (triOnly && SERVER_DEFAULT) {
-          serverMode = !serverOff;
-          els.servermode.checked = serverMode;
-        }
         const splitCapable = triOnly ? !!rrss : (mode === "term" && !!TERM_SPLIT_RRSS_URL);
         els.splitmodeWrap.hidden = !splitCapable;
         if (!splitCapable && splitMode) { splitMode = false; els.splitmode.checked = false; }
-        // Split defaults: ON for both word paths. Trigram client-side yields to server
-        // mode when that's enabled. Term defaults to the geometric split too — its 12-tier
-        // descent is bounded (the old flat 243-split set descended rare queries slowly, the
-        // reason term used to default to the monolith; the geo set fixed that), and it dodges
-        // the monolith term index's ~76 MB resident boot, a big win on a slow link. The user's
-        // explicit choice (splitPref) overrides the default either way.
+        // Split is the client-side fallback for both word paths (the geometric split set):
+        // ON by default when server mode is off, OFF when the Lambda owns the path. The term
+        // geo split's bounded 12-tier descent also dodges the monolith term index's ~76 MB
+        // resident boot. The user's explicit choice (splitPref) overrides the default.
         if (splitCapable) {
-          splitMode = triOnly
-            ? ((splitPref ?? true) && !serverMode)
-            : (splitPref ?? true);
+          splitMode = (splitPref ?? true) && !serverMode;
           els.splitmode.checked = splitMode;
         }
         // BM25 relevance applies to the word modes (term + hybrid-term — the
@@ -1720,11 +1722,14 @@
          counters (it has no Range header anyway); the response size is measured for
          the perf bar. total is exact only on page 0 — the client caches it. */
       async function lambdaSearch(q, off, limit, mm, filters) {
-        const u = new URL(LAMBDA_URL);
+        // Term mode routes to the term Lambda (/search-term); trigram to /search.
+        const u = new URL(searchMode === "term" ? TERM_LAMBDA_URL : LAMBDA_URL);
         u.searchParams.set("q", q);
         u.searchParams.set("offset", off);
         u.searchParams.set("limit", limit);
         if (mm) u.searchParams.set("max_missing", mm);
+        // Term backend honors the BM25 toggle (default on); trigram ignores it.
+        if (searchMode === "term" && !bm25Mode) u.searchParams.set("bm25", "0");
         if (filters && filters.length) u.searchParams.set("filters", JSON.stringify(filters));
         const resp = await realFetch(u.href);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -2131,7 +2136,18 @@
         // is resident, so a query range-fetches only the matched terms' postings. Renders
         // through the same showDocs() doc-ID path; facets filter it like the others.
         if (searchMode === "term") {
-          // Split is the term default: route through the term-bodied split set when
+          // Server (Lambda) mode is the term DEFAULT: the term Lambda (/search-term) runs
+          // the BM25 search + facet counts in-region and returns just this page's IDs +
+          // counts — no ~76 MB client term-dictionary boot. Same page-0-only total/facets
+          // contract as trigram server mode (goPageServer + lambdaSearch handle the rest;
+          // lambdaSearch routes to TERM_LAMBDA_URL for term).
+          if (serverMode) {
+            serverTotal = 0;
+            setPerf({ tail: null, tailresults: null, facetcount: null });
+            await goPageServer(0);
+            return;
+          }
+          // Client-side fallback (server off): route through the term-bodied split set when
           // the toggle is on (lazy boot, monolith fallback on failure). Filters use
           // the same shared-ID-space post-filter either way — term bodies have no
           // per-split filtered cursor, and the doc-ID space is the monolith's.
