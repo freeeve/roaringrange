@@ -2576,6 +2576,9 @@
         r.addEventListener("change", () => {
           syncModeUi(document.querySelector('input[name="mode"]:checked').value);
           renderActiveFiles();   // show the files this mode range-reads
+          syncUrl();   // land ?mode= immediately (like the srv/split/bm25 toggles),
+                       // not only after the async search renders — so a deep link copied
+                       // right after switching modes carries the mode.
           runSearch(true);
         }));
       els.resultcount.addEventListener("click", (e) => {
