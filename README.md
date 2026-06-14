@@ -224,14 +224,17 @@ backend at all* — are one toggle away, and that's where bytes climb:
 | term — client monolith | ~15–20 KB | **~76 MB** (resident dict) |
 | semantic (8 IVFPQ probes) | ~2–9.6 MB | **~64 MB** (vector + embedder) |
 | records page (25 cards) | ~25–50 KB | — |
-| client facet filter | **~52 MB** (full category posting) | — |
-| ⤷ trigram geo split + facet | ~3 MB (per-split sidecars) | — |
-| server facet filter | ~2 KB | none |
+| client facet filter (membership) | ~tens of KB | — |
+| server facet filter | ~2 KB (+ exact counts) | none |
 
 Client bytes drop via **pruning** (read only the tiers that can match) and geometric
-tiering caps a worst-case descent at ~log-many visits; faceting and exact totals are
-where client-side hurts (the whole category posting is tens of MB) — exactly what the
-server path collapses to a couple of KB. Behind a CDN with a real free tier (CloudFront:
+tiering caps a worst-case descent at ~log-many visits. Faceting is cheap client-side too:
+the demo post-filters the ranked candidates with a **membership** read of the selected
+category — only the 64K-doc buckets the candidates occupy (container-granularity seeks on
+the `.rrf`, the same offset-table seek the trigram tail scan uses), not the whole category
+bitmap — so a category that runs to tens of MB whole costs ~tens of KB here, and counts
+come from the resident facet heads with no fetch. The server path's facet edge is **exact
+totals + counts**, not bytes. Behind a CDN with a real free tier (CloudFront:
 1 TB + 10M req/mo), the monthly bill — baselined on the **server default** (~2 KB/query)
 and a representative **client** query (geo split, ~0.3 MB / ~30 range-GETs):
 
@@ -247,8 +250,10 @@ Honest conclusions:
   Server or client, you're inside the CDN free tier with no box to babysit, and the
   artifacts are immutable (the demo still works untouched years later). In the in-browser
   semantic mode the query text never leaves the browser at all.
-- **For interactive latency on a modest connection, the server path wins decisively** —
-  KB not MB, no 64–76 MB client boots, faceting in ~2 KB. The client-side range-read modes
+- **For interactive latency on a modest connection, the server path wins on the heavy
+  modes** — KB instead of the client trigram-monolith's ~1 MB or semantic's MBs, and no
+  64–76 MB resident boots; faceting is cheap either way (membership reads), so the server's
+  facet edge is exact counts, not bytes. The client-side range-read modes
   ([`examples/search-lambda`](examples/search-lambda) is the server side) stay to
   demonstrate the *no-backend* story and its tradeoffs, not as the speed default.
 - **The sweet spot is large corpus × modest traffic, and it widens as the corpus shrinks.**

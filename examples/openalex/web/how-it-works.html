@@ -1469,14 +1469,17 @@
           <tr><td>term &mdash; client monolith</td><td>~15&ndash;20 KB</td><td>~76 MB</td></tr>
           <tr><td>semantic (8 IVFPQ probes)</td><td>~2&ndash;9.6 MB</td><td>~64 MB</td></tr>
           <tr><td>records page (25 cards)</td><td>~25&ndash;50 KB</td><td>&mdash;</td></tr>
-          <tr><td>client facet filter</td><td>~52 MB (full posting)</td><td>&mdash;</td></tr>
-          <tr><td>server facet filter</td><td class="win"><b>~2 KB</b></td><td>none</td></tr>
+          <tr><td>client facet filter (membership)</td><td>~tens of KB</td><td>&mdash;</td></tr>
+          <tr><td>server facet filter</td><td class="win"><b>~2 KB</b> (+ exact counts)</td><td>none</td></tr>
         </table>
         <p class="body">
           The split sets cut client bytes by <b>pruning</b> (read only the tiers that can match) and geometric
-          tiering caps a worst-case descent at ~log-many visits; faceting and exact totals are where client-side
-          hurts (the whole category posting is tens of MB) &mdash; exactly what the server path collapses to a
-          couple of KB. The sweet spot is <b>large corpus &times; modest traffic</b>, and it widens as the corpus
+          tiering caps a worst-case descent at ~log-many visits. Faceting is cheap client-side too: the demo
+          post-filters the ranked candidates with a <b>membership</b> read &mdash; only the 64K-doc buckets the
+          candidates occupy (container-granularity seeks on the <code>.rrf</code>), not the whole category bitmap
+          &mdash; so a category that's tens of MB whole costs ~tens of KB here, and counts come free from the
+          resident facet heads. The server&rsquo;s facet edge is <b>exact totals + counts</b>, not bytes. The
+          sweet spot is <b>large corpus &times; modest traffic</b>, and it widens as the corpus
           shrinks: at a tenth of the corpus an average client query is well under ~0.4&nbsp;MB / ~200&nbsp;ms (the
           demo serves only the full corpus &mdash; the earlier 1/10th-scale tier was retired).
         </p>
