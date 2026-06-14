@@ -20,5 +20,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 serde_json = "1"
-# In-region HTTP GET to the embed Lambda for the Gemma query vector.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# In-process EmbeddingGemma query embedder (replaces the cross-Lambda /embed hop):
+# onnxruntime via `ort` (load-dynamic — the native lib ships in the container image, not
+# linked at build), and the HF `tokenizers` crate (the same library the Python embed uses).
+# fancy-regex (pure Rust) instead of the default onig C dep — keeps the container build
+# toolchain-free; this tokenizer's Split is a literal-string pattern, so the engine choice
+# is moot at runtime anyway.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic"] }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }

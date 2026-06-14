@@ -2,14 +2,18 @@
 //!
 //! One crate, deployed twice via the `TEXT_MODE` env: `trigram` (substring `RRS`) or `term`
 //! (stemmed whole-word `RRTI` + BM25 `RRSB`) for the text arm. The vector arm embeds the query
-//! with EmbeddingGemma (an in-region GET to the embed Lambda) and searches the Gemma `RRVI`;
-//! the two ranked lists are fused with **reciprocal rank fusion** — `term + Gemma` is exactly
-//! "BM25 with semantic". Everything runs in-region over S3 range reads; only fused page IDs +
-//! facet counts cross the wire.
+//! with EmbeddingGemma **in-process** (onnxruntime, baked into the container image — no
+//! cross-Lambda hop) and searches the Gemma `RRVI`; the two ranked lists are fused with
+//! **reciprocal rank fusion** — `term + Gemma` is exactly "BM25 with semantic". Everything runs
+//! in-region over S3 range reads; only fused page IDs + facet counts cross the wire.
 //!
-//! Env: `INDEX_BUCKET`, `TEXT_MODE` (trigram|term), `RRVI_KEY`, `INDEX_FACETS_KEY`, `EMBED_URL`;
-//! trigram needs `TRIGRAM_KEY`, term needs `TERM_KEY` + `IMPACTS_KEY`.
+//! Env: `INDEX_BUCKET`, `TEXT_MODE` (trigram|term), `RRVI_KEY`, `INDEX_FACETS_KEY`, and
+//! `EMBED_MODEL_DIR` (baked `model/`, default `/var/task/model`) + `ORT_DYLIB_PATH`; trigram
+//! needs `TRIGRAM_KEY`, term needs `TERM_KEY` + `IMPACTS_KEY`.
 
+mod embed;
+
+use embed::Embedder;
 use lambda_http::{run, service_fn, Body, Error, Request, RequestExt, Response};
 use roaring::RoaringBitmap;
 use roaringrange::{
@@ -17,6 +21,7 @@ use roaringrange::{
     TermIndex, VectorIndex,
 };
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
 
@@ -166,8 +171,7 @@ struct Hybrid {
     text: TextArm,
     vectors: VectorIndex<CF>,
     facets: FacetIndex<CF>,
-    embed_url: String,
-    http: reqwest::Client,
+    embedder: Embedder,
 }
 
 static HYBRID: OnceCell<Hybrid> = OnceCell::const_new();
@@ -175,6 +179,14 @@ static HYBRID: OnceCell<Hybrid> = OnceCell::const_new();
 async fn hybrid() -> Result<&'static Hybrid, Error> {
     HYBRID
         .get_or_try_init(|| async {
+            let t0 = std::time::Instant::now();
+            // Start the embedder load (ONNX session build, CPU-bound) on the blocking pool up
+            // front so it overlaps the index opens (S3 I/O) below — both are cold-start costs.
+            let model_dir = PathBuf::from(
+                std::env::var("EMBED_MODEL_DIR").unwrap_or_else(|_| "/var/task/model".to_string()),
+            );
+            let embedder_task = tokio::task::spawn_blocking(move || Embedder::load(&model_dir));
+
             let cfg = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let client = aws_sdk_s3::Client::new(&cfg);
             let bucket = std::env::var("INDEX_BUCKET").map_err(|_| "INDEX_BUCKET not set")?;
@@ -224,42 +236,24 @@ async fn hybrid() -> Result<&'static Hybrid, Error> {
             let facets = FacetIndex::open(open(facets_key))
                 .await
                 .map_err(|e| Error::from(format!("open facets: {e}")))?;
-            let embed_url = std::env::var("EMBED_URL").map_err(|_| "EMBED_URL not set")?;
+            let idx_secs = t0.elapsed().as_secs_f32();
+            // Join the embedder load started above (overlapped with the index opens).
+            let embedder = embedder_task
+                .await
+                .map_err(|e| Error::from(format!("embedder join: {e}")))?
+                .map_err(|e| Error::from(format!("load embedder: {e}")))?;
+            eprintln!(
+                "hybrid init: indexes {idx_secs:.1}s, total {:.1}s",
+                t0.elapsed().as_secs_f32()
+            );
             Ok::<_, Error>(Hybrid {
                 text,
                 vectors,
                 facets,
-                embed_url,
-                http: reqwest::Client::new(),
+                embedder,
             })
         })
         .await
-}
-
-/// In-region GET to the embed Lambda → the EmbeddingGemma query vector.
-async fn embed_query(h: &Hybrid, q: &str) -> Result<Vec<f32>, Error> {
-    let resp = h
-        .http
-        .get(&h.embed_url)
-        .query(&[("q", q)])
-        .send()
-        .await
-        .map_err(|e| Error::from(format!("embed request: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(Error::from(format!("embed lambda {}", resp.status())));
-    }
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| Error::from(format!("embed json: {e}")))?;
-    let arr = body
-        .get("vector")
-        .and_then(|v| v.as_array())
-        .ok_or("embed response missing vector")?;
-    Ok(arr
-        .iter()
-        .filter_map(|x| x.as_f64().map(|f| f as f32))
-        .collect())
 }
 
 fn facets_value<F: RangeFetch>(fi: &FacetIndex<F>, counts: &[Vec<u64>]) -> serde_json::Value {
@@ -323,9 +317,14 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
     }
 
     let h = hybrid().await?;
-    // Two arms in parallel: text (BM25/substring) and Gemma vector.
+    // Two arms in parallel: text (BM25/substring) and Gemma vector. The vector arm embeds
+    // the query in-process (ONNX is CPU-bound, so on the blocking pool) then probes the RRVI.
     let (text_ids, vec_hits) = tokio::join!(h.text.search(&query, DEPTH), async {
-        let qv = embed_query(h, &query).await?;
+        let q = query.clone();
+        let qv = tokio::task::spawn_blocking(move || h.embedder.embed(&q))
+            .await
+            .map_err(|e| Error::from(format!("embed join: {e}")))?
+            .map_err(|e| Error::from(format!("embed: {e}")))?;
         h.vectors
             .search(&qv, DEPTH, NPROBE)
             .await

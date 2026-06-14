@@ -1,1 +1,8 @@
 target/
+# Baked embedding model artifacts (large; never committed — staged for the Docker build
+# from ../embed-lambda/model via export_model.py, same as the embed lambda).
+model/
+# Docker build-context artifacts (staged, not committed): the cargo-lambda binary and the
+# onnxruntime shared library the image bakes in.
+bootstrap
+libonnxruntime.so
