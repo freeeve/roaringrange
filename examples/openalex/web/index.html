@@ -782,7 +782,7 @@
     </main>
 
     <script type="module">
-      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex, RrbIndex, RrssIndex, RrhcBundle, rangeCacheStats, reciprocalRankFusion } from "./roaringrange.js";
+      import init, { RrsIndex, RrsRecords, RrsLookup, RrviIndex, Model2vecEmbedder, RrfFacets, RrtIndex, RrbIndex, RrssIndex, RrhcBundle, rangeCacheStats, setRangeCacheMb, reciprocalRankFusion } from "./roaringrange.js";
 
       /* -------- byte/request accounting via fetch interception (from webtest) -------- */
       const realFetch = self.fetch.bind(self);
@@ -801,18 +801,14 @@
       };
 
       /* -------- config & element handles -------- */
-      // Dataset selector: ?ds=poc points the demo at the proof-of-concept build
-      // under poc/ (compressed records + DOI lookup) for testing; default is the
-      // live full 484M-work index. Each entry is an index basename, a record-store basename,
-      // and whether records are zstd-compressed (needing the trained dictionary).
-      // `rrvi`/`rrm2` enable semantic + hybrid search: a range-fetched IVFPQ vector
-      // index (top-cited subset) and the model2vec token-embedding matrix the
-      // browser embeds the query with (no backend). doc IDs are shared with the
-      // text index + record store, so results render through the same path.
-      // `split` (optional): an RRSS split set built over the same corpus/ranking as the monolith,
-      // under the `openalex-trigram-split/` prefix — its manifest, the per-split base URL, and the
-      // `.rrhc` boot bundle. Because it shares the monolith's rank-ordered doc-ID space (doc id ==
-      // citation rank), it reuses the monolith `records-full` store. Enables the "Split-set index" toggle.
+      // ONE dataset — the live full 484M-work corpus. The demo's point is comparing index
+      // *modes* over a single corpus (trigram server/split/monolith, term, semantic, hybrid,
+      // BM25), not swapping corpora, so there is one entry and one record store. Fields:
+      // `idx`/`rec` basenames + `zstd` (records need the trained dict); `rrvi`/`rrm2` enable
+      // semantic + hybrid (range-fetched IVFPQ + the in-browser model2vec embedder);
+      // `rrt`/`rrb` enable term search + BM25; `split`/`termSplit` are the client-side geometric
+      // split sets. All share one rank-ordered doc-ID space (doc id == citation rank) and the
+      // `records-full` store, so every mode renders results through the same path.
       const DATASETS = {
         "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrb: "openalex-484m-stem.rrb", rrviGemma: null,
                   // split: GEOMETRIC trigram tiers (19 splits, 498 MB top doubling to ~8 GiB, capped at
@@ -832,20 +828,9 @@
                   // ~12 visits instead of the flat set's 243. Shares records-full (same
                   // doc-ID space); no boot bundle (its manifest is ~1 KB, one open).
                   termSplit: { rrss: "openalex-term-geo/openalex-484m-terms.rrss", base: "openalex-term-geo" } },
-        "47m": { idx: "openalex-47m", rec: "records-47m", zstd: false },
-        "poc": { idx: "poc/openalex-poc", rec: "poc/records-poc", zstd: true },
-        // ?ds=lite — the SAME deployed artifacts, searched through a 3.4 KB manifest listing
-        // only the top-cited ~10% of splits (46 splits, 47.6M docs). Doc ID == citation rank,
-        // so a tier-prefix manifest IS the top slice of the corpus: per-query bytes drop ~10x
-        // (the economics page's "1/10th scale" column, live). Boots straight into split mode;
-        // term/semantic stay full-corpus (their indexes aren't tiered).
-        "lite": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrb: "openalex-484m-stem.rrb", rrviGemma: null,
-                  forceSplit: true,
-                  split: { rrss: "openalex-trigram-split/openalex-lite.rrss", base: "openalex-trigram-split", rrhc: "openalex-trigram-split/openalex.rrhc", rec: "records-full", bloom: "openalex-global.bloom" },
-                  termSplit: { rrss: "openalex-split/openalex-484m-terms.rrss", base: "openalex-split" } },
       };
-      const dsParam = new URLSearchParams(location.search).get("ds");
-      const DS = DATASETS[dsParam] ? dsParam : "full";
+      // One dataset: the live full corpus. The demo compares index *modes* over it, not corpora.
+      const DS = "full";
       const RRS_URL = new URL(`${DATASETS[DS].idx}.rrs`, location.href).href;
       const RRF_URL = new URL(`${DATASETS[DS].idx}.rrf`, location.href).href;
       const IDX_URL = new URL(`${DATASETS[DS].rec}.idx`, location.href).href;
@@ -876,9 +861,7 @@
       // and a warm visit boots from the browser cache with zero network. The name
       // is rewritten to its content-hashed form at deploy (like the reader
       // assets); absent or failed → the per-member cold opens below.
-      const RRHC_URL = (DS === "full" || DS === "lite")
-        ? new URL("openalex-full.rrhc", location.href).href
-        : null;
+      const RRHC_URL = new URL("openalex-full.rrhc", location.href).href;
       let bundleBoot = false;   // the catalog booted from the bundle (perf-row label)
       // Search-filtered facet counts need the category HEAD postings resident — on
       // the 484M sidecar that's hundreds of scattered small reads, so a bundle boot
@@ -894,9 +877,8 @@
       const LAMBDA_URL = "https://openalex.evefreeman.com/search";
       // Server mode is the trigram DEFAULT on the full dataset (~1–3 KB and well
       // under a second warm, vs dozens of ranged reads client-side); the toggle
-      // stays so the client-side paths remain one click away. The Lambda serves
-      // the FULL corpus only, so test datasets (?ds=poc/47m) never default to it.
-      const SERVER_DEFAULT = DS === "full";
+      // stays so the client-side paths remain one click away.
+      const SERVER_DEFAULT = true;
       // Cost-based routing: a trigram query whose estimated client-side fetch exceeds
       // the threshold can route to the Lambda automatically (the same intersection,
       // in-region, only IDs cross the wire), priced BEFORE any posting is fetched —
@@ -1118,7 +1100,6 @@
         if (restoring) return;
         const q = els.q.value.trim();
         const params = new URLSearchParams();
-        if (DATASETS[dsParam]) params.set("ds", dsParam);   // keep a non-default dataset pinned
         if (q) params.set("q", q);
         const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
         if (mode !== "trigram") params.set("mode", mode);
@@ -1153,25 +1134,25 @@
         // The split toggle applies wherever a split set exists for the mode's body:
         // trigram needs the booted reader (its search path uses it synchronously);
         // term only needs the config (the reader lazy-boots on first search).
-        // Server (Lambda) is the trigram DEFAULT on the full dataset; computed
-        // BEFORE the split default, which yields to it. Turning server off (or a
-        // forceSplit dataset) re-engages the split-set default below.
+        // Server (Lambda) is the trigram DEFAULT; computed BEFORE the split default,
+        // which yields to it. Turning server off re-engages the split-set default below.
         if (triOnly && SERVER_DEFAULT) {
-          serverMode = !serverOff && !DATASETS[DS].forceSplit;
+          serverMode = !serverOff;
           els.servermode.checked = serverMode;
         }
         const splitCapable = triOnly ? !!rrss : (mode === "term" && !!TERM_SPLIT_RRSS_URL);
         els.splitmodeWrap.hidden = !splitCapable;
         if (!splitCapable && splitMode) { splitMode = false; els.splitmode.checked = false; }
-        // Split defaults: trigram ON for the client-side path (tier pruning caps
-        // its worst case; server mode owns the path when enabled), term OFF (a
-        // present-but-rare query descends every split — the monolith is the safe
-        // default). The user's explicit choice (splitPref) overrides the default;
-        // a forceSplit dataset (?ds=lite has no monolith) pins trigram on.
+        // Split defaults: ON for both word paths. Trigram client-side yields to server
+        // mode when that's enabled. Term defaults to the geometric split too — its 12-tier
+        // descent is bounded (the old flat 243-split set descended rare queries slowly, the
+        // reason term used to default to the monolith; the geo set fixed that), and it dodges
+        // the monolith term index's ~76 MB resident boot, a big win on a slow link. The user's
+        // explicit choice (splitPref) overrides the default either way.
         if (splitCapable) {
           splitMode = triOnly
-            ? (((splitPref ?? true) && !serverMode) || !!DATASETS[DS].forceSplit)
-            : splitPref === true;
+            ? ((splitPref ?? true) && !serverMode)
+            : (splitPref ?? true);
           els.splitmode.checked = splitMode;
         }
         // BM25 relevance applies to the word modes (term + hybrid-term — the
@@ -2405,6 +2386,10 @@
       /* -------- boot -------- */
       async function boot() {
         reqs = 0; bytes = 0;
+        // Client range cache 256 MiB (up from the 128 MiB reader default): on a modest
+        // connection it keeps large postings + heavy resident boots warm across queries
+        // and pagination, where re-fetching dominates wall time. JS-tunable at runtime.
+        setRangeCacheMb(256);
         // Each open is its own ranged fetch; measure ms/reqs/bytes per sub-step so the
         // perf panel shows "Open index", "Open facets", and "Open records" as separate,
         // comparable phases. seg() returns the deltas since the previous checkpoint.
@@ -2501,7 +2486,7 @@
           const triFirst = !m || m === "trigram";
           const clientSplitFirst =
             (!SERVER_DEFAULT || up.get("srv") === "0") && up.get("split") !== "0";
-          if ((triFirst && clientSplitFirst) || DATASETS[DS].forceSplit) {
+          if (triFirst && clientSplitFirst) {
             await bootSplitSet();
           }
         }
@@ -2560,7 +2545,7 @@
           rrss = opened;   // publish last
         } catch (_) { rrss = null; splitRecords = null; return; }
         // Reveal the toggle (trigram mode only — syncModeUi recomputes from rrss),
-        // and refresh the file chips in case split mode is already on (?ds=lite).
+        // and refresh the file chips in case split mode is already on.
         syncModeUi(document.querySelector('input[name="mode"]:checked')?.value || "trigram");
         renderActiveFiles();
       }
