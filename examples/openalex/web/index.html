@@ -660,10 +660,10 @@
           </div>
 
           <div class="fuzz" id="searchmode" role="radiogroup" aria-label="Search mode">
-            <input type="radio" name="mode" id="mode-trigram" value="trigram" checked />
-            <label for="mode-trigram">Trigram</label>
-            <input type="radio" name="mode" id="mode-term" value="term" />
+            <input type="radio" name="mode" id="mode-term" value="term" checked />
             <label for="mode-term">Term</label>
+            <input type="radio" name="mode" id="mode-trigram" value="trigram" />
+            <label for="mode-trigram">Trigram</label>
             <input type="radio" name="mode" id="mode-semantic" value="semantic" />
             <label for="mode-semantic">Semantic</label>
             <input type="radio" name="mode" id="mode-hybrid-tri" value="hybrid-tri" />
@@ -810,7 +810,7 @@
       // split sets. All share one rank-ordered doc-ID space (doc id == citation rank) and the
       // `records-full` store, so every mode renders results through the same path.
       const DATASETS = {
-        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrb: "openalex-484m-stem.rrb", rrviGemma: null,
+        "full": { idx: "openalex-full", rec: "records-full", zstd: true, rrvi: "openalex-484m.rrvi", rrm2: "potion.rrm2", rrt: "openalex-484m-stem.rrt", rrb: "openalex-484m-stem.rrb", rrviGemma: "openalex-gemma.rrvi",
                   // split: GEOMETRIC trigram tiers (19 splits, 498 MB top doubling to ~8 GiB, capped at
                   // 32M docs/split) sliced from the v3 monolith — a worst-case full descent is ~19 visits
                   // instead of the flat set's 389. Manifest is ~1.5 KB (no per-split summaries), split
@@ -893,10 +893,10 @@
       const AUTO_ROUTE = false;
       let autoRouted = false;   // this query was upgraded to the Lambda by cost (pageTo follows it)
       // Mode-1 query embedder (examples/embed-lambda): turns query text into an
-      // EmbeddingGemma-300M vector matching a Gemma-embedded RRVI. null until the
-      // function is deployed — set it to the Function URL (and a dataset's `rrviGemma`)
-      // to reveal the "Lambda embeddings" toggle.
-      const EMBED_LAMBDA_URL = null;
+      // EmbeddingGemma-300M (512-d MRL) vector matching the Gemma-embedded RRVI. Live via
+      // CloudFront /embed → API Gateway → embed-lambda; paired with the dataset's
+      // `rrviGemma` to reveal the "Lambda embeddings" toggle on semantic/hybrid.
+      const EMBED_LAMBDA_URL = "https://openalex.evefreeman.com/embed";
       let serverMode = false;
       let serverTotal = 0;   // exact total from the Lambda (set on page 0), cached across pages
       // --- search mode: trigram (text) | semantic (vector) | hybrid (both, fused) ---
@@ -1006,7 +1006,7 @@
          toggle. A file that didn't probe (e.g. a private/missing .rrt) shows "n/a". */
       function renderActiveFiles() {
         if (!els.activeFiles) return;
-        const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
+        const mode = document.querySelector('input[name="mode"]:checked')?.value || "term";
         const parts = [];
         const add = (label, bytes) => parts.push({ label, bytes });
         if (mode === "trigram" && splitMode && rrss) {
@@ -1104,8 +1104,8 @@
         const q = els.q.value.trim();
         const params = new URLSearchParams();
         if (q) params.set("q", q);
-        const mode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
-        if (mode !== "trigram") params.set("mode", mode);
+        const mode = document.querySelector('input[name="mode"]:checked')?.value || "term";
+        if (mode !== "term") params.set("mode", mode);   // term is the default → omit it; encode the rest
         // Both word modes (trigram + term) default to server, with the client split set as
         // the fallback, so the URL encodes only the EXCEPTIONS: srv=0 (opt out of the Lambda)
         // and, once client-side, split=0 (opt out of the split set). Keyed on the opt-out
@@ -1115,6 +1115,9 @@
         if (wordMode && SERVER_DEFAULT && serverOff) params.set("srv", "0");
         if (wordMode && !serverMode && splitPref === false) params.set("split", "0");
         if ((mode === "term" || mode === "hybrid-term") && RRB_URL && bm25Off) params.set("bm25", "0");
+        // Gemma (Lambda) embeddings opt-IN on the vector modes (model2vec is the default).
+        if ((mode === "semantic" || mode.startsWith("hybrid")) && EMBED_LAMBDA_URL && RRVI_GEMMA_URL && lambdaSemantic)
+          params.set("gemma", "1");
         const mm = currentFuzz();
         if (mm) params.set("fuzz", String(mm));
         for (const key of activeFilters) params.append("f", key);
@@ -1169,6 +1172,7 @@
         // (when configured), never under trigram/term.
         els.lambdasemWrap.hidden =
           !((mode === "semantic" || mode.startsWith("hybrid")) && EMBED_LAMBDA_URL && RRVI_GEMMA_URL);
+        els.lambdasem.checked = lambdaSemantic;
       }
 
       /* Apply URL params to the inputs/checkboxes on load. Facet boxes must already be
@@ -1184,8 +1188,8 @@
           // backend that produced it — its page offset indexes that backend's ranking.
           // Legacy deep links: "hybrid" predates the two-arm split — treat as tri+sem.
           const mode = params.get("mode") === "hybrid" ? "hybrid-tri" : params.get("mode");
-          let effective = "trigram";
-          if (["term", "semantic", "hybrid-tri", "hybrid-term"].includes(mode)) {
+          let effective = "term";   // term is the default mode now (no `mode` param needed)
+          if (["trigram", "semantic", "hybrid-tri", "hybrid-term"].includes(mode)) {
             const r = $(`mode-${mode}`);
             if (r) { r.checked = true; effective = mode; }
           }
@@ -1199,6 +1203,7 @@
           if (params.get("split") === "1") splitPref = true;
           if (params.get("bm25") === "0") bm25Off = true;
           if (params.get("bm25") === "1") bm25Off = false;
+          if (params.get("gemma") === "1") lambdaSemantic = true;
           syncModeUi(effective);
           const mm = Number.parseInt(params.get("fuzz") || "0", 10) || 0;
           const radio = document.querySelector(`input[name="fuzz"][value="${mm === 1 ? 1 : 0}"]`);
@@ -2025,15 +2030,12 @@
         } catch (e) { els.mSummary.textContent = `Gemma vector load failed: ${e}`; return false; }
       }
 
-      /* Mode-1 query embed: POST the text to the embed-lambda and receive an
+      /* Mode-1 query embed: GET the text to the embed-lambda and receive an
          EmbeddingGemma vector (same space as the Gemma RRVI). A real network round trip
-         — counted as one request for the perf bar, outside the S3 range meters. */
+         — counted as one request for the perf bar, outside the S3 range meters. GET (not
+         POST): the CloudFront /embed behavior allows GET/HEAD/OPTIONS only, same as /search. */
       async function lambdaEmbed(q) {
-        const res = await realFetch(EMBED_LAMBDA_URL, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ q }),
-        });
+        const res = await realFetch(`${EMBED_LAMBDA_URL}?q=${encodeURIComponent(q)}`);
         if (!res.ok) throw new Error(`embed lambda ${res.status}`);
         const body = await res.json();
         const vec = Float32Array.from(body.vector);
@@ -2096,7 +2098,7 @@
         finally { stopLive(tok); }
       }
       async function runSearchInner(resetPaging = true) {
-        searchMode = document.querySelector('input[name="mode"]:checked')?.value || "trigram";
+        searchMode = document.querySelector('input[name="mode"]:checked')?.value || "term";
         clearTimeout(autoPullTimer);
         const q = els.q.value.trim();
         if (!q) {
@@ -2499,7 +2501,9 @@
         {
           const up = new URLSearchParams(location.search);
           const m = up.get("mode");
-          const triFirst = !m || m === "trigram";
+          // Pre-boot the trigram split set only on an EXPLICIT client-side trigram deep link.
+          // The default mode is now term (server), which needs no split-set boot.
+          const triFirst = m === "trigram";
           const clientSplitFirst =
             (!SERVER_DEFAULT || up.get("srv") === "0") && up.get("split") !== "0";
           if (triFirst && clientSplitFirst) {
@@ -2562,7 +2566,7 @@
         } catch (_) { rrss = null; splitRecords = null; return; }
         // Reveal the toggle (trigram mode only — syncModeUi recomputes from rrss),
         // and refresh the file chips in case split mode is already on.
-        syncModeUi(document.querySelector('input[name="mode"]:checked')?.value || "trigram");
+        syncModeUi(document.querySelector('input[name="mode"]:checked')?.value || "term");
         renderActiveFiles();
       }
 
@@ -2629,7 +2633,7 @@
         // in runSearch, so leaving it set would silently ignore this toggle). Leaving
         // server mode re-engages the split default via the same recompute the mode
         // radios use.
-        syncModeUi(document.querySelector('input[name="mode"]:checked')?.value || "trigram");
+        syncModeUi(document.querySelector('input[name="mode"]:checked')?.value || "term");
         renderActiveFiles();
         syncUrl();   // land srv=1 immediately — a refresh mid-search must not lose it
         runSearch(true);   // filters + facet counts now work in server mode (via the Lambda)
@@ -2661,6 +2665,7 @@
       // vector modes (and only when an endpoint + Gemma index are configured).
       els.lambdasem.addEventListener("change", () => {
         lambdaSemantic = els.lambdasem.checked;
+        syncUrl();   // land ?gemma= immediately, like the other toggles
         if (searchMode === "semantic" || searchMode.startsWith("hybrid")) runSearch(true);
       });
       els.clearfilters.addEventListener("click", () => {
