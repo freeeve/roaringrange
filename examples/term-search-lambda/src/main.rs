@@ -27,10 +27,10 @@ use tokio::sync::OnceCell;
 const DEPTH: usize = 1000;
 /// BM25 candidate window: the rerank scores the first `M` static-rank hits.
 const BM25_M: usize = 2000;
-/// Per-object in-container range cache cap. A warm invocation uses a few hundred MB of
-/// the container's gigabytes, so a generous cap holds the resident term dictionary +
-/// hot postings + impacts across queries.
-const CACHE_CAP_BYTES: usize = 512 * 1024 * 1024;
+/// Per-object in-container range cache cap. The function is sized to the Lambda max
+/// (10 GiB), so an 8 GiB cap holds the resident term dictionary + hot postings +
+/// impacts across queries while leaving runtime headroom.
+const CACHE_CAP_BYTES: usize = 8 * 1024 * 1024 * 1024;
 
 /// A [`RangeFetch`] over in-region S3 byte-range reads (in-region reads are free/fast,
 /// so the heavy posting traffic never leaves the bucket's region). One per object.
@@ -65,7 +65,9 @@ impl RangeFetch for S3Fetch {
     }
 }
 
-/// A byte-capped FIFO cache of range reads keyed by `(offset, len)`, one per S3 object.
+/// A byte-capped LRU cache of range reads keyed by `(offset, len)`, one per S3 object:
+/// a `get` hit promotes the entry to most-recently-used, and the least-recently-used
+/// entry is evicted once the cap is exceeded.
 struct RangeCache {
     map: HashMap<(u64, usize), Vec<u8>>,
     order: VecDeque<(u64, usize)>,
@@ -82,8 +84,13 @@ impl RangeCache {
             cap,
         }
     }
-    fn get(&self, k: &(u64, usize)) -> Option<Vec<u8>> {
-        self.map.get(k).cloned()
+    fn get(&mut self, k: &(u64, usize)) -> Option<Vec<u8>> {
+        let v = self.map.get(k)?.clone();
+        if let Some(pos) = self.order.iter().position(|x| x == k) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(*k);
+        Some(v)
     }
     fn put(&mut self, k: (u64, usize), v: Vec<u8>) {
         if self.map.contains_key(&k) {
@@ -224,7 +231,10 @@ fn json_response(status: u16, body: String) -> Result<Response<Body>, Error> {
 async fn handler(event: Request) -> Result<Response<Body>, Error> {
     let params = event.query_string_parameters();
     let query = params.first("q").unwrap_or("").trim().to_string();
-    let offset: usize = params.first("offset").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let offset: usize = params
+        .first("offset")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let limit: usize = params
         .first("limit")
         .and_then(|s| s.parse().ok())
@@ -234,15 +244,13 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
     let filters: Vec<(String, String)> = match params.first("filters") {
         Some(s) => match serde_json::from_str(s) {
             Ok(f) => f,
-            Err(e) => {
-                return json_response(
-                    400,
-                    serde_json::json!({
-                        "error": format!("filters must be a JSON array of [field, category] pairs: {e}")
-                    })
-                    .to_string(),
-                )
-            }
+            Err(e) => return json_response(
+                400,
+                serde_json::json!({
+                    "error": format!("filters must be a JSON array of [field, category] pairs: {e}")
+                })
+                .to_string(),
+            ),
         },
         None => Vec::new(),
     };
@@ -291,12 +299,7 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         }
     };
 
-    let page: Vec<u32> = filtered
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .copied()
-        .collect();
+    let page: Vec<u32> = filtered.iter().skip(offset).take(limit).copied().collect();
     let facets = if offset == 0 {
         facets_value(&s.facets, &s.facets.counts(&ranked_bm))
     } else {

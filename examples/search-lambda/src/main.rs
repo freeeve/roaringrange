@@ -52,14 +52,15 @@ impl RangeFetch for S3Fetch {
     }
 }
 
-/// Cap on the in-container range cache, per index object. A warm invocation uses
-/// ~100 MB of the container's gigabytes, so a generous cap holds the hot trigram
-/// postings + dictionary blocks across queries.
-const CACHE_CAP_BYTES: usize = 512 * 1024 * 1024;
+/// Cap on the in-container range cache, per index object. The function is sized to
+/// the Lambda max (10 GiB), so an 8 GiB cap keeps the hot trigram postings +
+/// dictionary blocks resident across queries while leaving runtime headroom.
+const CACHE_CAP_BYTES: usize = 8 * 1024 * 1024 * 1024;
 
-/// A byte-capped cache of range reads keyed by `(offset, len)`, FIFO-evicted once
-/// the cap is exceeded. One per S3 object, so identical offsets in the `.rrs` and
-/// `.rrf` never collide.
+/// A byte-capped LRU cache of range reads keyed by `(offset, len)`: a `get` hit
+/// promotes the entry to most-recently-used, and the least-recently-used entry is
+/// evicted once the cap is exceeded. One per S3 object, so identical offsets in the
+/// `.rrs` and `.rrf` never collide.
 struct RangeCache {
     map: HashMap<(u64, usize), Vec<u8>>,
     order: VecDeque<(u64, usize)>,
@@ -77,8 +78,13 @@ impl RangeCache {
         }
     }
 
-    fn get(&self, k: &(u64, usize)) -> Option<Vec<u8>> {
-        self.map.get(k).cloned()
+    fn get(&mut self, k: &(u64, usize)) -> Option<Vec<u8>> {
+        let v = self.map.get(k)?.clone();
+        if let Some(pos) = self.order.iter().position(|x| x == k) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(*k);
+        Some(v)
     }
 
     fn put(&mut self, k: (u64, usize), v: Vec<u8>) {
