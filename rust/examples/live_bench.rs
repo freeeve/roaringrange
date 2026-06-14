@@ -16,6 +16,7 @@
 //! BASE_URL defaults to the live demo origin.
 
 use futures::executor::block_on;
+use roaring::RoaringBitmap;
 use roaringrange::{
     FacetIndex, FetchError, Index, Model2vec, RangeFetch, SplitFetcher, SplitSet, TermIndex,
     VectorIndex,
@@ -224,7 +225,10 @@ fn main() {
         if rf.is_empty() {
             return ids.to_vec();
         }
-        let mask = block_on(rf.full_bitmap()).expect("facet bitmap");
+        // Mirror the demo's post-filter: a membership read over just the candidates'
+        // 64K-doc buckets (container-granularity seeks), NOT the whole category bitmap.
+        let cand: RoaringBitmap = ids.iter().copied().collect();
+        let mask = block_on(rf.membership_bitmap(&cand)).expect("facet membership");
         ids.iter()
             .copied()
             .filter(|id| mask.contains(*id))
