@@ -26,8 +26,10 @@ writer — both emit the same files the Rust/WASM (or Go) reader reads.
 
 - **OpenAlex** — [openalex.evefreeman.com](https://openalex.evefreeman.com): **484M**
   scholarly works, citation-ranked, faceted (year/type/open-access/language/topic),
-  with trigram, whole-word (term), semantic (IVFPQ), and hybrid search — all
-  client-side. (Reproducible — see [`examples/openalex/`](examples/openalex).)
+  with trigram, whole-word (term, with default-on BM25 relevance), semantic (IVFPQ),
+  and hybrid search. Trigram defaults to a regional `/search` Lambda for speed; the
+  client-side range-read modes (split-set, monolith, term, semantic — *no backend*)
+  are one toggle away. (Reproducible — see [`examples/openalex/`](examples/openalex).)
 
 ## How it fits together
 
@@ -39,13 +41,14 @@ browser (Rust/WASM): .rrs/.rrf/records on CDN ─HTTP Range─▶ Catalog (= Ind
 ```
 
 Doc IDs are assigned at build time in descending static rank (citations, holdings,
-…), so ascending doc ID = rank. Each posting is split into a **head** (the 65,536
-top-ranked docs) and a **tail** (the rest); a query ANDs the small heads to get
-the ranked top-K and only fetches a tail when paginating past it. See
+…), so ascending doc ID = rank. Each posting is one roaring bitmap read in rank-ordered
+**buckets**: a query ANDs the small top bucket (the 65,536 top-ranked docs) to get the
+ranked top-K and only pages deeper buckets when paginating past it. See
 [`docs/format.svg`](docs/format.svg) and [`docs/search.svg`](docs/search.svg).
 
-This is the design trade-off: ranking is baked in up front (no query-time
-relevance scoring), in exchange for near-constant per-query fetch cost.
+This is the core design trade-off: ranking is baked in up front as a static rank in
+doc-ID order, in exchange for near-constant per-query fetch cost. (Term and hybrid modes
+add optional, default-on BM25 lexical relevance via the RRSB `.rrb` sidecar.)
 
 ## How it compares
 
@@ -54,7 +57,8 @@ both deliver full-text search to static sites with no backend. lunr loads the
 whole index into memory; Pagefind pioneered fetching only the index shards a
 query needs. roaringrange pushes that "fetch only what you query" idea to
 *millions* of records by HTTP-Range-reading a single roaring-bitmap index file,
-trading query-time relevance ranking for a baked-in static rank.
+trading a general query-time relevance pipeline for a baked-in static rank (with
+optional default-on BM25 on the term/hybrid modes).
 
 | | lunr.js | Pagefind | roaringrange |
 |---|---|---|---|
@@ -63,7 +67,7 @@ trading query-time relevance ranking for a baked-in static rank.
 | typical scale | hundreds–few thousand docs | up to ~100k+ pages | millions–100M+ records |
 | per-query bytes | 0 after full load (load can be MBs+) | ~tens–hundreds KB | ~KB–few MB (≈ constant) |
 | matching | stemmed terms; wildcard, fuzzy, boosts | stemmed words; partial | trigram substring; fuzzy (tolerate-N) |
-| ranking | TF-IDF / BM25 relevance | BM25-like relevance | **static rank** (query-independent importance) in doc-ID order — **no query-time relevance** |
+| ranking | TF-IDF / BM25 relevance | BM25-like relevance | **static rank** (query-independent) in doc-ID order, *plus* default-on **BM25** on term/hybrid (RRSB sidecar) |
 | facets / filters | fielded search (no facet counts) | filters + facet counts | facets + live counts (sidecar) |
 | build input | JS objects / prebuilt JSON | crawls built HTML pages | any records (Go via roaringsearch, or the Rust builder) |
 | sweet spot | embedding a search library in a JS app (you own the index) | static sites & docs, small to large | very large catalogs & datasets |
@@ -101,6 +105,7 @@ reader and builder are listed below.
 | `RRIL` | `.rril` | [LOOKUP.md](LOOKUP.md) | `Lookup` / `RrsLookup` | Rust `write_lookup` | identifier exact-match index |
 | `RRSC` | `.rrsc` | [SORTCOLS.md](SORTCOLS.md) | `SortCols` / `RrsSortCols` | Rust `write_sortcols` | static sort/rank columns |
 | `RRTI` | `.rrt` | [TERMS.md](TERMS.md) | `TermIndex` / `RrtIndex` | Rust `write_term_index`, Python | term index (blocked, range-fetched dict) |
+| `RRSB` | `.rrb` | [BM25.md](BM25.md) | `ImpactIndex` / `RrbIndex` | Rust `write_impacts` | BM25 impact sidecar for the term index (lexical relevance) |
 | `RRVI` | `.rrvi` | [VECTORS.md](VECTORS.md) | `VectorIndex` / `RrviIndex` | Rust `build_ivfpq`, Python | IVFPQ vector index |
 | `RRVR` | `.rrvi.rerank` | [VECTORS.md](VECTORS.md#re-rank-sidecar-rrvr-optional) | `RerankStore` | Rust `write_rerank` | bf16 re-rank sidecar |
 | `RRM2` | `.rrm2` | [VECTORS.md](VECTORS.md#model2vec-embedder-rrm2) | `Model2vec` / `Model2vecEmbedder` | `python/scripts/model2vec_export.py` | in-browser query embedder |
@@ -120,6 +125,7 @@ Rust, Go, or Python. Rust is the reference — Go and Python expose deliberate s
 | Lookup `RRIL` | build + read | — | — | read |
 | Sort columns `RRSC` | build + read | — | — | read |
 | Terms `RRTI` | build + read | — | build | read |
+| BM25 impacts `RRSB` | build + read | — | — | read |
 | Vectors `RRVI` | build + read | — | build | read |
 | Model2vec `RRM2` | read | — | export¹ | read |
 | Hotcache `RRHC` | build + read | — | — | —² |
@@ -197,53 +203,63 @@ boot is a few MB: the index sparse, the facet metadata + top-category heads
 (the facet *tails* stay range-fetched, not loaded up front), and the
 record-store header.
 
-## Costs — client-side search vs a backend
+## Costs — server default vs. client-side range reads
 
-The unit of cost in this architecture is **bytes egressed per query**. Storage
-is nearly free (the entire 484M index family — trigram + term + vector + split
-set + records + sidecars, ~360 GB — is ~$9/month on S3), and there is **no idle
-cost**: nothing runs when nobody searches. What grows with the corpus is the
-density of common postings, so per-query bytes scale roughly linearly with doc
-count for common terms:
+The unit of cost is **bytes moved per query** — the demo's link is bandwidth-bound
+(measured ~1–3.5 MB/s down, ~150–200 ms RTT), so per-query bytes, not CPU, set wall
+time. Storage is nearly free: the full 484M index family — trigram monolith + term +
+vector + records + facet sidecars + the geometric trigram (19-tier) and term (12-tier)
+split sets + the BM25 `.rrb` sidecar (plus the legacy flat split set still parked on S3)
+— is ~550 GB ≈ **~$13/month**, and there is **no idle cost**: nothing runs when nobody
+searches. The demo **defaults to a regional `/search` Lambda** for trigram (~1–3 KB,
+~0.66 s, faceting included); the client-side range-read modes — searchable with *no
+backend at all* — are one toggle away, and that's where bytes climb:
 
-| per query (warm boot) | OpenAlex 484M | at 1/10th scale |
+| mode (484M, warm) | per query | one-time resident boot |
 |---|---|---|
-| term mode (`.rrt`) | ~0.1–0.5 MB | ~10–50 KB |
-| trigram | ~1–10 MB | ~0.1–1 MB |
-| semantic (8 IVFPQ cluster probes) | ~8–10 MB | ~1 MB |
-| records page (25 cards) | ~25–50 KB | same |
-| worst case (broad facet filter / exact count) | ~90 MB+ | ~9 MB |
+| **trigram — server (default)** | **~1–3 KB** | none |
+| trigram — client geo split | ~240–300 KB | ~1.5 KB manifest |
+| trigram — client monolith | ~0.87–1.07 MB | ~1.7 MB |
+| term — client geo split | ~40–270 KB | ~1 KB manifest |
+| term — client monolith | ~15–20 KB | **~76 MB** (resident dict) |
+| semantic (8 IVFPQ probes) | ~2–9.6 MB | **~64 MB** (vector + embedder) |
+| records page (25 cards) | ~25–50 KB | — |
+| client facet filter | **~52 MB** (full category posting) | — |
+| ⤷ trigram geo split + facet | ~3 MB (per-split sidecars) | — |
+| server facet filter | ~2 KB | none |
 
-Behind a CDN with a meaningful free tier (CloudFront: 1 TB + 10M requests/mo),
-the monthly bill at a ~4 MB / ~12 range-GET average query:
+Client bytes drop via **pruning** (read only the tiers that can match) and geometric
+tiering caps a worst-case descent at ~log-many visits; faceting and exact totals are
+where client-side hurts (the whole category posting is tens of MB) — exactly what the
+server path collapses to a couple of KB. Behind a CDN with a real free tier (CloudFront:
+1 TB + 10M req/mo), the monthly bill — baselined on the **server default** (~2 KB/query)
+and a representative **client** query (geo split, ~0.3 MB / ~30 range-GETs):
 
-| queries/mo | client-side (this) | + in-region search Lambda | always-on box | managed search |
+| queries/mo | server default (this) | client range reads | always-on box | managed search |
 |---|---|---|---|---|
-| 10k–100k | **~$9** (inside free tier) | ~$9 | ~$100–150 flat | $700+ |
-| 1M | ~$265 | **~$20** | ~$100–150 | $700+ |
-| 10M | ~$3,400 | **~$110–150** | ~$150+ | $1,500+ |
+| 10k–100k | **~$13** (inside free tier) | ~$13 | ~$100–150 flat | $700+ |
+| 1M | **~$20** | ~$30–50 | ~$100–150 | $700+ |
+| 10M | **~$110–150** | ~$300–400 | ~$150+ | $1,500+ |
 
-Three honest conclusions fall out:
+Honest conclusions:
 
-- **Below a few hundred thousand queries a month, nothing is cheaper — or
-  lower-ops.** No server to patch, scale, or babysit; the artifacts are
-  immutable and the demo still works untouched years later. In the in-browser
+- **Below a few hundred thousand queries a month, nothing is cheaper — or lower-ops.**
+  Server or client, you're inside the CDN free tier with no box to babysit, and the
+  artifacts are immutable (the demo still works untouched years later). In the in-browser
   semantic mode the query text never leaves the browser at all.
-- **At traffic scale the economics invert.** Client-side egress costs 1–2
-  orders of magnitude more per query than an in-region Lambda running the
-  *same intersection over the same files*
-  ([`examples/search-lambda`](examples/search-lambda), the demo's server-side
-  toggle): S3→Lambda bandwidth is free, so only result IDs cross the wire.
-- **At 1/10th the corpus both pressures vanish**: ~0.4 MB average queries fit
-  millions of queries/month inside the CDN free tier, and mobile transfer time
-  drops under ~200 ms. The sweet spot is *large corpus × modest traffic*, and
-  it widens fast as the corpus shrinks.
+- **For interactive latency on a modest connection, the server path wins decisively** —
+  KB not MB, no 64–76 MB client boots, faceting in ~2 KB. The client-side range-read modes
+  ([`examples/search-lambda`](examples/search-lambda) is the server side) stay to
+  demonstrate the *no-backend* story and its tradeoffs, not as the speed default.
+- **The sweet spot is large corpus × modest traffic, and it widens as the corpus shrinks.**
+  At a tenth of the corpus an average client query is well under ~0.4 MB / ~200 ms; that
+  smaller-scale operating point is illustrative — the demo serves only the full corpus now
+  (the earlier `?ds=lite` 1/10th tier was retired).
 
-The two paths compose — the same artifacts serve both — so the production shape
-is client-side by default with the Lambda as an **escape valve** for the
-expensive tail. The dictionary records every posting's byte size, so a client
-can estimate a query's cost *before fetching anything* and route the expensive
-ones automatically.
+The two paths compose — the same artifacts serve both — so the demo's production shape is
+now **server-side by default** with the client-side range-read modes as the no-backend
+option. The dictionary records every posting's byte size, so a client can estimate a
+query's cost *before fetching anything* and auto-route the expensive ones to the Lambda.
 
 ## Tried and shelved
 
@@ -259,7 +275,7 @@ Why it didn't pan out: roaring stores each 65,536-doc block as either an array
 (≤4096 docs, 2 B each) or a flat **8 KB bitmap** for any cardinality in
 (4096, 61440]. A common trigram's complement usually lands in that same band, so
 it is *also* an 8 KB bitmap — inversion only shrinks a block denser than ~94%
-(complement becomes a small array, or empty). Measured on the live 47.8M index
+(complement becomes a small array, or empty). Measured on the earlier 47.8M index
 (`rust/examples/density`, e.g. `cargo run --release --example density -- "machine learning" "posthuman became"`):
 the hottest trigram, `the`, is only ~52% dense — OpenAlex lacks an abstract for
 roughly half its works, so half the corpus is title-only text — and just
@@ -279,7 +295,7 @@ stored text (title + abstract + authors + venue), keeping the true matches.
 
 Why it didn't pan out: client-side, egress is floored by the **result-set size**.
 The candidate set can't shrink below the number of results, and verifying that
-many records costs ~`result_count × record_size`. Measured on the live 47.8M
+many records costs ~`result_count × record_size`. Measured on the earlier 47.8M
 index (`rust/examples/candidates`): `machine learning` (171k results) still has
 ~195k candidates after seeding the 4 rarest trigrams → ~190 MB of record
 verification, *worse* than the 53 MB full intersection. It helps only sparse
@@ -306,8 +322,9 @@ Build it from Rust (`build_ivfpq`, behind the `vector` feature) or Python
 (`build_ivfpq_from_parts` / `roaringrange.write_rrvi_from_faiss`, verified against
 the reader at recall@10 ≈ 0.9995). The reader [`VectorIndex`](rust/src/vector.rs)
 is pure Rust with a browser binding (`RrviIndex`, `wasm-pack build --features
-"wasm vector"`). See [`VECTORS.md`](VECTORS.md). Still in progress: the query
-*embedder* (in-browser model2vec / a Lambda proxy) and a trigram hybrid
+"wasm vector"`). See [`VECTORS.md`](VECTORS.md). Live on the demo: the in-browser
+model2vec query *embedder* (`RrviIndex` + `Model2vecEmbedder`) and term/trigram hybrid
+(reciprocal-rank fusion); an optional EmbeddingGemma Lambda embedder is parked
 ([`tasks/004_vector_search`](tasks)).
 
 ## Development

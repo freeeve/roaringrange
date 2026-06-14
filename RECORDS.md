@@ -76,14 +76,17 @@ output — a Go-build → Rust-read round-trip is pinned by the Go
 
 ## Optional compression
 Per-record **zstd with a shared dictionary** is implemented as the additive
-**version 2** layout above (see [`tasks/001_record_compression.md`](tasks/001_record_compression.md)),
+**version 2** layout above (see [`tasks/001_record_compression.done.md`](tasks/001_record_compression.done.md)),
 inflated inside the `RecordStore` reader. It is opt-in: the raw version-1 store is
 unchanged and the reader reads it byte-for-byte. The index/facet formats are
 unaffected; the record encoding stays the application's choice.
 
-The reader's decode path uses the pure-Rust `ruzstd` decoder, so it compiles for
-both native and `wasm32` (the C `zstd` crate, used only for the native build-side
-encode and dictionary training, does not build cleanly for wasm). All zstd code is
-behind the crate's `zstd` Cargo feature; the crate builds and tests with the
-feature off exactly as before. Build the browser reader that must inflate records
-with `wasm-pack build --target web --features "wasm zstd"`.
+The decode path is split by target: the **wasm32** reader uses the pure-Rust
+`ruzstd` decoder (no C toolchain in the browser), while the **native** reader uses
+C `libzstd` (the `zstd` crate) — `ruzstd`'s `RingBuffer` corrupts the heap under heavy
+concurrent decode, so the build/query side that decodes records in parallel must use
+`libzstd`. The C `zstd` crate also drives native build-side encode + dictionary
+training and is never compiled for wasm32. All zstd code is behind the crate's `zstd`
+Cargo feature; the crate builds and tests with the feature off exactly as before.
+Build the browser reader that must inflate records with
+`wasm-pack build --target web --features "wasm zstd"`.

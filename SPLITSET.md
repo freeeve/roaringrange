@@ -3,10 +3,12 @@
 > **Status: implemented** behind the non-default `splits` Cargo feature — manifest
 > reader/writer, byte-capped split builder, pruning/merging query path (tiered short-circuit +
 > stable-key sort), base+delta cutover with supersession, minor compaction, a side-by-side
-> benchmark, a Go manifest writer (byte-for-byte conformance), and a wasm binding. Remaining:
-> the per-split Bloom/facet/time **summaries** (the blob is reserved) and the demo UI mode.
-> This document is the frozen byte layout the readers/writers agree on. See
-> `tasks/007_split_set_index.in-progress.md`.
+> benchmark, a Go builder (manifest + split `RRS` incl. per-split `RRSF` facets, byte-for-byte
+> conformance), and a wasm binding. The geometric split sets are the demo's **default**
+> client-side trigram/term backends (geometric per-tier byte caps; see Geometric tiering below).
+> Remaining: only the per-split **time min/max** summary (tag 3); the Bloom, facet-presence,
+> and tombstone summaries and the demo split-set mode have shipped. This document is the frozen
+> byte layout the readers/writers agree on. See `tasks/007_split_set_index.done.md`.
 
 A **split set** — an additive member of the roaringrange family (next to the trigram
 `RRS`, term `RRTI`, facet `RRSF`, vector `RRVI`, record `RRSR`, lookup `RRIL`, sort
@@ -14,7 +16,8 @@ columns `RRSC`, and the `RRHC` boot accelerator). It is a Quickwit-style manifes
 many small **immutable splits**, queried with **pruning** (read only the splits that can
 match) and a **base + delta + manifest** lifecycle (absorb new docs without a full
 rebuild). It replaces nothing: each split is a vanilla `RRS`, so one split is exactly
-today's monolith and the format exists to compare `RRSS` *side by side* with it.
+today's monolith. It is now the demo's **default** client-side trigram/term backend, with
+the monolith kept as the fallback and side-by-side comparison.
 
 The lever that cuts per-query bytes is **pruning**, not log-structuredness. The
 roaringrange-native prune is **rank tiering**: `RRS` already splits each posting into a
@@ -196,7 +199,9 @@ the existing native writers:
 
 A Go build side reproduces split assignment + the manifest **byte-for-byte** (same discipline
 as `go/conformance/`'s n-gram keys), so a split set built by either language reads in either.
-Deferred with the rest of the build path.
+Shipped: `go/splitset.go` + `go/splitsetbuild.go` reproduce the manifest and every split `RRS`
+(incl. per-split `RRSF` facet sidecars and term Bloom filters) byte-for-byte against a shared
+golden — see the Status section.
 
 ## Open questions
 
@@ -253,6 +258,21 @@ split is an `Index`, stable-key rank is `SortCols`, the manifest evolves `RRHC`)
   `rust/examples/splitset_ingest.rs` (a worked queue-as-WAL ingestion client over `SplitSetWriter`).
 
 **Deferred**: the per-split **time min/max** summary (tag 3 — for time-range pruning; the blob
-carries it but the builder doesn't write it yet), the **Go/Python facet** build+conformance
-surface (the Rust builder/reader do facets; Go/Python builders don't emit per-split `RRSF` yet),
-and the demo "Split set" UI mode.
+carries it but the builder doesn't write it yet), and the **Python facet** build surface (Rust
+and Go builders emit per-split `RRSF`; the Python builder doesn't yet). The demo "Split set"
+mode shipped (and the geometric trigram/term split sets are the demo's default client-side
+backends).
+
+## Geometric tiering
+
+The live split sets size their tiers **geometrically**: the per-tier byte cap doubles down the
+rank order (`byte_cap` base → `byte_cap_max` ceiling; Rust/Go/Python share the `cap_for`/`capFor`
+golden), so the top of the corpus is cut into small splits (fine pruning where common queries
+concentrate) while the tail doubles up to a handful of large splits. A full worst-case descent
+then costs ~log-many split visits instead of one-per-fixed-size: the live **trigram** set is
+**19 tiers** (`openalex-trigram-geo`, 498 MB top doubling to ~8 GiB, ≤32M docs/split) and the
+**term** set is **12 tiers** (`openalex-term-geo`, 240 MB doubling to ~10 GB) — versus the
+earlier flat 389-trigram / 243-term uniform-cap sets. The geometric sets are built fastest by
+**slicing an existing monolith by doc range** in one sequential pass (`rust/examples/slice_trigram_monolith.rs`,
+`slice_term_monolith.rs`), byte-identical to what the greedy builder would emit for the same
+ranges; the manifest's `byteCap` is then informational (0 for doc-range slices).

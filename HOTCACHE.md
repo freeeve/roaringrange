@@ -93,6 +93,7 @@ finds the footer with one tiny ranged read of the last bytes. Not implemented in
 ## Status
 v1: the Tier-1 manifest bundle. Native builder `hotcache_build::write_hotcache`; reader
 `hotcache::Hotcache` (wasm-safe), both behind the non-default `hotcache` Cargo feature
-(pure Rust, no new dependency). Deferred: `Catalog::open_hotcache` wiring and the
-per-member `from_boot` constructors, and Tier 2's `write_split` / `.rrsplit` footer. See
-`tasks/006_catalog_hotcache.md`.
+(pure Rust, no new dependency). The per-member `from_boot` constructors shipped
+(`Index`/`FacetIndex`/`RecordStore`/`Lookup::from_boot`, used by the `RRHC` split-set boot
+bundle). Deferred: `Catalog::open_hotcache` wiring and Tier 2's `write_split` / `.rrsplit`
+footer. See `tasks/006_catalog_hotcache.md`.
