@@ -58,7 +58,7 @@
   <rect x="726" y="284" width="206" height="40" rx="5" fill="#94a3b8"></rect>
   <text x="829" y="303" class="seg" text-anchor="middle" font-size="12">tail</text>
   <text x="829" y="318" class="seg mono" text-anchor="middle" font-size="10">docs ≥ headBoundary</text>
-  <text x="572" y="346" class="note" font-size="12">Split tracks the index&#39;s <tspan class="mono" fill="#3b5bdb">headBoundary</tspan> — a multiple of</text>
+  <text x="572" y="346" class="note" font-size="12">Split at a fixed <tspan class="mono" fill="#3b5bdb">64K-doc</tspan> bucket boundary — a multiple of</text>
   <text x="572" y="362" class="note" font-size="12">65,536 (default 65,536), raised for larger corpora.</text>
   <text x="572" y="382" class="note" font-size="12">A ≤ ~8 KB head per category; tails only when paging in.</text>
 
@@ -68,7 +68,7 @@
   <text x="48" y="450" class="note">Within a field, selected categories OR together; distinct fields AND. Result = textMatch AND filter, applied to the head first.</text>
   <text x="48" y="468" class="note">Live (search-filtered) counts = |resultBitmap ∩ categoryHead|, computed in memory over the query&#39;s head result.</text>
 
-  <text x="32" y="506" class="sub">Doc IDs share the index&#39;s popularity order, so facet postings split at the same dynamic <tspan class="mono">headBoundary</tspan> and range-fetch the same way (see <tspan class="mono">format.svg</tspan>).</text>
+  <text x="32" y="506" class="sub">Doc IDs share the index&#39;s popularity order, so facet postings split at the same 64K-doc container boundary and range-fetch the same way (see <tspan class="mono">format.svg</tspan>).</text>
 
   <text x="32" y="568" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">write  build::write_facets(w, fields)      read  FacetIndex::open(f).counts(result)</tspan></text>
 </svg>

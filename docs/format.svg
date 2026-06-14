@@ -28,13 +28,13 @@
     <text x="207" y="112" class="seg" text-anchor="middle">Sparse index</text>
     <text x="207" y="128" class="seg mono" text-anchor="middle" font-size="11">every 512th key</text>
     <text x="396" y="112" class="seg" text-anchor="middle">Dictionary</text>
-    <text x="396" y="128" class="seg mono" text-anchor="middle" font-size="11">key-sorted, 24 B/entry</text>
+    <text x="396" y="128" class="seg mono" text-anchor="middle" font-size="11">key-sorted, 20 B/entry</text>
     <text x="729" y="112" class="seg" text-anchor="middle">Postings</text>
     <text x="729" y="128" class="seg mono" text-anchor="middle" font-size="11">≈ 99% of the file (range-fetched, never whole)</text>
   </g>
 
   <!-- header detail -->
-  <text x="32" y="172" class="lbl mono">magic "RRSI" · ver · gramSize 3 · #ngrams · stride</text>
+  <text x="32" y="172" class="lbl mono">magic "RRSI" · version 3 · gramSize 3 · #ngrams · stride</text>
   <!-- sparse detail -->
   <text x="132" y="190" class="note">Downloaded once at boot (~tens of KB) and kept in memory →</text>
   <text x="132" y="206" class="note">in-memory binary search picks which dictionary block to read.</text>
@@ -42,26 +42,26 @@
   <!-- dictionary entry callout -->
   <line x1="396" y1="142" x2="320" y2="250" stroke="#0ea5e9" stroke-width="1.5"/>
   <rect x="120" y="250" width="400" height="92" rx="8" fill="#f0f9ff" stroke="#0ea5e9"/>
-  <text x="136" y="271" class="lbl" font-weight="700">one dictionary entry (24 B)</text>
-  <text x="136" y="291" class="lbl mono" font-size="12">key u64 · headOffset u64</text>
-  <text x="136" y="309" class="lbl mono" font-size="12">headSize u32 · tailSize u32</text>
-  <text x="136" y="330" class="note">→ absolute byte offsets locate this trigram's posting</text>
+  <text x="136" y="271" class="lbl" font-weight="700">one dictionary entry (20 B)</text>
+  <text x="136" y="291" class="lbl mono" font-size="12">key u64 · offset u64</text>
+  <text x="136" y="309" class="lbl mono" font-size="12">size u32</text>
+  <text x="136" y="330" class="note">→ absolute byte offset + size locate this trigram's posting</text>
 
   <!-- postings callout: head/tail -->
   <line x1="729" y1="142" x2="729" y2="250" stroke="#10b981" stroke-width="1.5" marker-end="url(#arr)"/>
   <rect x="556" y="250" width="392" height="150" rx="8" fill="#ecfdf5" stroke="#10b981"/>
-  <text x="572" y="272" class="lbl" font-weight="700">per trigram: <tspan class="mono">[ head ][ tail ]</tspan></text>
+  <text x="572" y="272" class="lbl" font-weight="700">per trigram: one roaring bitmap</text>
 
   <rect x="572" y="284" width="150" height="40" rx="5" fill="#10b981"/>
-  <text x="647" y="303" class="seg" text-anchor="middle" font-size="12">head</text>
+  <text x="647" y="303" class="seg" text-anchor="middle" font-size="12">bucket 0</text>
   <text x="647" y="318" class="seg mono" text-anchor="middle" font-size="10">docs [0, 65536)</text>
   <rect x="726" y="284" width="206" height="40" rx="5" fill="#94a3b8"/>
-  <text x="829" y="303" class="seg" text-anchor="middle" font-size="12">tail</text>
+  <text x="829" y="303" class="seg" text-anchor="middle" font-size="12">buckets 1 … N</text>
   <text x="829" y="318" class="seg mono" text-anchor="middle" font-size="10">docs ≥ 65536</text>
 
-  <text x="572" y="346" class="note">head = the 65,536 most-popular docs → the top-K for any</text>
-  <text x="572" y="362" class="note">ranked query lives here (≤ ~8 KB).</text>
-  <text x="572" y="382" class="note">tail fetched only if the head under-fills the page.</text>
+  <text x="572" y="346" class="note">bucket 0 = the 65,536 most-popular docs → the top-K for any</text>
+  <text x="572" y="362" class="note">ranked query lives here (the eager prefix, ≤ ~8 KB).</text>
+  <text x="572" y="382" class="note">deeper buckets fetched only if bucket 0 under-fills the page.</text>
 
   <!-- bottom notes: the up-front ranking trade-off -->
   <rect x="32" y="410" width="916" height="86" rx="8" fill="#fffbeb" stroke="#f59e0b"/>
@@ -71,5 +71,5 @@
   <text x="48" y="486" class="note">So the technique needs a good ranking signal known up front (citations, library holdings, …); without one it works far less well.</text>
 
   <text x="32" y="516" class="sub">Companion facet sidecar (<tspan class="mono">.rrf</tspan>): field table → category table (with counts) →</text>
-  <text x="32" y="534" class="sub">per-category <tspan class="mono">[head][tail]</tspan> postings — same shape, range-fetched the same way.</text>
+  <text x="32" y="534" class="sub">per-category <tspan class="mono">[head][tail]</tspan> postings — range-fetched the same way.</text>
 </svg>

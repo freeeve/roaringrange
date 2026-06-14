@@ -13,26 +13,26 @@
   </defs>
 
   <text x="32" y="36" class="title">Two tiers in time: popular results paint instantly, then the full set fills itself in</text>
-  <text x="32" y="58" class="sub">doc IDs are numbered by citation count, so the most-cited works sit in the head — a ranked top-K is free and paints first</text>
+  <text x="32" y="58" class="sub">doc IDs are numbered by citation count, so the most-cited works sit in the first container bucket — a ranked top-K is free and paints first</text>
 
   <!-- popularity bar: head (loaded/instant = blue) vs tail (on demand = grey) -->
   <rect x="32" y="78" width="150" height="46" rx="6" fill="#3b5bdb"/>
-  <text x="107" y="99" class="seg" text-anchor="middle">head</text>
+  <text x="107" y="99" class="seg" text-anchor="middle">bucket 0</text>
   <text x="107" y="115" class="seg" text-anchor="middle" font-weight="400">top 65,536</text>
   <rect x="186" y="78" width="762" height="46" rx="6" fill="#cbd5e1"/>
-  <text x="567" y="99" class="box" text-anchor="middle" fill="#334155">tail — the rest of the corpus (→ 492M)</text>
+  <text x="567" y="99" class="box" text-anchor="middle" fill="#334155">buckets 1 … N — the rest of the corpus (→ 484M)</text>
   <text x="567" y="116" class="req" text-anchor="middle">one roaring container per 65,536 doc IDs, sorted by key</text>
-  <text x="32" y="146" class="req">doc IDs ascending = most-cited → least &#160; <tspan class="mono" fill="#94a3b8">[0 … 65,536) head &#183; [65,536 … N) tail</tspan></text>
+  <text x="32" y="146" class="req">doc IDs ascending = most-cited → least &#160; <tspan class="mono" fill="#94a3b8">bucket 0: [0 … 65,536) &#183; buckets 1…N: [65,536 … N)</tspan></text>
 
   <!-- Panel A: instant, from the head -->
   <rect x="32" y="166" width="448" height="344" rx="10" fill="#eef2ff" stroke="#3b5bdb"/>
-  <text x="52" y="194" class="box"><tspan class="tag" fill="#3b5bdb">&#9312;</tspan> First — the popular head (instant)</text>
+  <text x="52" y="194" class="box"><tspan class="tag" fill="#3b5bdb">&#9312;</tspan> First — bucket 0, the eager prefix (instant)</text>
   <line x1="52" y1="204" x2="460" y2="204" stroke="#c7d2fe"/>
-  <text x="52" y="230" class="step"><tspan class="mono">AND</tspan> each trigram's <tspan font-weight="700">head</tspan> posting</text>
+  <text x="52" y="230" class="step"><tspan class="mono">AND</tspan> each trigram's <tspan font-weight="700">first bucket</tspan></text>
   <text x="68" y="248" class="step">(each is ≤ one 8 KB roaring container)</text>
   <text x="52" y="280" class="step">→ the most-cited matches, already in</text>
   <text x="68" y="298" class="step">rank order — render the first page</text>
-  <text x="52" y="330" class="step"><tspan font-weight="700">the tail isn't fetched yet</tspan></text>
+  <text x="52" y="330" class="step"><tspan font-weight="700">deeper buckets aren't fetched yet</tspan></text>
   <rect x="52" y="352" width="408" height="58" rx="8" fill="#fff" stroke="#c7d2fe"/>
   <text x="68" y="376" class="step"><tspan font-weight="700">6 popular results</tspan> &#160;<tspan fill="#3b5bdb">· loading the rest…</tspan></text>
   <text x="68" y="396" class="req">first paint, in one wave</text>
@@ -40,12 +40,12 @@
 
   <!-- Panel B: on demand, the full tail -->
   <rect x="500" y="166" width="448" height="344" rx="10" fill="#f8fafc" stroke="#94a3b8"/>
-  <text x="520" y="194" class="box"><tspan class="tag" fill="#64748b">&#9313;</tspan> Then — the full tail (automatic)</text>
+  <text x="520" y="194" class="box"><tspan class="tag" fill="#64748b">&#9313;</tspan> Then — the deeper buckets (automatic)</text>
   <text x="520" y="212" class="req">auto-loads after a sparse head; on demand for a big result set</text>
   <line x1="520" y1="222" x2="928" y2="222" stroke="#e2e8f0"/>
-  <text x="520" y="246" class="step">read the <tspan font-weight="700">rarest</tspan> trigram's tail in full</text>
+  <text x="520" y="246" class="step">read the <tspan font-weight="700">rarest</tspan> trigram's deeper buckets in full</text>
   <text x="536" y="264" class="step">→ a small candidate set of doc IDs</text>
-  <text x="520" y="294" class="step">for every other tail, fetch <tspan font-weight="700">only</tspan> the</text>
+  <text x="520" y="294" class="step">for every other posting, fetch <tspan font-weight="700">only</tspan> the</text>
   <text x="520" y="312" class="step">containers whose key still has a candidate:</text>
 
   <!-- container strip: blue = fetched (candidate keys), grey = skipped -->
@@ -67,12 +67,12 @@
   <text x="520" y="388" class="req">adjacent fetched containers coalesce into one <tspan class="mono">Range</tspan> read</text>
   <text x="520" y="418" class="step"><tspan class="mono">AND</tspan> → the complete result set + exact count</text>
   <text x="520" y="456" class="req" fill="#334155" font-weight="700">cost: ~hundreds of KB across a few dozen reads —</text>
-  <text x="520" y="474" class="req">not the tens of MB of reading every full tail</text>
+  <text x="520" y="474" class="req">not the tens of MB of reading every full posting</text>
 
   <!-- legend + why -->
   <rect x="32" y="524" width="12" height="12" rx="3" fill="#3b5bdb"/>
   <text x="50" y="534" class="req">fetched (candidate keys)</text>
   <rect x="210" y="524" width="12" height="12" rx="3" fill="#cbd5e1"/>
   <text x="228" y="534" class="req">skipped</text>
-  <text x="320" y="534" class="req"><tspan font-weight="700" fill="#3b5bdb">Why it used to be slow:</tspan> a rare phrase of common trigrams matches no popular doc, so the old path intersected every full tail. Now the head answers first; the tail fetches only what survivors touch.</text>
+  <text x="320" y="534" class="req"><tspan font-weight="700" fill="#3b5bdb">Why it used to be slow:</tspan> a rare phrase of common trigrams matches no popular doc, so the old path intersected every full posting. Now bucket 0 answers first; deeper buckets fetch only what survivors touch.</text>
 </svg>

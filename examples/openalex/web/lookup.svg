@@ -23,7 +23,7 @@
   <text x="32" y="176" class="lbl mono">magic &#34;RRIL&#34; · ver · count N</text>
 
   <text x="32" y="214" class="lbl" font-weight="700">binary-search the sorted hashes — halve the window per 16 B probe</text>
-  <text x="948" y="214" class="note mono" text-anchor="end" font-size="11" fill="#94a3b8">≈ ⌈log₂ N⌉ ≈ 26 probes for 47.8M</text>
+  <text x="948" y="214" class="note mono" text-anchor="end" font-size="11" fill="#94a3b8">≈ ⌈log₂ N⌉ ≈ 29 probes for 484M</text>
 
   <g>
     <rect x="32" y="230" width="54" height="34" rx="4" fill="#f1f5f9" stroke="#cbd5e1"></rect>

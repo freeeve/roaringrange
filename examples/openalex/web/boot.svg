@@ -27,7 +27,7 @@
   <text x="145" y="216" class="rest" text-anchor="middle">postings</text>
   <text x="145" y="294" class="file" text-anchor="middle">index.rrs</text>
   <text x="145" y="312" class="boot" text-anchor="middle">boot ~0.5 MB</text>
-  <text x="145" y="327" class="rest mono" text-anchor="middle" font-size="10">of 12.3 GB</text>
+  <text x="145" y="327" class="rest mono" text-anchor="middle" font-size="10">of 113 GB</text>
 
   <!-- index.rrf -->
   <rect x="285" y="96" width="150" height="176" rx="5" fill="url(#hatch)" stroke="#cbd5e1"/>
@@ -37,7 +37,7 @@
   <text x="360" y="205" class="rest" text-anchor="middle">facet tails</text>
   <text x="360" y="294" class="file" text-anchor="middle">index.rrf</text>
   <text x="360" y="312" class="boot" text-anchor="middle">boot ~2.4 MB</text>
-  <text x="360" y="327" class="rest mono" text-anchor="middle" font-size="10">of 231 MB</text>
+  <text x="360" y="327" class="rest mono" text-anchor="middle" font-size="10">of 2.2 GB</text>
 
   <!-- records -->
   <rect x="500" y="96" width="150" height="176" rx="5" fill="url(#hatch)" stroke="#cbd5e1"/>
@@ -47,7 +47,7 @@
   <text x="575" y="213" class="rest" text-anchor="middle">record blobs</text>
   <text x="575" y="294" class="file" text-anchor="middle">records.idx / .bin</text>
   <text x="575" y="312" class="boot" text-anchor="middle">boot ~16 B</text>
-  <text x="575" y="327" class="rest mono" text-anchor="middle" font-size="10">of 9.3 GB</text>
+  <text x="575" y="327" class="rest mono" text-anchor="middle" font-size="10">of 124 GB</text>
 
   <line x1="70" y1="352" x2="650" y2="352" stroke="#e2e8f0"/>
   <rect x="70" y="362" width="13" height="13" rx="3" fill="#3b5bdb"/>

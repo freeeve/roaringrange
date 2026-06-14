@@ -275,15 +275,16 @@
     <p class="eyebrow">Powered by RoaringRange</p>
     <h1 class="hero-title">Searching half a billion papers, with <em>no server.</em></h1>
     <p class="lead">
-      This <b>RoaringRange</b> demo searches OpenAlex works entirely in your browser, with <b>no backend</b>.
-      The index is one static file on S3, and a query fetches just a few small byte-ranges over HTTP —
-      never the whole file. It's powered by <a href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener"><b>RoaringRange</b></a>, and inspired by
+      This <b>RoaringRange</b> demo can search OpenAlex works entirely in your browser, with <b>no backend</b>
+      — or hand a query to a tiny regional Lambda when you want raw speed (the trigram default). Either way the
+      index is one static file on S3, and a query fetches just a few small byte-ranges over HTTP — never the
+      whole file. It's powered by <a href="https://github.com/freeeve/roaringrange" target="_blank" rel="noopener"><b>RoaringRange</b></a>, and inspired by
       <a href="https://lunrjs.com/" target="_blank" rel="noopener">Lunr.js</a> and
       <a href="https://pagefind.app/" target="_blank" rel="noopener">Pagefind</a>.
     </p>
     <div class="specs reveal">
       <div class="spec"><div class="num">484<small>M</small></div><div class="lbl">OpenAlex works indexed</div></div>
-      <div class="spec"><div class="num">0</div><div class="lbl">servers · backends</div></div>
+      <div class="spec"><div class="num">0</div><div class="lbl">backends required</div></div>
       <div class="spec"><div class="num">~3<small>MB</small></div><div class="lbl">downloaded at boot</div></div>
       <div class="spec"><div class="num">KB&ndash;MB</div><div class="lbl">fetched per query</div></div>
     </div>
@@ -565,7 +566,7 @@
   <text x="145" y="216" class="rest" text-anchor="middle">postings</text>
   <text x="145" y="294" class="file" text-anchor="middle">index.rrs</text>
   <text x="145" y="312" class="boot" text-anchor="middle">boot ~0.5 MB</text>
-  <text x="145" y="327" class="rest mono" text-anchor="middle" font-size="10">of 12.3 GB</text>
+  <text x="145" y="327" class="rest mono" text-anchor="middle" font-size="10">of 113 GB</text>
 
   
   <rect x="285" y="96" width="150" height="176" rx="5" fill="url(#hatch)" stroke="#cbd5e1"></rect>
@@ -575,7 +576,7 @@
   <text x="360" y="205" class="rest" text-anchor="middle">facet tails</text>
   <text x="360" y="294" class="file" text-anchor="middle">index.rrf</text>
   <text x="360" y="312" class="boot" text-anchor="middle">boot ~2.4 MB</text>
-  <text x="360" y="327" class="rest mono" text-anchor="middle" font-size="10">of 231 MB</text>
+  <text x="360" y="327" class="rest mono" text-anchor="middle" font-size="10">of 2.2 GB</text>
 
   
   <rect x="500" y="96" width="150" height="176" rx="5" fill="url(#hatch)" stroke="#cbd5e1"></rect>
@@ -585,7 +586,7 @@
   <text x="575" y="213" class="rest" text-anchor="middle">record blobs</text>
   <text x="575" y="294" class="file" text-anchor="middle">records.idx / .bin</text>
   <text x="575" y="312" class="boot" text-anchor="middle">boot ~16 B</text>
-  <text x="575" y="327" class="rest mono" text-anchor="middle" font-size="10">of 9.3 GB</text>
+  <text x="575" y="327" class="rest mono" text-anchor="middle" font-size="10">of 124 GB</text>
 
   <line x1="70" y1="352" x2="650" y2="352" stroke="#e2e8f0"></line>
   <rect x="70" y="362" width="13" height="13" rx="3" fill="#3b5bdb"></rect>
@@ -692,7 +693,7 @@
   <rect x="520" y="452" width="12" height="12" rx="3" fill="#64748b"></rect>
   <text x="538" y="462" class="req">range-fetched per query</text>
   <rect x="694" y="452" width="12" height="12" rx="3" fill="#0d9488"></rect>
-  <text x="712" y="462" class="req">live · Gemma Lambda</text>
+  <text x="712" y="462" class="req">parked · Gemma Lambda</text>
 
   <text x="32" y="496" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">VectorIndex::open(f).search(query_vec, k, nprobe) → [ VectorHit { doc_id, score } ]</tspan></text>
 </svg></div>
@@ -855,7 +856,7 @@
           <div class="facet"><div class="fname">DOI lookup</div><span class="fkey">.rril · RRIL · ~4.5 GB</span><div class="fdesc">A DOI, or a <code>doi.org</code> URL, straight to its doc ID in a couple of reads.</div></div>
           <div class="facet"><div class="fname">Record store</div><span class="fkey">.idx / .bin (+ .dict) · RRSR · ~119 GB</span><div class="fdesc">Doc ID → the stored card fields, zstd-compressed against a trained dictionary.</div></div>
           <div class="facet"><div class="fname">BM25 impacts</div><span class="fkey">.rrb · RRSB · ~35 GB</span><div class="fdesc">Lexical-relevance rerank for the term index — one quantized impact byte per (word, doc).</div></div>
-          <div class="facet"><div class="fname">Split sets</div><span class="fkey">.rrss + .rrhc · RRSS</span><div class="fdesc">Byte-capped immutable splits, pruned queries — a 120 GB / 389-split trigram set and a 61 GB / 243-split term set.</div></div>
+          <div class="facet"><div class="fname">Split sets</div><span class="fkey">.rrss · RRSS</span><div class="fdesc">Byte-capped immutable splits, pruned queries — a geometric 19-tier trigram set (~109 GB) and a 12-tier term set (~53 GB); the demo's default client-side trigram/term backend.</div></div>
           <div class="facet"><div class="fname">Sort columns</div><span class="fkey">.rrsc · RRSC</span><div class="fdesc">Secondary sort keys &amp; full second indexes — client-side re-rank, e.g. newest-first.</div></div>
         </div>
 
@@ -1432,7 +1433,7 @@
 
   <text x="32" y="468" class="note" font-size="11"><tspan font-weight="700" fill="#3b5bdb">Rust</tspan>  <tspan class="mono">SplitSet::open(manifest).search(query, k, fetcher) → ranked doc IDs · pruned splits never fetched</tspan></text>
 </svg></div>
-          <figcaption>The split set replaces nothing: each split is a vanilla <code>.rrs</code> (or <code>.rrt</code>) — one split is exactly today&rsquo;s monolith — and only the <b>manifest</b> (<code>.rrss</code>) is new, carrying the cross-split pruning metadata (rank tier, doc-ID range, byte size, and optional term-Bloom / facet-presence / tombstone summaries). The bandwidth win is <b>pruning</b>, not log-structuredness: because doc IDs are rank-ordered, a top-K query reads only the top tier and leaves the cold tail in S3. A <code>.rrhc</code> boot bundle inlines the manifest plus the top tier&rsquo;s split boots so N splits still boot in 1–2 round trips, and a small base&nbsp;+&nbsp;delta lifecycle absorbs freshly-added docs without a full rebuild. The demo publishes both a 389-split trigram set and a 243-split term set.</figcaption>
+          <figcaption>The split set replaces nothing: each split is a vanilla <code>.rrs</code> (or <code>.rrt</code>) — one split is exactly today&rsquo;s monolith — and only the <b>manifest</b> (<code>.rrss</code>) is new, carrying the cross-split pruning metadata (rank tier, doc-ID range, byte size, and optional term-Bloom / facet-presence / tombstone summaries). The bandwidth win is <b>pruning</b>, not log-structuredness: because doc IDs are rank-ordered, a top-K query reads only the top tier and leaves the cold tail in S3. The tiers size <b>geometrically</b> (per-tier byte caps double down the rank order), so a worst-case descent is ~log-many split visits, and a small base&nbsp;+&nbsp;delta lifecycle absorbs freshly-added docs without a full rebuild. The demo publishes a 19-tier trigram set and a 12-tier term set; each manifest is ~1&nbsp;KB (no per-split summaries), so the whole set boots in one GET.</figcaption>
         </figure>
       </section>
 
@@ -1442,60 +1443,68 @@
           <div class="sect-kicker"><span class="sect-num">05</span><span class="sect-tag">What it costs &mdash; honestly</span></div>
           <h2 class="sect-title">The economics</h2>
           <p class="sect-intro">
-            The unit of cost here is <b>bytes egressed per query</b>. Storage is nearly free &mdash; the entire 484M
-            index family on this page (trigram + term + vector + split set + records + sidecars, ~360&nbsp;GB) costs
-            about <b>$9/month</b> on S3 &mdash; and there is <b>no idle cost</b>: nothing runs when nobody searches.
+            The unit of cost is <b>bytes moved per query</b> &mdash; this demo&rsquo;s link is bandwidth-bound
+            (measured ~1&ndash;3.5&nbsp;MB/s down, ~150&ndash;200&nbsp;ms RTT), so per-query bytes, not CPU, set wall
+            time. Storage is nearly free &mdash; the full 484M index family (trigram monolith + term + vector +
+            records + facet sidecars + the geometric trigram and term split sets + the BM25 <code>.rrb</code>
+            sidecar, ~550&nbsp;GB) is about <b>$13/month</b> on S3 &mdash; and there is <b>no idle cost</b>. Trigram
+            <b>defaults to a regional <code>/search</code> Lambda</b> (~1&ndash;3&nbsp;KB, ~0.66&nbsp;s, faceting
+            included); the client-side range-read modes &mdash; searchable with <em>no backend at all</em> &mdash;
+            are one toggle away, and that&rsquo;s where bytes climb.
           </p>
         </div>
 
         <h3 class="sub">What one query moves</h3>
         <p class="body">
           What grows with the corpus is the <em>density of common postings</em> — a trigram like <code>ing</code>
-          appears in a constant fraction of documents, so its bitmap grows linearly with the corpus. Per-query bytes
-          by mode, at full scale and at a tenth of it:
+          appears in a constant fraction of documents, so its bitmap grows linearly with the corpus. Measured per
+          query at 484M, by mode (with the one-time resident boot each mode pays on first use):
         </p>
         <table class="costs">
-          <tr><th>per query (warm boot)</th><th>484M works</th><th>at 1/10th scale</th></tr>
-          <tr><td>term mode (<code>.rrt</code>)</td><td>~0.1&ndash;0.5 MB</td><td>~10&ndash;50 KB</td></tr>
-          <tr><td>trigram</td><td>~1&ndash;10 MB</td><td>~0.1&ndash;1 MB</td></tr>
-          <tr><td>semantic (8 IVFPQ cluster probes)</td><td>~8&ndash;10 MB</td><td>~1 MB</td></tr>
-          <tr><td>records page (25 cards)</td><td>~25&ndash;50 KB</td><td>same</td></tr>
-          <tr><td>worst case (broad facet filter, exact count)</td><td>~90 MB+</td><td>~9 MB</td></tr>
+          <tr><th>mode (484M, warm)</th><th>per query</th><th>resident boot</th></tr>
+          <tr><td>trigram &mdash; server (default)</td><td class="win"><b>~1&ndash;3 KB</b></td><td>none</td></tr>
+          <tr><td>trigram &mdash; client geo split</td><td>~240&ndash;300 KB</td><td>~1.5 KB</td></tr>
+          <tr><td>trigram &mdash; client monolith</td><td>~0.87&ndash;1.07 MB</td><td>~1.7 MB</td></tr>
+          <tr><td>term &mdash; client geo split</td><td>~40&ndash;270 KB</td><td>~1 KB</td></tr>
+          <tr><td>term &mdash; client monolith</td><td>~15&ndash;20 KB</td><td>~76 MB</td></tr>
+          <tr><td>semantic (8 IVFPQ probes)</td><td>~2&ndash;9.6 MB</td><td>~64 MB</td></tr>
+          <tr><td>records page (25 cards)</td><td>~25&ndash;50 KB</td><td>&mdash;</td></tr>
+          <tr><td>client facet filter</td><td>~52 MB (full posting)</td><td>&mdash;</td></tr>
+          <tr><td>server facet filter</td><td class="win"><b>~2 KB</b></td><td>none</td></tr>
         </table>
         <p class="body">
-          That last column is the point: at a tenth of this corpus, an average query is ~0.4&nbsp;MB &mdash; under
-          200&nbsp;ms of transfer on a modest mobile connection &mdash; and <em>millions</em> of monthly queries fit
-          inside a CDN free tier. The architecture&rsquo;s sweet spot is <b>large corpus &times; modest traffic</b>,
-          and it widens fast as the corpus shrinks. And because doc&nbsp;ID == citation rank, the 1/10th-scale
-          column is <a href="index.html?ds=lite">live right now</a>: a 3.4&nbsp;KB manifest listing only the
-          top-cited splits searches the top&nbsp;47.6M works through the <em>same</em> deployed files — no new
-          index, just a shorter table of contents.
+          The split sets cut client bytes by <b>pruning</b> (read only the tiers that can match) and geometric
+          tiering caps a worst-case descent at ~log-many visits; faceting and exact totals are where client-side
+          hurts (the whole category posting is tens of MB) &mdash; exactly what the server path collapses to a
+          couple of KB. The sweet spot is <b>large corpus &times; modest traffic</b>, and it widens as the corpus
+          shrinks: at a tenth of the corpus an average client query is well under ~0.4&nbsp;MB / ~200&nbsp;ms (the
+          demo serves only the full corpus &mdash; the earlier 1/10th-scale tier was retired).
         </p>
 
         <h3 class="sub">The monthly bill, vs a backend</h3>
         <p class="body">
-          Behind CloudFront (1&nbsp;TB + 10M requests/month free), assuming a ~4&nbsp;MB / ~12 range-GET average query
-          at full 484M scale. The Lambda column is this demo&rsquo;s own server-side toggle: the <em>same intersection
-          over the same files</em>, run in-region where S3 bandwidth is free, returning only result IDs.
+          Behind CloudFront (1&nbsp;TB + 10M requests/month free), baselined on the <b>server default</b>
+          (~2&nbsp;KB/query) and a representative <b>client</b> query (geo split, ~0.3&nbsp;MB / ~30 range-GETs).
+          The Lambda runs the <em>same intersection over the same files</em>, in-region where S3 bandwidth is free,
+          returning only result IDs + facet counts.
         </p>
         <table class="costs">
-          <tr><th>queries / month</th><th>client-side (this page)</th><th>+ search Lambda</th><th>always-on server</th><th>managed search</th></tr>
-          <tr><td>10k &ndash; 100k</td><td class="win"><b>~$9</b> (inside free tier)</td><td>~$9</td><td>~$100&ndash;150 flat</td><td>$700+</td></tr>
-          <tr><td>1M</td><td>~$265</td><td class="win"><b>~$20</b></td><td>~$100&ndash;150</td><td>$700+</td></tr>
-          <tr><td>10M</td><td>~$3,400</td><td class="win"><b>~$110&ndash;150</b></td><td>~$150+</td><td>$1,500+</td></tr>
+          <tr><th>queries / month</th><th>server default (this)</th><th>client range reads</th><th>always-on server</th><th>managed search</th></tr>
+          <tr><td>10k &ndash; 100k</td><td class="win"><b>~$13</b> (inside free tier)</td><td>~$13</td><td>~$100&ndash;150 flat</td><td>$700+</td></tr>
+          <tr><td>1M</td><td class="win"><b>~$20</b></td><td>~$30&ndash;50</td><td>~$100&ndash;150</td><td>$700+</td></tr>
+          <tr><td>10M</td><td class="win"><b>~$110&ndash;150</b></td><td>~$300&ndash;400</td><td>~$150+</td><td>$1,500+</td></tr>
         </table>
 
         <div class="rule">
           <span class="rk">Trade</span>
-          <span class="rt">Below a few hundred thousand queries a month, nothing is cheaper or lower-ops than static files — no server to patch or scale, and in the in-browser semantic mode the query text <b>never leaves the browser</b>. Past that, egress costs 1&ndash;2 orders of magnitude more per query than the in-region Lambda. The two compose: the same artifacts serve both.</span>
+          <span class="rt">Below a few hundred thousand queries a month, nothing is cheaper or lower-ops than static files &mdash; server or client, you&rsquo;re inside the CDN free tier with no box to babysit, and in the in-browser semantic mode the query text <b>never leaves the browser</b>. For interactive latency on a modest connection the server path wins decisively (KB not MB, no 64&ndash;76&nbsp;MB client boots); the client-side modes stay to demonstrate the no-backend story and its tradeoffs. The two compose: the same artifacts serve both.</span>
         </div>
 
         <p class="body">
-          So the production shape is client-side by default with the Lambda as an <b>escape valve</b> for the
-          expensive tail (very common terms, broad facet filters, exact counts). And because the dictionary records
-          every posting&rsquo;s byte size, the client can estimate a query&rsquo;s cost <em>before fetching anything</em>
-          and route the expensive ones automatically &mdash; the &ldquo;server-side search&rdquo; toggle above is that
-          escape valve operated by hand.
+          So the demo&rsquo;s production shape is now <b>server-side by default</b> with the client-side range-read
+          modes as the no-backend option. And because the dictionary records every posting&rsquo;s byte size, the
+          client can estimate a query&rsquo;s cost <em>before fetching anything</em> and auto-route the expensive
+          ones to the Lambda &mdash; the &ldquo;server-side search&rdquo; toggle is that routing made explicit.
         </p>
       </section>
     </main>
