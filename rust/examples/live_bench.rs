@@ -187,23 +187,22 @@ fn main() {
         VectorIndex::open(fetch("openalex-484m.rrvi"))
     );
     let facets = boot!("facets .rrf", FacetIndex::open(fetch("openalex-full.rrf")));
-    // Both deployed split manifests are summary-stripped and tiny (trigram ~29 KB,
-    // term ~21 KB), so they always open. (The SPLIT_BENCH=1 gate guarded the old
-    // 727 MB Bloom-dominated trigram manifest, gone since the strip.)
+    // The live geometric split manifests are tiny (no per-split summaries): trigram
+    // ~1.5 KB / 19 tiers, term ~1 KB / 12 tiers. Both open in one GET.
     let split = Some(boot!(
         "tri split .rrss",
-        SplitSet::open(fetch("openalex-trigram-split/openalex.rrss"))
+        SplitSet::open(fetch("openalex-trigram-geo/openalex.rrss"))
     ));
     let term_split = Some(boot!(
         "term split .rrss",
-        SplitSet::open(fetch("openalex-split/openalex-484m-terms.rrss"))
+        SplitSet::open(fetch("openalex-term-geo/openalex-484m-terms.rrss"))
     ));
     let sres = CurlSplits {
-        base: format!("{base}/openalex-trigram-split"),
+        base: format!("{base}/openalex-trigram-geo"),
         c: c.clone(),
     };
     let tsres = CurlSplits {
-        base: format!("{base}/openalex-split"),
+        base: format!("{base}/openalex-term-geo"),
         c: c.clone(),
     };
     let m2v_bytes = curl_whole(&format!("{base}/potion.rrm2"));
