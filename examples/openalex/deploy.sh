@@ -7,7 +7,7 @@
 #   ./deploy.sh --no-build       skip the wasm-pack build; deploy the reader already in web/
 #   ./deploy.sh --data DIR       ALSO upload the built index/record files from DIR
 #   ./deploy.sh --splits DIR     ALSO upload a split set (.rrss + per-split .rrs/.rrf) from DIR
-#   ./deploy.sh --splits-prefix P  S3 prefix for --splits (default openalex-trigram-split,
+#   ./deploy.sh --splits-prefix P  S3 prefix for --splits (default openalex-trigram-geo,
 #                                  what index.html's `split` config reads)
 #   ./deploy.sh --rrhc FILE      ALSO upload the catalog boot bundle, content-hashed +
 #                                immutable, and rewrite the HTML to reference it
@@ -37,7 +37,7 @@ WEB="$HERE/web"
 
 DATA_DIR=""
 SPLITS_DIR=""
-SPLITS_PREFIX="openalex-trigram-split"
+SPLITS_PREFIX="openalex-trigram-geo"
 RRHC_FILE=""
 NO_BUILD=""
 while [[ $# -gt 0 ]]; do
@@ -132,10 +132,10 @@ fi
 # Split-set artifacts: the `.rrss` manifest, the `.rrhc` boot bundle, the per-split
 # `.rrs`/`.rrt`/`.rrf` files, and (if the set ships one) its own record store
 # `*-records.{idx,bin}`. Uploaded under $SPLITS_PREFIX, which must match the `split` URLs in
-# index.html's DATASETS config — the live trigram split set reads `openalex-trigram-split/`
+# index.html's DATASETS config — the live trigram split set reads `openalex-trigram-geo/`
 # (the default; it shares the monolith's root `records-full` store, so it uploads no records
-# of its own). Use --splits-prefix for a different set (the term set lives at
-# `openalex-split/` with its own `*-records.{idx,bin}`). Versioned/immutable like the
+# of its own). Use --splits-prefix for a different set (the term geo set lives at
+# `openalex-term-geo/`). Versioned/immutable like the
 # monolith data files, so the cache is never invalidated.
 if [[ -n "$SPLITS_DIR" ]]; then
   echo "==> split-set artifacts <- $SPLITS_DIR -> s3://$BUCKET/$SPLITS_PREFIX/ (immutable; only changed files upload)"
