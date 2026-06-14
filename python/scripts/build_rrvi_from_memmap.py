@@ -24,9 +24,10 @@ os.environ.setdefault("OMP_NUM_THREADS", "4")
 
 import sys  # noqa: E402
 
-# faiss and torch each bundle an OpenMP runtime; on macOS faiss must be imported AFTER torch
-# (same workaround as build_full_rrvi_gemma.py) or training SIGBUSes.
-import torch  # noqa: E402,F401
+# This script only TRAINS over an existing memmap — it never embeds, so do NOT import torch:
+# torch and faiss-cpu each bundle their own OpenMP runtime, and loading both on macOS arm64
+# SIGSEGVs inside faiss training (faiss-cpu 1.14.3). KMP_DUPLICATE_LIB_OK (set above) covers
+# the numpy-BLAS-vs-faiss OpenMP overlap; faiss alone trains cleanly.
 import faiss  # noqa: E402,F401
 import numpy as np  # noqa: E402
 
