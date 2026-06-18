@@ -65,6 +65,15 @@ pub fn serialize_posting(bm: &RoaringBitmap) -> Vec<u8> {
 /// — one portable RoaringBitmap per term (from [`serialize_posting`]), no head/tail split.
 /// Entries are sorted by key here (the dictionary must be key-sorted). A `stride` of 0 becomes
 /// [`DEFAULT_STRIDE`]. See `FORMAT.md`.
+/// Narrows a serialized **byte** length to the `u32` an on-disk size field holds,
+/// erroring rather than silently truncating past the 4 GiB format limit. Entity
+/// *counts* are already bounded by the `u32` doc-ID space and need no guard;
+/// serialized byte lengths (postings) are the field that isn't, so they go through
+/// here. `what` names the field for the error.
+fn u32_len(n: usize, what: &str) -> io::Result<u32> {
+    u32::try_from(n).map_err(|_| io::Error::other(format!("{what} size exceeds the 32-bit limit")))
+}
+
 /// Writes the `RRS` sparse index: every `stride`-th entry's `u64` key, little-
 /// endian. Shared by the one-shot [`write_index`] and the chunked
 /// [`chunk::merge_partials_to_rrs`] so the two layouts can't drift.
@@ -113,7 +122,7 @@ pub fn write_index<W: Write>(
     for (key, posting) in &entries {
         w.write_all(&key.to_le_bytes())?;
         w.write_all(&off.to_le_bytes())?;
-        w.write_all(&(posting.len() as u32).to_le_bytes())?;
+        w.write_all(&u32_len(posting.len(), "RRS posting")?.to_le_bytes())?;
         off += posting.len() as u64;
     }
 
@@ -226,8 +235,8 @@ pub fn write_facets<W: Write>(mut w: W, fields: Vec<FacetField>) -> io::Result<(
         for c in &fo.cats {
             w.write_all(&c.key.to_le_bytes())?;
             w.write_all(&off.to_le_bytes())?;
-            w.write_all(&(c.head.len() as u32).to_le_bytes())?;
-            w.write_all(&(c.tail.len() as u32).to_le_bytes())?;
+            w.write_all(&u32_len(c.head.len(), "RRSF head posting")?.to_le_bytes())?;
+            w.write_all(&u32_len(c.tail.len(), "RRSF tail posting")?.to_le_bytes())?;
             w.write_all(&c.card.to_le_bytes())?;
             w.write_all(&c.name_off.to_le_bytes())?;
             w.write_all(&c.name_len.to_le_bytes())?;
@@ -702,7 +711,7 @@ pub mod chunk {
         w.write_all(&(entries.len() as u32).to_le_bytes())?;
         for (k, b) in &entries {
             w.write_all(&k.to_le_bytes())?;
-            w.write_all(&(b.len() as u32).to_le_bytes())?;
+            w.write_all(&super::u32_len(b.len(), "RRS partial posting")?.to_le_bytes())?;
             w.write_all(b)?;
         }
         Ok(())
@@ -813,7 +822,7 @@ pub mod chunk {
             }
             let posting = serialize_posting(&merged);
             out.write_all(&posting)?;
-            dict.push((key, off, posting.len() as u32));
+            dict.push((key, off, super::u32_len(posting.len(), "RRS posting")?));
             off += posting.len() as u64;
         }
 

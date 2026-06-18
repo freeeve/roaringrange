@@ -27,11 +27,18 @@ in the header.
   the 4-char code (RRSF/RRSC/RRSR/RRTI/RRSS): `facet.rs`, `sortcols.rs`,
   `records.rs`, `terms.rs`, `terms_build.rs`, `splitset.rs`, `splitset_write.rs`
   (the `compact:` paths). Mechanical, no behavior change.
-- **F2 — inconsistent `usize→u32` truncation guards `[MEDIUM]` — TODO.** On-disk
-  size fields are u32; some sites `try_into()`-guard → clean error
-  (`splitset_build.rs:109`), many bare-`as u32` silently truncate (`build.rs:102,
-  156,179,197,499`; `splitset_write.rs:428,492`; `splitset_build.rs:351,371`).
-  Make guarding uniform (error, not silent truncation).
+- **F2 — `usize→u32` truncation guards `[MEDIUM]` — DONE (scoped).** The agents
+  flagged ~9 sites but there are ~20 bare `.len() as u32` casts. **Principled
+  scope:** T1 already proved entity *counts* can't exceed the `u32` doc-ID space, so
+  only serialized **byte** lengths are a genuine overflow vector — and among those,
+  postings are the large ones. Added a `u32_len(n, what) -> io::Result<u32>` helper
+  in `build.rs` and routed the posting-byte casts through it (`write_index`,
+  `write_facets` head/tail, `chunk::write_partial`, `chunk::merge`) — error, not
+  silent truncation, past 4 GiB. **Left bare (documented):** entity-count casts
+  (T1-bounded) and the byte casts inside non-`Result` helpers (`facet_presence`,
+  `facet_fields`, `tombstone_tlv` — all carry split-cap-bounded values). Practically
+  unreachable even at the 105 GB OpenAlex corpus (largest posting ≪ 4 GiB); this is
+  corrupt-artifact-prevention robustness, not a live bug.
 - **F3 — error-TYPE convention `[MEDIUM, DEFERRED]`.** `VectorBuildError` enum
   (vector_build only) vs `io::Error::other("string")` (everyone else) vs
   `IndexError` (readers); `vector_build` is inconsistent with itself
@@ -41,9 +48,10 @@ in the header.
   (`From<io::Error>`/`Display`/`Error`); the pragmatic-good for this no-deps,
   internal-tooling crate is format-prefixed `io::Error::other` (which F1 delivers).
   Deferred by decision — revisit if the build side grows a public, matched-on API.
-- **F4 — build-side duplication `[MEDIUM]` — partial.** (a) `build.rs` sparse-index
-  emission is **byte-identical** in `write_index` (93–95) and
-  `merge_partials_to_rrs` (813–815) — extract a shared helper. **TODO.** (b) splitset
+- **F4 — build-side duplication `[MEDIUM]` — partial.** (a) **DONE** — `build.rs`
+  sparse-index emission was **byte-identical** in `write_index` and
+  `merge_partials_to_rrs`; extracted `write_sparse_index(w, entries, sparse_count,
+  stride, key)`, called from both (build_tests round-trip unchanged). (b) splitset
   `SplitSetBuilder` vs `TermSplitSetBuilder` share ~70–80% of `add_*`/`seal`/
   `drain_sealed` — a shared token-extractor/encoder seam would dedup it. **DEFERRED**
   (larger refactor, real risk; do as its own task).
