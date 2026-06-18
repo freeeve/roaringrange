@@ -20,7 +20,7 @@ use crate::records::RecordStore;
 /// page plus, when the corresponding resource is attached, their record bytes
 /// and the search-filtered facet counts.
 pub struct SearchPage {
-    /// Ranked doc IDs for the requested `[offset, offset+len)` window, most
+    /// Ranked doc IDs for the requested `[offset, offset+limit)` window, most
     /// popular first (ascending doc ID == descending popularity).
     pub ids: Vec<u32>,
     /// Record bytes aligned with `ids`, present only when a record store is
@@ -89,7 +89,7 @@ impl<F: RangeFetch + Clone> Catalog<F> {
     /// sidecar is attached. The order matches [`SearchPage::facet_counts`].
     pub fn fields(&self) -> &[crate::facet::Field] {
         match &self.facets {
-            Some(f) => &f.fields,
+            Some(f) => f.fields(),
             None => &[],
         }
     }
@@ -115,7 +115,7 @@ impl<F: RangeFetch + Clone> Catalog<F> {
     /// across-field AND), resolved against the facet sidecar when one is attached
     /// and ignored otherwise. `max_missing` is the fuzzy tolerance forwarded to
     /// the cursor (0 = strict AND of every n-gram). The page covers ranked doc
-    /// IDs `[offset, offset+len)`.
+    /// IDs `[offset, offset+limit)`.
     ///
     /// When a record store is attached the page's record bytes are fetched; when
     /// a facet sidecar is attached the search-filtered facet counts over the
@@ -124,7 +124,7 @@ impl<F: RangeFetch + Clone> Catalog<F> {
         &self,
         query: &str,
         offset: usize,
-        len: usize,
+        limit: usize,
         max_missing: usize,
         filter: &[(String, String)],
     ) -> Result<SearchPage, IndexError> {
@@ -137,7 +137,7 @@ impl<F: RangeFetch + Clone> Catalog<F> {
             .search_cursor_filtered(query, max_missing, resolved)
             .await?;
 
-        let ids = cursor.page(offset, len).await?;
+        let ids = cursor.page(offset, limit).await?;
 
         let records = match &self.records {
             Some(store) => Some(store.get_many(&ids).await?),

@@ -176,7 +176,9 @@ pub struct FileFetch {
 
 #[cfg(unix)]
 impl FileFetch {
-    /// Opens `path` read-only.
+    /// Opens `path` read-only. Note this `open` is **synchronous** (a local file
+    /// handle, like [`std::fs::File::open`]); the range-fetchable index readers'
+    /// `open` is async and returns [`crate::IndexError`].
     pub fn open(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         Ok(Self {
             file: std::sync::Arc::new(std::fs::File::open(path)?),

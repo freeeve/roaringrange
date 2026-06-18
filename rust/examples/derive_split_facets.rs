@@ -49,7 +49,7 @@ fn main() {
     // disk; resident roaring across the bounded fields is a few GB), then slice all
     // splits from memory.
     let mut cats: Vec<(String, String, RoaringBitmap)> = Vec::new();
-    for f in &mono.fields {
+    for f in mono.fields() {
         if !fields.contains(&f.name) {
             eprintln!("skipping field {:?} ({} cats)", f.name, f.categories.len());
             continue;

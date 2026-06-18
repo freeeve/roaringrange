@@ -765,7 +765,7 @@ impl SplitSet {
                     Err(_) => continue, // a split with no facet sidecar contributes nothing
                 };
             let counts = facets.counts(&local); // Vec<Vec<u64>> aligned to facets.fields
-            for (fi, field) in facets.fields.iter().enumerate() {
+            for (fi, field) in facets.fields().iter().enumerate() {
                 let fp = *field_pos.entry(field.name.clone()).or_insert_with(|| {
                     fields.push(FieldCounts {
                         field: field.name.clone(),

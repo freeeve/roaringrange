@@ -273,7 +273,7 @@ fn facets_array_js(fields: &[Field], counts: &[Vec<u64>]) -> Array {
 /// }] }` (counts computed in memory); an empty array when no facet sidecar is open.
 fn facet_counts_js(facets: Option<&FacetIndex<WasmFetch>>, head: &RoaringBitmap) -> JsValue {
     match facets {
-        Some(facets) => facets_array_js(&facets.fields, &facets.counts(head)).into(),
+        Some(facets) => facets_array_js(facets.fields(), &facets.counts(head)).into(),
         None => Array::new().into(),
     }
 }
@@ -291,7 +291,7 @@ fn facets_meta_array(fields: &[Field]) -> Array {
 /// [`facets_meta_array`] over an optional sidecar; an empty array when no sidecar is present.
 fn facets_meta_js(facets: Option<&FacetIndex<WasmFetch>>) -> JsValue {
     match facets {
-        Some(facets) => facets_meta_array(&facets.fields).into(),
+        Some(facets) => facets_meta_array(facets.fields()).into(),
         None => Array::new().into(),
     }
 }

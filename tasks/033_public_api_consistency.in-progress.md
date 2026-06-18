@@ -181,4 +181,21 @@ Legend: 🟢 additive/non-breaking · ⚠️ breaking · markers are per-item.
   idiom (a plain enum can't model combinable flags), so a hand-rolled newtype is
   modest type-safety for real churn + no-new-deps constraint. Revisit only if the
   cross-type flag mixing becomes a concern.
-- Steps 3–8: pending.
+- **Step 3 — N1 — DONE (committed `7a60d0b`).** Added `FacetIndex::from_boot(meta,
+  fetch)` (the zero-extra-fetch boot constructor the other readers expose), wrapping
+  the existing `FacetMeta::parse`+`attach`; `open_meta`/`open_tuned`/the wasm
+  `openFacetsFromBoot` route through it. Fixes the pre-existing dangling
+  `FacetIndex::from_boot` doc links. `SplitSet`/`Model2vec` keep `from_bytes`
+  (self-contained parses, no fetch pairing — a distinct, correct case).
+- **Step 4 — N2 + S2 + S3 — DONE (uncommitted).** N2: `Catalog::search`'s page-size
+  param `len` → `limit` (the one real `limit`-cap inconsistency; `search_candidates`'s
+  `k` is genuinely algorithmic — count of rarest postings to intersect — so it keeps
+  `k`, as do vector `search`/`topk`/`search_bm25`/`rerank`). S2: `FacetIndex.fields`
+  public field → private + `fields()` getter (matches every other reader's
+  encapsulation); updated ~12 call sites across catalog/secondary/splitset/wasm/build
+  + 2 examples + tests. S3: doc note on `FileFetch::open` clarifying it is the
+  synchronous file-handle `open` (vs the async fetch-ctor `open` everywhere else).
+  Verified: tests pass, clippy 0 errors, fmt clean, wasm + python compile.
+- Steps remaining: N4 (`with_*`→`load_*` for fetching variants), N5 (`values`→
+  `get_many`), T1 (`len()` integer type), S1 (shared `Cursor` trait), N3 (wasm
+  `Rrs*` renames). T4-flags deferral noted in Step 2.

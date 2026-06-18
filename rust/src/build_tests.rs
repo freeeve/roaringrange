@@ -713,8 +713,8 @@ fn facet_filtering_within_or_across_and() {
     .unwrap();
 
     // Metadata is available without fetching postings.
-    assert_eq!(facets.fields.len(), 2);
-    let fmt = facets.fields.iter().find(|f| f.name == "format").unwrap();
+    assert_eq!(facets.fields().len(), 2);
+    let fmt = facets.fields().iter().find(|f| f.name == "format").unwrap();
     assert_eq!(
         fmt.categories
             .iter()
@@ -800,10 +800,10 @@ fn facet_open_lazy_loads_only_top_n_heads_per_field() {
     )]);
     let facets = block_on(FacetIndex::open_tuned(MemoryFetch::new(rrsf), 0, 1)).unwrap();
     // Full-corpus counts (from the meta) are intact for both categories.
-    assert_eq!(facets.fields[0].categories[0].count, 3); // ebook
-    assert_eq!(facets.fields[0].categories[1].count, 2); // audiobook
-                                                         // Filtered counts over {1,2,3}: ebook (top-1, head loaded) = 3; audiobook
-                                                         // (beyond top-1, head not loaded) = 0.
+    assert_eq!(facets.fields()[0].categories[0].count, 3); // ebook
+    assert_eq!(facets.fields()[0].categories[1].count, 2); // audiobook
+                                                           // Filtered counts over {1,2,3}: ebook (top-1, head loaded) = 3; audiobook
+                                                           // (beyond top-1, head not loaded) = 0.
     assert_eq!(facets.counts(&bm(&[1, 2, 3])), vec![vec![3u64, 0]]);
 }
 

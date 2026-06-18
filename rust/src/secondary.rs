@@ -85,7 +85,7 @@ impl<F: RangeFetch + Clone> SecondaryIndex<F> {
     /// sidecar is attached. Same shape as the primary order's fields.
     pub fn fields(&self) -> &[Field] {
         match &self.facets {
-            Some(f) => &f.fields,
+            Some(f) => f.fields(),
             None => &[],
         }
     }

@@ -14,7 +14,7 @@ fn main() {
     println!("meta bytes: {}", buf.len());
     let meta = FacetMeta::parse(buf).expect("parse RRSF meta");
     let idx = meta.attach(roaringrange::MemoryFetch::new(Vec::new()));
-    for f in &idx.fields {
+    for f in idx.fields() {
         let total: u64 = f.categories.iter().map(|c| u64::from(c.count)).sum();
         println!(
             "  field {:<12} {:>6} cats  {:>13} total members",

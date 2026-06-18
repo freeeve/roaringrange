@@ -900,11 +900,11 @@ mod tests {
             out
         };
         let facets = block_on(FacetIndex::open(MemoryFetch::new(buf))).unwrap();
-        assert_eq!(facets.fields.len(), 2);
-        let fmt = facets.fields.iter().find(|f| f.name == "format").unwrap();
+        assert_eq!(facets.fields().len(), 2);
+        let fmt = facets.fields().iter().find(|f| f.name == "format").unwrap();
         let ebook = fmt.categories.iter().find(|c| c.name == "ebook").unwrap();
         assert_eq!(ebook.count, 3);
-        let lang = facets.fields.iter().find(|f| f.name == "lang").unwrap();
+        let lang = facets.fields().iter().find(|f| f.name == "lang").unwrap();
         assert_eq!(lang.categories[0].name, "en");
     }
 

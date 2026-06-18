@@ -84,7 +84,7 @@ pub struct Field {
 pub struct FacetIndex<F: RangeFetch> {
     fetch: F,
     /// The facet fields, in stored order.
-    pub fields: Vec<Field>,
+    fields: Vec<Field>,
 }
 
 /// A parsed, fetchless `RRSF` meta region — the bundle-boot intermediate:
@@ -147,6 +147,12 @@ impl<F: RangeFetch> FacetIndex<F> {
     /// callers that already hold a parsed [`FacetMeta`].
     pub fn from_boot(meta: Vec<u8>, fetch: F) -> Result<Self, IndexError> {
         Ok(FacetMeta::parse(meta)?.attach(fetch))
+    }
+
+    /// The facet fields, in stored order. The per-field category counts a search
+    /// returns ([`counts`](Self::counts)) align positionally with this slice.
+    pub fn fields(&self) -> &[Field] {
+        &self.fields
     }
 
     /// [`FacetIndex::open`] with explicit tuning: `eager_limit` is the
