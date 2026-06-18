@@ -312,7 +312,7 @@ impl<W: Write> TermIndexStreamWriter<W> {
         let term_count: u32 = self
             .term_count
             .try_into()
-            .map_err(|_| io::Error::other("term count exceeds the 32-bit limit"))?;
+            .map_err(|_| io::Error::other("RRTI term count exceeds the 32-bit limit"))?;
         let mut reserved = [0u8; 4];
         reserved[0] = self.language.map_or(0, |l| l.to_u8());
         let mut header = Vec::with_capacity(40);

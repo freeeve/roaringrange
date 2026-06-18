@@ -151,20 +151,20 @@ impl<F: RangeFetch + Clone> SortCols<F> {
         let str_blob = col_count
             .checked_mul(COL_ENTRY)
             .and_then(|x| x.checked_add(HEADER_SIZE))
-            .ok_or(IndexError::Malformed("sortcols column table size overflow"))?;
+            .ok_or(IndexError::Malformed("RRSC column table size overflow"))?;
         let meta_len = str_blob
             .checked_add(str_bytes)
-            .ok_or(IndexError::Malformed("sortcols meta size overflow"))?;
+            .ok_or(IndexError::Malformed("RRSC meta size overflow"))?;
         let buf = fetch.read(0, meta_len).await?;
         if buf.len() < meta_len {
-            return Err(IndexError::Malformed("sortcols meta region truncated"));
+            return Err(IndexError::Malformed("RRSC meta region truncated"));
         }
 
         let read_name = |off: usize, len: usize| -> Result<String, IndexError> {
             let end = off
                 .checked_add(len)
                 .filter(|&e| e <= str_bytes)
-                .ok_or(IndexError::Malformed("sortcols name out of string blob"))?;
+                .ok_or(IndexError::Malformed("RRSC name out of string blob"))?;
             Ok(String::from_utf8_lossy(&buf[str_blob + off..str_blob + end]).into_owned())
         };
 
@@ -174,11 +174,11 @@ impl<F: RangeFetch + Clone> SortCols<F> {
             let name_off = read_u32(&buf, b) as usize;
             let name_len = read_u16(&buf, b + 4) as usize;
             let value_type = ValueType::from_code(buf[b + 6])
-                .ok_or(IndexError::Malformed("sortcols unknown value type"))?;
+                .ok_or(IndexError::Malformed("RRSC unknown value type"))?;
             let data_off = read_u64(&buf, b + 8);
             let col_rows = read_u32(&buf, b + 16);
             if col_rows != rows {
-                return Err(IndexError::Malformed("sortcols column row count mismatch"));
+                return Err(IndexError::Malformed("RRSC column row count mismatch"));
             }
             columns.push(ColInfo {
                 name: read_name(name_off, name_len)?,

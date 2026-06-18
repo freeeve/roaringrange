@@ -178,11 +178,11 @@ impl<F: RangeFetch> FacetIndex<F> {
 /// [`FacetMeta`]; heads are empty until [`FacetIndex::load_heads`].
 fn from_meta(buf: Vec<u8>) -> Result<FacetMeta, IndexError> {
     if buf.len() < HEADER_SIZE {
-        return Err(IndexError::Malformed("facet meta region truncated"));
+        return Err(IndexError::Malformed("RRSF meta region truncated"));
     }
     let meta_len = rrsf_boot_len(&buf[..HEADER_SIZE])?;
     if buf.len() < meta_len {
-        return Err(IndexError::Malformed("facet meta region truncated"));
+        return Err(IndexError::Malformed("RRSF meta region truncated"));
     }
     let fields_n = read_u32(&buf, 8) as usize;
     let cats_n = read_u32(&buf, 12) as usize;
@@ -197,7 +197,7 @@ fn from_meta(buf: Vec<u8>) -> Result<FacetMeta, IndexError> {
         let end = off
             .checked_add(len)
             .filter(|&e| e <= str_bytes)
-            .ok_or(IndexError::Malformed("facet name out of string blob"))?;
+            .ok_or(IndexError::Malformed("RRSF name out of string blob"))?;
         Ok(String::from_utf8_lossy(&buf[str_blob + off..str_blob + end]).into_owned())
     };
 
@@ -305,12 +305,12 @@ impl<F: RangeFetch> FacetIndex<F> {
                         .range
                         .head_off
                         .checked_sub(blob_start)
-                        .ok_or(IndexError::Malformed("facet head offset precedes region"))?
+                        .ok_or(IndexError::Malformed("RRSF head offset precedes region"))?
                         as usize;
                     let e = s
                         .checked_add(c.range.head_size as usize)
                         .filter(|&e| e <= blob.len())
-                        .ok_or(IndexError::Malformed("facet head posting out of region"))?;
+                        .ok_or(IndexError::Malformed("RRSF head posting out of region"))?;
                     c.head = RoaringBitmap::deserialize_from(&blob[s..e])
                         .map_err(|err| IndexError::Roaring(err.to_string()))?;
                 }
@@ -445,5 +445,5 @@ pub fn rrsf_boot_len(header: &[u8]) -> Result<usize, IndexError> {
                 .and_then(|c| c.checked_add(ft))
         })
         .and_then(|sb| sb.checked_add(str_bytes))
-        .ok_or(IndexError::Malformed("facet meta size overflow"))
+        .ok_or(IndexError::Malformed("RRSF meta size overflow"))
 }

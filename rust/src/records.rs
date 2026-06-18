@@ -125,7 +125,9 @@ impl<F: RangeFetch> RecordStore<F> {
         match tag {
             TAG_RAW => Ok(payload.to_vec()),
             TAG_ZSTD_DICT => self.inflate_zstd(payload),
-            _ => Err(IndexError::Malformed("record has an unknown frame tag")),
+            _ => Err(IndexError::Malformed(
+                "RRSR record has an unknown frame tag",
+            )),
         }
     }
 
@@ -206,12 +208,14 @@ impl<F: RangeFetch> RecordStore<F> {
         let start = read_u64(&pair, 0);
         let end = read_u64(&pair, 8);
         if end < start {
-            return Err(IndexError::Malformed("record offset pair has end < start"));
+            return Err(IndexError::Malformed(
+                "RRSR record offset pair has end < start",
+            ));
         }
         // Checked: an `as usize` cast truncates a corrupt >4 GiB length on wasm32,
         // silently returning a wrong-length prefix of the blob as the record.
         let len = usize::try_from(end - start)
-            .map_err(|_| IndexError::Malformed("record length exceeds the address space"))?;
+            .map_err(|_| IndexError::Malformed("RRSR record length exceeds the address space"))?;
         let bytes = self.bin.read(start, len).await?;
         Ok(Some(self.decode(bytes)?))
     }
@@ -249,10 +253,13 @@ impl<F: RangeFetch> RecordStore<F> {
             let start = read_u64(&pairs[i], 0);
             let end = read_u64(&pairs[i], 8);
             if end < start {
-                return Err(IndexError::Malformed("record offset pair has end < start"));
+                return Err(IndexError::Malformed(
+                    "RRSR record offset pair has end < start",
+                ));
             }
-            let len = usize::try_from(end - start)
-                .map_err(|_| IndexError::Malformed("record length exceeds the address space"))?;
+            let len = usize::try_from(end - start).map_err(|_| {
+                IndexError::Malformed("RRSR record length exceeds the address space")
+            })?;
             rec_ranges.push((start, len));
         }
         let blobs = read_coalesced(&self.bin, &rec_ranges, COALESCE_GAP).await?;

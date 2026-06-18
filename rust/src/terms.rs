@@ -299,7 +299,7 @@ impl<F: RangeFetch> TermIndex<F> {
         let tokenizer = Tokenizer::from_header(flags, header[36]);
         let router_bytes = fetch.read(HEADER_SIZE as u64, router_len as usize).await?;
         let router =
-            Map::new(router_bytes).map_err(|_| IndexError::Malformed("invalid router FST"))?;
+            Map::new(router_bytes).map_err(|_| IndexError::Malformed("RRTI invalid router FST"))?;
         let dict_start = HEADER_SIZE as u64 + router_len;
         Ok(Self {
             fetch,
@@ -396,7 +396,7 @@ impl<F: RangeFetch> TermIndex<F> {
         let base = self.postings_offset + head_off;
         let block = self.fetch.read(base, 4 + head_size).await?;
         if block.len() < 4 + head_size {
-            return Err(IndexError::Malformed("short term posting block"));
+            return Err(IndexError::Malformed("RRTI short term posting block"));
         }
         let tail_size = read_u32(&block, 0) as usize;
         let head = deserialize(&block[4..4 + head_size])?;
@@ -587,7 +587,7 @@ impl<F: RangeFetch> TermIndex<F> {
             let block = self.fetch.read(off, len).await?;
             for (term, head_off, _) in parse_dict_block(&block) {
                 let term = String::from_utf8(term)
-                    .map_err(|_| IndexError::Malformed("non-UTF-8 dictionary term"))?;
+                    .map_err(|_| IndexError::Malformed("RRTI non-UTF-8 dictionary term"))?;
                 out.push((term, head_off));
             }
         }

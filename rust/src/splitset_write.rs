@@ -356,10 +356,12 @@ impl SplitSetWriter {
                 .specs
                 .iter()
                 .position(|s| &s.data_file == name)
-                .ok_or_else(|| io::Error::other(format!("compact: {name:?} not in manifest")))?;
+                .ok_or_else(|| {
+                    io::Error::other(format!("RRSS compact: {name:?} not in manifest"))
+                })?;
             if idx < self.base_count {
                 return Err(io::Error::other(
-                    "compact: base splits need a full rebuild, not minor compaction",
+                    "RRSS compact: base splits need a full rebuild, not minor compaction",
                 ));
             }
             let spec = &self.specs[idx];
@@ -504,7 +506,7 @@ fn parse_tombstone(summary: &[u8]) -> io::Result<Option<RoaringBitmap>> {
         let end = start
             .checked_add(len)
             .filter(|&e| e <= summary.len())
-            .ok_or_else(|| io::Error::other("compact: bad summary TLV length"))?;
+            .ok_or_else(|| io::Error::other("RRSS compact: bad summary TLV length"))?;
         if tag == SUMMARY_TAG_TOMBSTONE {
             return deserialize(&summary[start..end]).map(Some).map_err(to_io);
         }
@@ -518,7 +520,7 @@ fn parse_tombstone(summary: &[u8]) -> io::Result<Option<RoaringBitmap>> {
 /// writer's own immutable split, so bounds are validated defensively but not exhaustively.
 fn read_rrs_entries(bytes: &[u8]) -> io::Result<Vec<(u64, RoaringBitmap)>> {
     if bytes.len() < 16 || &bytes[0..4] != b"RRSI" {
-        return Err(io::Error::other("compact: input is not an RRS split"));
+        return Err(io::Error::other("RRSS compact: input is not an RRS split"));
     }
     let ngrams = read_u32(bytes, 8) as usize;
     let stride = read_u32(bytes, 12) as usize;
@@ -532,14 +534,14 @@ fn read_rrs_entries(bytes: &[u8]) -> io::Result<Vec<(u64, RoaringBitmap)>> {
         let end = off
             .checked_add(len)
             .filter(|&e| e <= bytes.len())
-            .ok_or_else(|| io::Error::other("compact: posting out of range"))?;
+            .ok_or_else(|| io::Error::other("RRSS compact: posting out of range"))?;
         deserialize(&bytes[off..end]).map_err(to_io)
     };
     let mut out = Vec::with_capacity(ngrams);
     for i in 0..ngrams {
         let base = dict_start + i * 20;
         if base + 20 > bytes.len() {
-            return Err(io::Error::other("compact: truncated dictionary"));
+            return Err(io::Error::other("RRSS compact: truncated dictionary"));
         }
         let key = read_u64(bytes, base);
         let offset = read_u64(bytes, base + 8) as usize;

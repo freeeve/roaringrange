@@ -286,7 +286,7 @@ impl<F: RangeFetch> RemoteBloom<F> {
         let k = read_u32(&h, 0);
         let nbits = read_u32(&h, 4) as u64;
         if k == 0 || k > 64 || nbits == 0 {
-            return Err(IndexError::Malformed("bloom sidecar header invalid"));
+            return Err(IndexError::Malformed("RRSS bloom sidecar header invalid"));
         }
         Ok(Self { fetch, k, nbits })
     }
