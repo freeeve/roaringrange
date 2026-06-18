@@ -278,24 +278,29 @@ impl<F: RangeFetch> TermIndex<F> {
         Some((self.dict_start + block_off, block_len))
     }
 
-    /// Resolves every query `term` to its posting location `(head_off, head_size)`
-    /// for a strict AND, returning `Ok(None)` the moment any term is absent (the AND
-    /// is then empty). Issues one concurrent wave of (deduped) dict-block reads, then
-    /// scans each front-coded block.
+    /// Resolves query `terms` to their posting locations `(head_off, head_size)`.
+    /// In strict mode (`lenient == false`) any absent term abandons the query with
+    /// `Ok(None)` — the strict-AND result is then empty. In lenient mode the absent
+    /// terms are dropped and the present ones returned (possibly an empty `Vec`, but
+    /// always `Some`), which is what the min-should-match path counts toward M.
+    /// Issues one concurrent wave of (deduped) dict-block reads, then scans each
+    /// front-coded block.
     async fn resolve_locs(
         &self,
         terms: &[String],
+        lenient: bool,
     ) -> Result<Option<Vec<(u64, usize)>>, IndexError> {
-        let mut ranges = Vec::with_capacity(terms.len());
+        let mut present: Vec<(&String, (u64, usize))> = Vec::with_capacity(terms.len());
         for t in terms {
             match self.block_range_for(t) {
-                Some(r) => ranges.push(r),
+                Some(r) => present.push((t, r)),
+                None if lenient => continue,
                 None => return Ok(None),
             }
         }
         // Fetch each distinct block once (a query's terms often share one).
         let mut unique: Vec<(u64, usize)> = Vec::new();
-        for &r in &ranges {
+        for &(_, r) in &present {
             if !unique.contains(&r) {
                 unique.push(r);
             }
@@ -305,11 +310,12 @@ impl<F: RangeFetch> TermIndex<F> {
         for r in fetched {
             blocks.push(r?);
         }
-        let mut locs = Vec::with_capacity(terms.len());
-        for (t, r) in terms.iter().zip(&ranges) {
-            let idx = unique.iter().position(|u| u == r).unwrap();
+        let mut locs = Vec::with_capacity(present.len());
+        for &(t, r) in &present {
+            let idx = unique.iter().position(|u| *u == r).unwrap();
             match scan_block(&blocks[idx], t.as_bytes()) {
                 Some(loc) => locs.push(loc),
+                None if lenient => continue,
                 None => return Ok(None),
             }
         }
@@ -355,7 +361,7 @@ impl<F: RangeFetch> TermIndex<F> {
         if terms.is_empty() {
             return Ok(Vec::new());
         }
-        match self.resolve_locs(&terms).await? {
+        match self.resolve_locs(&terms, false).await? {
             None => Ok(Vec::new()),
             Some(locs) => self.and_locs(locs, limit).await,
         }
@@ -454,7 +460,7 @@ impl<F: RangeFetch> TermIndex<F> {
         if terms.is_empty() {
             return Ok(None);
         }
-        let locs = match self.resolve_locs(&terms).await? {
+        let locs = match self.resolve_locs(&terms, false).await? {
             Some(l) => l,
             None => return Ok(None),
         };
@@ -464,6 +470,30 @@ impl<F: RangeFetch> TermIndex<F> {
             out.push((off, h?));
         }
         Ok(Some(out))
+    }
+
+    /// The lenient sibling of [`query_head_postings`]: resolves each query term's
+    /// head posting and tail location but **drops** terms absent from the dictionary
+    /// instead of abandoning the whole query. The min-should-match path counts only
+    /// the terms that resolve, so it needs the present subset, not all-or-nothing.
+    /// Returns an empty `Vec` when no term resolves (M == 0).
+    pub(crate) async fn query_head_postings_present(
+        &self,
+        query: &str,
+    ) -> Result<Vec<(u64, HeadBlock)>, IndexError> {
+        let mut terms = self.tokenizer.tokenize(query);
+        terms.sort();
+        terms.dedup();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let locs = self.resolve_locs(&terms, true).await?.unwrap_or_default();
+        let heads = join_all(locs.iter().map(|&(off, size)| self.head_block(off, size))).await;
+        let mut out = Vec::with_capacity(locs.len());
+        for (h, &(off, _)) in heads.into_iter().zip(&locs) {
+            out.push((off, h?));
+        }
+        Ok(out)
     }
 
     /// Fetches one tail posting by location — the lazy second wave companion to

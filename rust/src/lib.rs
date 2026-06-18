@@ -120,7 +120,7 @@ pub use vector_build::{
 };
 
 #[cfg(feature = "terms")]
-pub use bm25::{search_bm25, ImpactIndex, ScoredDoc};
+pub use bm25::{search_bm25, search_bm25_min_match, ImpactIndex, ScoredDoc};
 #[cfg(all(feature = "terms", not(target_arch = "wasm32")))]
 pub use bm25::{write_impacts, ImpactsAccumulator};
 #[cfg(feature = "terms")]

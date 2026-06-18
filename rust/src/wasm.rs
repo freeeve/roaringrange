@@ -1636,6 +1636,27 @@ impl RrtIndex {
         Ok(scored.into_iter().map(|s| s.doc_id).collect())
     }
 
+    /// Min-should-match BM25 search: keep docs present in **≥ `min_match`** of the
+    /// query's resolved terms (clamped to `[1, M]`; `min_match == M` is strict AND
+    /// like [`Self::search_bm25`], `min_match == 1` is the union), take the first
+    /// `m` qualifiers in static-rank order, and return the top `k` local doc IDs by
+    /// BM25 score. Same contract as `searchBm25`; resolves to a `Uint32Array`.
+    #[wasm_bindgen(js_name = searchBm25MinMatch)]
+    pub async fn search_bm25_min_match(
+        &self,
+        impacts: &RrbIndex,
+        query: &str,
+        m: usize,
+        k: usize,
+        min_match: usize,
+    ) -> Result<Vec<u32>, JsError> {
+        let scored =
+            crate::bm25::search_bm25_min_match(&self.inner, &impacts.inner, query, m, k, min_match)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(scored.into_iter().map(|s| s.doc_id).collect())
+    }
+
     /// Reranks caller-supplied candidate doc IDs (ANY mode's results — the shared
     /// doc-ID space makes one sidecar serve trigram/term/hybrid) by BM25 against
     /// this index's resolution of `query`. Query terms missing from the dictionary

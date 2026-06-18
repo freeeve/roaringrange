@@ -351,6 +351,110 @@ pub async fn search_bm25<F: RangeFetch, G: RangeFetch>(
     impacts.rerank(&postings, &candidates, k).await
 }
 
+/// The ≥`min_match`-of-M docs across `bitmaps`, in ascending doc-ID (static-rank)
+/// order, early-stopping once `limit` are collected. A k-way merge over the M
+/// ascending iterators: at each step it takes the minimum doc ID across the live
+/// iterators, advances every iterator positioned there, and emits the doc when the
+/// run length reaches `min_match`. M is the (tiny) query-term count, so the linear
+/// per-step scan over heads is cheaper than a heap.
+fn min_match_candidates(bitmaps: &[&RoaringBitmap], min_match: usize, limit: usize) -> Vec<u32> {
+    if limit == 0 || min_match == 0 {
+        return Vec::new();
+    }
+    let mut iters: Vec<Box<dyn Iterator<Item = u32> + '_>> = bitmaps
+        .iter()
+        .map(|b| Box::new(b.iter()) as Box<dyn Iterator<Item = u32> + '_>)
+        .collect();
+    let mut heads: Vec<Option<u32>> = iters.iter_mut().map(|it| it.next()).collect();
+    let mut out = Vec::new();
+    loop {
+        let min = heads.iter().flatten().copied().min();
+        let min = match min {
+            Some(v) => v,
+            None => break,
+        };
+        let mut run = 0usize;
+        for (it, head) in iters.iter_mut().zip(heads.iter_mut()) {
+            if *head == Some(min) {
+                run += 1;
+                *head = it.next();
+            }
+        }
+        if run >= min_match {
+            out.push(min);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Min-should-match term search reranked by BM25: keep docs present in **≥
+/// `min_match`** of the query's M resolved terms (vs [`search_bm25`]'s strict
+/// AND), take the first `m` qualifiers in static-rank order (the candidate
+/// window), and return the top `k` by BM25 score. `min_match` is clamped to
+/// `[1, M]`, so `min_match == M` reproduces [`search_bm25`] exactly, `min_match
+/// == 1` is the full union, and values in between trade precision for recall on
+/// multi-word queries. A candidate scores only over the terms that actually
+/// contain it — [`ImpactIndex::rerank`] already skips terms whose posting omits a
+/// doc — so a 2-of-4 match is scored on its two present terms.
+///
+/// Query terms absent from the dictionary are **dropped** (they don't count toward
+/// M), so a 4-word query with one out-of-vocabulary word is a ≥`min_match`-of-3 —
+/// the leniency multi-word callers want, vs [`search_bm25`]'s empty-on-any-miss.
+/// `M == 0` (no term resolves) returns empty.
+///
+/// The head-first / tail-upgrade structure mirrors [`search_bm25`]: docs below the
+/// head boundary have identical head and full-posting membership, so the head
+/// wave alone yields the lowest-doc-ID qualifiers with correct impact-byte ranks.
+/// Tails are fetched only when those qualifiers underfill the window.
+pub async fn search_bm25_min_match<F: RangeFetch, G: RangeFetch>(
+    terms: &TermIndex<F>,
+    impacts: &ImpactIndex<G>,
+    query: &str,
+    m: usize,
+    k: usize,
+    min_match: usize,
+) -> Result<Vec<ScoredDoc>, IndexError> {
+    // Lenient resolution: terms absent from the dictionary are dropped (they don't
+    // count toward M), unlike the strict-AND path that empties on any miss.
+    let heads = terms.query_head_postings_present(query).await?;
+    if heads.is_empty() {
+        return Ok(Vec::new());
+    }
+    let need = min_match.clamp(1, heads.len());
+
+    let head_bms: Vec<&RoaringBitmap> = heads.iter().map(|(_, b)| &b.head).collect();
+    let acc = min_match_candidates(&head_bms, need, m);
+    let has_tail = heads.iter().any(|(_, b)| b.tail_size > 0);
+    if acc.len() >= m || !has_tail {
+        if acc.is_empty() {
+            return Ok(Vec::new());
+        }
+        let postings: Vec<(u64, RoaringBitmap)> =
+            heads.into_iter().map(|(off, b)| (off, b.head)).collect();
+        return impacts.rerank(&postings, &acc, k).await;
+    }
+
+    // Head qualifiers underfill the window and tails exist: upgrade to full
+    // postings (the same lazy second wave the strict-AND path takes) and recompute
+    // ≥`need` over them.
+    let mut postings = Vec::with_capacity(heads.len());
+    for (off, b) in heads {
+        let tail = terms.fetch_tail(b.tail_off, b.tail_size).await?;
+        let mut full = b.head;
+        full |= &tail;
+        postings.push((off, full));
+    }
+    let full_bms: Vec<&RoaringBitmap> = postings.iter().map(|(_, b)| b).collect();
+    let candidates = min_match_candidates(&full_bms, need, m);
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    impacts.rerank(&postings, &candidates, k).await
+}
+
 /// Native build side: accumulates per-(term, doc) frequencies and document
 /// lengths with the SAME tokenizer the `.rrt` build used, then joins against the
 /// finished index's dictionary ([`TermIndex::dict_terms`]) so the sidecar's
@@ -626,6 +730,146 @@ mod tests {
         assert!(block_on(search_bm25(&terms, &impacts, "alpha zzz", 10, 10))
             .unwrap()
             .is_empty());
+    }
+
+    /// Builds a corpus's `.rrt` + `.rrb` at a chosen head boundary, exercising the
+    /// head/tail split that the min-should-match path must respect.
+    fn build_hb(
+        docs: &[(u32, &str)],
+        head_boundary: u32,
+    ) -> (TermIndex<MemoryFetch>, ImpactIndex<MemoryFetch>) {
+        let cfg = TermIndexConfig {
+            head_boundary,
+            language: None,
+            stopwords: false,
+            block_cap: 0,
+        };
+        let mut tb = TermIndexBuilder::new(&cfg);
+        let mut acc = ImpactsAccumulator::new(Tokenizer::plain());
+        for (id, d) in docs {
+            tb.add(*id, d);
+            acc.add_doc(d);
+        }
+        let mut rrt = Vec::new();
+        tb.finish(&mut rrt).unwrap();
+        let terms = block_on(TermIndex::open(MemoryFetch::new(rrt))).unwrap();
+        let dict = block_on(terms.dict_terms()).unwrap();
+        let mut rrb = Vec::new();
+        write_impacts(&mut rrb, &dict, &acc, DEFAULT_K1, DEFAULT_B).unwrap();
+        let impacts = block_on(ImpactIndex::open(MemoryFetch::new(rrb))).unwrap();
+        (terms, impacts)
+    }
+
+    fn id_set(scored: &[ScoredDoc]) -> std::collections::BTreeSet<u32> {
+        scored.iter().map(|s| s.doc_id).collect()
+    }
+
+    #[test]
+    fn min_match_spans_and_to_or() {
+        // Four query terms (a, b, c, d) with documents at every coverage level.
+        let docs = [
+            "a b c d", // 0: all four
+            "a b c",   // 1: three
+            "a b",     // 2: two
+            "a",       // 3: one
+            "b c d",   // 4: three (no a)
+            "c d",     // 5: two
+            "d",       // 6: one
+            "e f g",   // 7: none of the query terms
+        ];
+        let (terms, impacts, _) = build(&docs);
+        let n = docs.len();
+        let q = "a b c d";
+
+        // min_match == M reproduces the strict-AND result set.
+        let and = block_on(search_bm25(&terms, &impacts, q, n, n)).unwrap();
+        let mm4 = block_on(search_bm25_min_match(&terms, &impacts, q, n, n, 4)).unwrap();
+        assert_eq!(id_set(&and), id_set(&mm4));
+        assert_eq!(id_set(&mm4), [0].into_iter().collect());
+
+        // min_match == 1 is the full union (every doc with ≥1 query term).
+        let mm1 = block_on(search_bm25_min_match(&terms, &impacts, q, n, n, 1)).unwrap();
+        assert_eq!(id_set(&mm1), (0..=6).collect());
+
+        // 1 < min_match < M: strict superset of AND, strict subset of OR.
+        let mm2 = block_on(search_bm25_min_match(&terms, &impacts, q, n, n, 2)).unwrap();
+        assert_eq!(id_set(&mm2), [0, 1, 2, 4, 5].into_iter().collect());
+        assert!(id_set(&mm2).is_superset(&id_set(&mm4)));
+        assert!(id_set(&mm2).is_subset(&id_set(&mm1)));
+        assert!(id_set(&and) != id_set(&mm2));
+        assert!(id_set(&mm2) != id_set(&mm1));
+
+        // Scores stay descending and positive — every qualifier has ≥1 term hit.
+        for w in mm2.windows(2) {
+            assert!(w[0].score >= w[1].score);
+        }
+        assert!(mm2.last().unwrap().score > 0.0);
+    }
+
+    #[test]
+    fn min_match_clamps_to_term_count() {
+        let docs = ["a x", "a y", "z"];
+        let (terms, impacts, _) = build(&docs);
+        // Single-term query: min_match=2 clamps to 1 (the only resolvable term).
+        let clamped = block_on(search_bm25_min_match(&terms, &impacts, "a", 10, 10, 2)).unwrap();
+        let and = block_on(search_bm25(&terms, &impacts, "a", 10, 10)).unwrap();
+        assert_eq!(id_set(&clamped), id_set(&and));
+        assert_eq!(id_set(&clamped), [0, 1].into_iter().collect());
+    }
+
+    #[test]
+    fn min_match_no_terms_resolve_is_empty() {
+        let docs = ["alpha beta", "beta gamma"];
+        let (terms, impacts, _) = build(&docs);
+        assert!(block_on(search_bm25_min_match(
+            &terms, &impacts, "zzz yyy", 10, 10, 1
+        ))
+        .unwrap()
+        .is_empty());
+    }
+
+    #[test]
+    fn min_match_drops_out_of_vocabulary_terms() {
+        // "zzz" is absent: M collapses to {a, b}, so min_match=2 is a 2-of-2 AND
+        // over the present terms — NOT empty the way strict search_bm25 would be.
+        let docs = ["a b", "a c", "b c", "a b c"];
+        let (terms, impacts, _) = build(&docs);
+        let n = docs.len();
+        assert!(block_on(search_bm25(&terms, &impacts, "a b zzz", n, n))
+            .unwrap()
+            .is_empty());
+        let mm = block_on(search_bm25_min_match(&terms, &impacts, "a b zzz", n, n, 2)).unwrap();
+        let and_ab = block_on(search_bm25(&terms, &impacts, "a b", n, n)).unwrap();
+        assert_eq!(id_set(&mm), id_set(&and_ab));
+        assert_eq!(id_set(&mm), [0, 3].into_iter().collect());
+    }
+
+    #[test]
+    fn min_match_upgrades_across_head_tail_boundary() {
+        // head_boundary=4 puts docs 0–3 in heads, 4–7 in tails. Qualifiers for
+        // ≥2 of {a,b,c,d} straddle the boundary, forcing the tail upgrade.
+        let docs = [
+            (0u32, "a b c d"), // 4
+            (1, "a b"),        // 2
+            (2, "a"),          // 1 — below threshold
+            (3, "b c d"),      // 3
+            (4, "a b c d"),    // 4 (tail)
+            (5, "a b"),        // 2 (tail)
+            (6, "c d"),        // 2 (tail)
+            (7, "a"),          // 1 — below threshold (tail)
+        ];
+        let (terms, impacts) = build_hb(&docs, 4);
+        let q = "a b c d";
+
+        // Wide window: head qualifiers {0,1,3} underfill, so tails are upgraded and
+        // the full ≥2 set surfaces.
+        let wide = block_on(search_bm25_min_match(&terms, &impacts, q, 100, 100, 2)).unwrap();
+        assert_eq!(id_set(&wide), [0, 1, 3, 4, 5, 6].into_iter().collect());
+
+        // Narrow window: m=2 is filled by the two lowest head qualifiers alone, no
+        // tail fetch, static-rank order preserved.
+        let narrow = block_on(search_bm25_min_match(&terms, &impacts, q, 2, 100, 2)).unwrap();
+        assert_eq!(id_set(&narrow), [0, 1].into_iter().collect());
     }
 
     #[test]
