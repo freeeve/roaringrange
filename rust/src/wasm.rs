@@ -1509,17 +1509,18 @@ impl RrviHits {
     }
 }
 
-/// Reciprocal-rank fusion of a vector (`RRVI`) and a trigram (`RRS`) result list
-/// into one ranking of doc IDs, best-first — the no-score-normalization hybrid.
-/// `kParam` is conventionally ~60. Returns a `Uint32Array`.
+/// Reciprocal-rank fusion of **N** ranked doc-ID lists (each a `Uint32Array`) into one
+/// best-first ranking — the no-score-normalization hybrid, ties broken by ascending
+/// id. This is the same [`crate::vector::reciprocal_rank_fusion`] every native
+/// consumer uses, so the browser can fuse any number of arms (e.g. trigram + BM25 +
+/// min-should-match + semantic) in one call without drifting from the library's
+/// ranking. `kParam` is conventionally ~60. Returns a `Uint32Array`.
 #[cfg(feature = "vector")]
 #[wasm_bindgen(js_name = reciprocalRankFusion)]
-pub fn reciprocal_rank_fusion_js(
-    vector_ids: Vec<u32>,
-    trigram_ids: Vec<u32>,
-    k_param: f64,
-) -> Vec<u32> {
-    crate::vector::reciprocal_rank_fusion(&[&vector_ids, &trigram_ids], k_param)
+pub fn reciprocal_rank_fusion_js(lists: Vec<Uint32Array>, k_param: f64) -> Vec<u32> {
+    let vecs: Vec<Vec<u32>> = lists.iter().map(Uint32Array::to_vec).collect();
+    let refs: Vec<&[u32]> = vecs.iter().map(Vec::as_slice).collect();
+    crate::vector::reciprocal_rank_fusion(&refs, k_param)
         .into_iter()
         .map(|(id, _)| id)
         .collect()

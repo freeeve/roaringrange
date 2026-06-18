@@ -2289,7 +2289,7 @@
           // Fusion runs in the wasm reader (the same reciprocal_rank_fusion every
           // native consumer uses), so the demo can't drift from the library's ranking.
           const fused = Array.from(reciprocalRankFusion(
-            Uint32Array.from(sem ? sem.ids : []), Uint32Array.from(text), RRF_K));
+            [Uint32Array.from(sem ? sem.ids : []), Uint32Array.from(text)], RRF_K));
           const ff = await facetFilter(fused, filters);
           if (mySeq !== searchSeq) return;
           cur = null;

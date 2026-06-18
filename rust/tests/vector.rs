@@ -429,6 +429,32 @@ fn rrf_orders_by_fused_rank() {
 }
 
 #[test]
+fn rrf_fuses_n_lists() {
+    // Four arms (the "full" hybrid shape: trigram + BM25 + min-match + semantic).
+    // Doc 7 is rank-0 in three arms; doc 1 is rank-0 in one and present in all four.
+    let arms: [&[u32]; 4] = [&[7, 1, 2], &[7, 1, 3], &[7, 1, 4], &[1, 7, 5]];
+    let fused = reciprocal_rank_fusion(&arms, 60.0);
+    let order: Vec<u32> = fused.iter().map(|(id, _)| *id).collect();
+    // 7 (three firsts + one second) edges 1 (one first + three seconds); the rest follow.
+    assert_eq!(order[0], 7);
+    assert_eq!(order[1], 1);
+    // Score equals the exact RRF sum 1/(k + rank + 1), so a JS reimplementation can
+    // match byte-for-byte: doc 1 = 1/61 + 1/62 + 1/63 + 1/61.
+    let k = 60.0;
+    let s1 = 1.0 / (k + 2.0) + 1.0 / (k + 2.0) + 1.0 / (k + 2.0) + 1.0 / (k + 1.0);
+    let got1 = fused.iter().find(|(id, _)| *id == 1).unwrap().1;
+    assert!((got1 - s1).abs() < 1e-12);
+    // A single-list fusion is identity-ordered (degenerate N=1).
+    let one = reciprocal_rank_fusion(&[&[9, 8, 7]], 60.0);
+    assert_eq!(
+        one.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![9, 8, 7]
+    );
+    // Empty input fuses to nothing.
+    assert!(reciprocal_rank_fusion(&[], 60.0).is_empty());
+}
+
+#[test]
 fn edge_cases() {
     let mut rng = Rng::new(3);
     let corpus: Vec<(u32, Vec<f32>)> = (0..32)
