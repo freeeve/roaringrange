@@ -992,6 +992,59 @@ impl<F: RangeFetch> Cursor<F> {
     }
 }
 
+/// The shared paging surface of roaringrange's head-first search cursors —
+/// [`Cursor`] (from [`Index::search_cursor`]) and
+/// [`SecondaryCursor`](crate::SecondaryCursor) (from
+/// [`SecondaryIndex::search_cursor`](crate::SecondaryIndex::search_cursor)). Both
+/// page a resident head bitmap in rank order and lazily load the tail only when a
+/// page reaches past it, so generic code can drive either behind this trait.
+pub trait SearchCursor {
+    /// The next `n` doc IDs in rank order, advancing the cursor (loading the tail
+    /// if the head is exhausted and one remains).
+    fn next(&mut self, n: usize)
+        -> impl std::future::Future<Output = Result<Vec<u32>, IndexError>>;
+    /// The absolute `[offset, offset + limit)` rank-ordered window.
+    fn page(
+        &mut self,
+        offset: usize,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<u32>, IndexError>>;
+    /// The resident head bitmap (the docs below the head boundary).
+    fn head_bitmap(&self) -> &RoaringBitmap;
+    /// How many results have been materialized so far.
+    fn loaded(&self) -> usize;
+    /// How many results the head holds.
+    fn head_count(&self) -> usize;
+    /// Whether an unloaded tail remains.
+    fn pending_tail(&self) -> bool;
+    /// Loads the tail if one is pending (a no-op otherwise).
+    fn load_tail(&mut self) -> impl std::future::Future<Output = Result<(), IndexError>>;
+}
+
+impl<F: RangeFetch> SearchCursor for Cursor<F> {
+    async fn next(&mut self, n: usize) -> Result<Vec<u32>, IndexError> {
+        Cursor::next(self, n).await
+    }
+    async fn page(&mut self, offset: usize, limit: usize) -> Result<Vec<u32>, IndexError> {
+        Cursor::page(self, offset, limit).await
+    }
+    fn head_bitmap(&self) -> &RoaringBitmap {
+        Cursor::head_bitmap(self)
+    }
+    fn loaded(&self) -> usize {
+        Cursor::loaded(self)
+    }
+    fn head_count(&self) -> usize {
+        Cursor::head_count(self)
+    }
+    fn pending_tail(&self) -> bool {
+        Cursor::pending_tail(self)
+    }
+    async fn load_tail(&mut self) -> Result<(), IndexError> {
+        Cursor::load_tail(self).await
+    }
+}
+
 /// The boot-region byte length of a serialized `RRS` from its leading header bytes — the
 /// 20-byte header plus the sparse index (`sparse_count(ngrams, stride) * 8`), i.e. the
 /// `[0, dictStart)` region [`Index::from_boot`] consumes. A bundle builder
@@ -1167,5 +1220,15 @@ mod tests {
         assert_eq!(got, want);
         assert!(!cur.pending_tail());
         assert_eq!(cur.loaded(), want.len());
+
+        // The same cursor also drives through the shared SearchCursor trait: a
+        // generic helper pages a fresh cursor identically (SecondaryCursor has the
+        // same-shaped impl).
+        fn first_page<C: crate::SearchCursor>(c: &mut C) -> Vec<u32> {
+            block_on(crate::SearchCursor::load_tail(c)).unwrap();
+            block_on(c.page(0, 1000)).unwrap()
+        }
+        let mut generic = block_on(idx.search_cursor("aaab", 0)).unwrap();
+        assert_eq!(first_page(&mut generic), want);
     }
 }

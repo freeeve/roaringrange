@@ -197,6 +197,30 @@ impl<F: RangeFetch + Clone> SecondaryCursor<F> {
     }
 }
 
+impl<F: RangeFetch + Clone> crate::index::SearchCursor for SecondaryCursor<F> {
+    async fn next(&mut self, n: usize) -> Result<Vec<u32>, IndexError> {
+        SecondaryCursor::next(self, n).await
+    }
+    async fn page(&mut self, offset: usize, limit: usize) -> Result<Vec<u32>, IndexError> {
+        SecondaryCursor::page(self, offset, limit).await
+    }
+    fn head_bitmap(&self) -> &RoaringBitmap {
+        SecondaryCursor::head_bitmap(self)
+    }
+    fn loaded(&self) -> usize {
+        SecondaryCursor::loaded(self)
+    }
+    fn head_count(&self) -> usize {
+        SecondaryCursor::head_count(self)
+    }
+    fn pending_tail(&self) -> bool {
+        SecondaryCursor::pending_tail(self)
+    }
+    async fn load_tail(&mut self) -> Result<(), IndexError> {
+        SecondaryCursor::load_tail(self).await
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;

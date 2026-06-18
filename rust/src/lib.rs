@@ -102,7 +102,7 @@ pub use facet::{rrsf_boot_len, FacetIndex, FacetMeta};
 #[cfg(unix)]
 pub use fetch::FileFetch;
 pub use fetch::{FetchError, MemoryFetch, RangeFetch};
-pub use index::{Index, IndexError, ResolvedFilter};
+pub use index::{Index, IndexError, ResolvedFilter, SearchCursor};
 pub use lookup::Lookup;
 pub use ngram::ngram_keys;
 pub use records::RecordStore;
