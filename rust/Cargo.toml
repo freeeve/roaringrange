@@ -66,6 +66,11 @@ required-features = ["terms", "zstd"]
 name = "bm25_query"
 required-features = ["terms"]
 
+# Known-item sanity check: strict-AND vs min-should-match BM25 over a .rrt + .rrb.
+[[example]]
+name = "bm25_minmatch_eval"
+required-features = ["terms"]
+
 # Unions split dict keys into the global term-Bloom sidecar; needs `splits`.
 [[example]]
 name = "build_global_bloom"

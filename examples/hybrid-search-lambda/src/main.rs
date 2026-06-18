@@ -17,8 +17,8 @@ use embed::Embedder;
 use lambda_http::{run, service_fn, Body, Error, Request, RequestExt, Response};
 use roaring::RoaringBitmap;
 use roaringrange::{
-    reciprocal_rank_fusion, search_bm25, FacetIndex, FetchError, ImpactIndex, Index, RangeFetch,
-    TermIndex, VectorIndex,
+    reciprocal_rank_fusion, search_bm25_min_match, FacetIndex, FetchError, ImpactIndex, Index,
+    RangeFetch, TermIndex, VectorIndex,
 };
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -33,6 +33,10 @@ const NPROBE: usize = 8;
 const RRF_K: f64 = 60.0;
 /// BM25 candidate window for the term arm.
 const BM25_M: usize = 2000;
+/// Min-should-match for the term arm: keep docs in >= 2 of the query's M terms
+/// (BM25-reranked), mirroring QLL's BM25-min2 lexical arm. `min=1` is OR, `=M` is
+/// strict AND; `2` trades a little precision for multi-word recall.
+const BM25_MIN_MATCH: usize = 2;
 /// Per-object in-container range cache cap. This function is the heaviest reader —
 /// two index families (text + Gemma RRVI) plus facets per query — so it is sized to
 /// the Lambda max (10 GiB), and an 8 GiB cap holds both arms' hot working sets.
@@ -154,15 +158,20 @@ enum TextArm {
 }
 
 impl TextArm {
-    /// Top-`k` text-matched doc IDs in static-rank (term: BM25-reranked) order.
+    /// Top-`k` text-matched doc IDs in static-rank order (term arm: min-should-match
+    /// BM25, >= [`BM25_MIN_MATCH`] of M query terms, reranked).
     async fn search(&self, q: &str, k: usize) -> Result<Vec<u32>, roaringrange::IndexError> {
         match self {
             TextArm::Trigram(idx) => idx.search(q, k).await,
-            TextArm::Term(terms, impacts) => Ok(search_bm25(terms, impacts, q, BM25_M, k)
-                .await?
-                .into_iter()
-                .map(|d| d.doc_id)
-                .collect()),
+            TextArm::Term(terms, impacts) => {
+                Ok(
+                    search_bm25_min_match(terms, impacts, q, BM25_M, k, BM25_MIN_MATCH)
+                        .await?
+                        .into_iter()
+                        .map(|d| d.doc_id)
+                        .collect(),
+                )
+            }
         }
     }
 }
