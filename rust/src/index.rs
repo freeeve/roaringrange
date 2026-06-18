@@ -279,6 +279,36 @@ impl<F: RangeFetch> Index<F> {
         None
     }
 
+    /// Reads the dictionary-block bytes for each entry of `blocks`, fetching every
+    /// distinct block (keyed by byte offset) only once and handing its bytes to
+    /// every n-gram that shares it. Several of a query's n-grams routinely resolve
+    /// to the same block; a naive read-per-n-gram would issue that block's ranged
+    /// read repeatedly — wasted bandwidth, and, because the reads run concurrently,
+    /// duplicate in-flight Range requests for one URL that some HTTP caches answer
+    /// with a truncated body (which then trips the reader's exact-length check).
+    /// The returned vec is aligned with `blocks`.
+    async fn read_dict_blocks(&self, blocks: &[DictBlock]) -> Result<Vec<Vec<u8>>, IndexError> {
+        let mut uniq: Vec<&DictBlock> = Vec::new();
+        let mut which: Vec<usize> = Vec::with_capacity(blocks.len());
+        for blk in blocks {
+            match uniq.iter().position(|u| u.byte_off == blk.byte_off) {
+                Some(i) => which.push(i),
+                None => {
+                    which.push(uniq.len());
+                    uniq.push(blk);
+                }
+            }
+        }
+        let reads = uniq
+            .iter()
+            .map(|blk| self.fetch.read(blk.byte_off, blk.entries * DICT_ENTRY));
+        let fetched: Vec<Vec<u8>> = join_all(reads)
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+        Ok(which.iter().map(|&i| fetched[i].clone()).collect())
+    }
+
     /// Resolves `key` to its dictionary entry with at most one ranged dict-block
     /// read, or `Ok(None)` if the key is absent.
     ///
@@ -437,14 +467,11 @@ impl<F: RangeFetch> Index<F> {
             Some(blocks) => blocks,
             None => return Ok(Vec::new()), // a key precedes the dictionary -> absent
         };
-        let block_reads = blocks
-            .iter()
-            .map(|blk| self.fetch.read(blk.byte_off, blk.entries * DICT_ENTRY));
-        let block_results = join_all(block_reads).await;
+        let block_results = self.read_dict_blocks(&blocks).await?;
 
         let mut recs = Vec::with_capacity(keys.len());
         for ((bytes, blk), &key) in block_results.into_iter().zip(&blocks).zip(&keys) {
-            match Self::parse_block(&bytes?, blk.entries, key) {
+            match Self::parse_block(&bytes, blk.entries, key) {
                 None => return Ok(Vec::new()), // absent key -> empty result
                 Some(rec) => recs.push(rec),
             }
@@ -497,13 +524,10 @@ impl<F: RangeFetch> Index<F> {
             Some(blocks) => blocks,
             None => return Ok(Vec::new()), // a key precedes the dictionary -> absent
         };
-        let block_reads = blocks
-            .iter()
-            .map(|blk| self.fetch.read(blk.byte_off, blk.entries * DICT_ENTRY));
-        let block_results = join_all(block_reads).await;
+        let block_results = self.read_dict_blocks(&blocks).await?;
         let mut recs = Vec::with_capacity(keys.len());
         for ((bytes, blk), &key) in block_results.into_iter().zip(&blocks).zip(&keys) {
-            match Self::parse_block(&bytes?, blk.entries, key) {
+            match Self::parse_block(&bytes, blk.entries, key) {
                 None => return Ok(Vec::new()), // absent key -> strict AND empty
                 Some(rec) => recs.push(rec),
             }
@@ -570,13 +594,11 @@ impl<F: RangeFetch> Index<F> {
             .iter()
             .filter_map(|&k| self.dict_block_for(k).map(|blk| (k, blk)))
             .collect();
-        let block_reads = present
-            .iter()
-            .map(|(_, blk)| self.fetch.read(blk.byte_off, blk.entries * DICT_ENTRY));
-        let block_results = join_all(block_reads).await;
+        let blocks: Vec<DictBlock> = present.iter().map(|(_, blk)| *blk).collect();
+        let block_results = self.read_dict_blocks(&blocks).await?;
         let mut recs = Vec::with_capacity(present.len());
         for (bytes, (key, blk)) in block_results.into_iter().zip(&present) {
-            if let Some(rec) = Self::parse_block(&bytes?, blk.entries, *key) {
+            if let Some(rec) = Self::parse_block(&bytes, blk.entries, *key) {
                 recs.push(rec);
             }
         }
@@ -1230,5 +1252,73 @@ mod tests {
         }
         let mut generic = block_on(idx.search_cursor("aaab", 0)).unwrap();
         assert_eq!(first_page(&mut generic), want);
+    }
+
+    /// Two of a query's n-grams that resolve to the SAME dictionary block must be
+    /// fetched once, not once per n-gram. A duplicate concurrent ranged read for
+    /// one (offset, len) is wasted bandwidth and, in the browser, a duplicate
+    /// in-flight Range request that some HTTP caches answer with a truncated body
+    /// — the cold-read "returned N bytes, expected M" failure this guards against.
+    #[test]
+    fn shared_dict_block_is_read_once() {
+        use crate::build::{serialize_posting, write_index};
+        use crate::ngram::ngram_keys;
+        use crate::MemoryFetch;
+        use futures::executor::block_on;
+        use roaring::RoaringBitmap;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        #[derive(Clone)]
+        struct RecordingFetch {
+            inner: MemoryFetch,
+            reads: Rc<RefCell<Vec<(u64, usize)>>>,
+        }
+        impl RangeFetch for RecordingFetch {
+            async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
+                self.reads.borrow_mut().push((offset, len));
+                self.inner.read(offset, len).await
+            }
+        }
+
+        fn bm(docs: &[u32]) -> RoaringBitmap {
+            let mut b = RoaringBitmap::new();
+            for &d in docs {
+                b.insert(d);
+            }
+            b
+        }
+
+        // "aaab" -> trigrams "aaa","aab"; with stride 2 the 2-entry dictionary is a
+        // single block, so both trigrams resolve to the same (offset, len) read.
+        let keys = ngram_keys("aaab", 3);
+        assert_eq!(keys.len(), 2);
+        let posts: Vec<(u64, Vec<u8>)> = [(keys[0], bm(&[0, 1, 2])), (keys[1], bm(&[0, 1, 9]))]
+            .iter()
+            .map(|(k, b)| (*k, serialize_posting(b)))
+            .collect();
+        let mut out = Vec::new();
+        write_index(&mut out, 3, 2, posts).unwrap();
+
+        let reads = Rc::new(RefCell::new(Vec::new()));
+        let fetch = RecordingFetch {
+            inner: MemoryFetch::new(out),
+            reads: reads.clone(),
+        };
+        let idx = block_on(Index::open(fetch)).unwrap();
+        let dict_start = idx.dict_start;
+        let block_len = 2 * DICT_ENTRY; // both entries share one block
+
+        reads.borrow_mut().clear(); // drop the boot reads (header + sparse index)
+        assert_eq!(block_on(idx.search("aaab", 100)).unwrap(), vec![0, 1]); // strict AND
+        let block_reads = reads
+            .borrow()
+            .iter()
+            .filter(|&&(o, l)| o == dict_start && l == block_len)
+            .count();
+        assert_eq!(
+            block_reads, 1,
+            "the shared dict block must be fetched once, not once per n-gram"
+        );
     }
 }
