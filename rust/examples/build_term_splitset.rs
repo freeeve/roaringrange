@@ -69,12 +69,14 @@ fn main() {
         .unwrap_or(256);
     let language_arg = args.get(7).map(String::as_str).unwrap_or("english");
     let language = match language_arg {
-        "english" => Some(Language::English),
         "none" | "" => None,
-        other => {
-            eprintln!("unknown language {other:?}; use `english` or `none`");
-            std::process::exit(2);
-        }
+        other => match Language::from_code(other) {
+            Some(l) => Some(l),
+            None => {
+                eprintln!("unknown language {other:?}; use e.g. `english`, `spanish`, or `none`");
+                std::process::exit(2);
+            }
+        },
     };
     let cap_max_mb: u64 = args
         .get(8)

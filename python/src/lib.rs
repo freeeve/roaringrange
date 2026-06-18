@@ -548,12 +548,11 @@ impl TermBuilder {
     ) -> PyResult<Self> {
         let language = match language.as_deref() {
             None => None,
-            Some("english") | Some("en") => Some(Language::English),
-            Some(other) => {
-                return Err(PyValueError::new_err(format!(
-                    "unknown stemmer language {other:?} (supported: \"english\")"
-                )))
-            }
+            Some(code) => Some(Language::from_code(code).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown stemmer language {code:?} (supported: \"english\", \"spanish\")"
+                ))
+            })?),
         };
         let config = TermIndexConfig {
             head_boundary: head_boundary.unwrap_or(DEFAULT_HEAD_BOUNDARY),
@@ -798,12 +797,11 @@ impl TermSplitSetBuilder {
     ) -> PyResult<Self> {
         let language = match language.as_deref() {
             None => None,
-            Some("english") | Some("en") => Some(Language::English),
-            Some(other) => {
-                return Err(PyValueError::new_err(format!(
-                    "unknown stemmer language {other:?} (supported: \"english\")"
-                )))
-            }
+            Some(code) => Some(Language::from_code(code).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown stemmer language {code:?} (supported: \"english\", \"spanish\")"
+                ))
+            })?),
         };
         let config = TermSplitBuildConfig {
             policy: parse_policy(policy)?,

@@ -64,35 +64,102 @@ pub(crate) const FLAG_STEMMED: u16 = 1;
 /// Header `flags` bit: stop words were removed from the index, so queries drop them too.
 pub(crate) const FLAG_STOPWORDS: u16 = 2;
 
-/// A stemmer language, recorded in the header so the reader stems a query exactly as
-/// the builder stemmed the corpus. The on-disk code is stable across versions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
-    /// English (Snowball "english" / Porter2).
-    English,
+/// One source-of-truth table of every Snowball stemmer `rust-stemmers` provides —
+/// `Variant = on-disk byte, "snowball name", "iso-639-1", StemmerAlgorithm` — which
+/// the macro expands into the [`Language`] enum and all of its conversions. Adding a
+/// language is one row here: pick the next free byte. **The byte is the stable header
+/// encoding and must never change or be reused**, so append new languages rather than
+/// renumbering (the listed order is otherwise arbitrary).
+macro_rules! languages {
+    ($($variant:ident = $byte:literal, $name:literal, $iso:literal, $algo:ident;)+) => {
+        /// A stemmer language, recorded in the header so the reader stems a query
+        /// exactly as the builder stemmed the corpus. Covers the full Snowball set;
+        /// the on-disk byte ([`from_u8`](Self::from_u8)) is stable across versions.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Language {
+            $(
+                #[doc = concat!("Snowball \"", $name, "\" (ISO-639-1 \"", $iso, "\").")]
+                $variant,
+            )+
+        }
+
+        impl Language {
+            /// The on-disk language byte. Thin shim over the canonical
+            /// [`From<Language> for u8`](Language#impl-From<Language>-for-u8).
+            pub fn to_u8(self) -> u8 {
+                u8::from(self)
+            }
+
+            /// Maps an on-disk language byte back to a [`Language`], or `None` when
+            /// the byte names no known stemmer (an older/newer index, or an
+            /// unstemmed one). Intentionally lenient — unknown ⇒ no stemmer — so it
+            /// stays an `Option` rather than a `TryFrom`.
+            pub fn from_u8(b: u8) -> Option<Language> {
+                match b {
+                    $($byte => Some(Language::$variant),)+
+                    _ => None,
+                }
+            }
+
+            /// Parses a human/CLI language code into a [`Language`], or `None` if
+            /// unrecognized. Accepts the canonical Snowball name or the ISO-639-1
+            /// code, case-insensitively (e.g. `"english"`/`"en"`, `"spanish"`/
+            /// `"es"`). The single source for string→language that every builder
+            /// front-end (CLI, Python, examples) routes through, so a new language
+            /// is wired in exactly one place.
+            pub fn from_code(code: &str) -> Option<Language> {
+                match code.trim().to_ascii_lowercase().as_str() {
+                    $($name | $iso => Some(Language::$variant),)+
+                    _ => None,
+                }
+            }
+
+            /// The canonical Snowball name for this language — the long-form inverse
+            /// of [`from_code`](Self::from_code).
+            pub fn as_code(self) -> &'static str {
+                match self {
+                    $(Language::$variant => $name,)+
+                }
+            }
+
+            fn algorithm(self) -> Algorithm {
+                match self {
+                    $(Language::$variant => Algorithm::$algo,)+
+                }
+            }
+        }
+
+        impl From<Language> for u8 {
+            /// The stable on-disk language byte (the header encoding the reader
+            /// reads back).
+            fn from(l: Language) -> u8 {
+                match l {
+                    $(Language::$variant => $byte,)+
+                }
+            }
+        }
+    };
 }
 
-impl Language {
-    /// The on-disk language byte for this language.
-    pub fn to_u8(self) -> u8 {
-        match self {
-            Language::English => 1,
-        }
-    }
-
-    /// Maps an on-disk language byte to a [`Language`], or `None` (no/unknown stemmer).
-    fn from_u8(b: u8) -> Option<Language> {
-        match b {
-            1 => Some(Language::English),
-            _ => None,
-        }
-    }
-
-    fn algorithm(self) -> Algorithm {
-        match self {
-            Language::English => Algorithm::English,
-        }
-    }
+languages! {
+    English = 1, "english", "en", English;
+    Spanish = 2, "spanish", "es", Spanish;
+    Arabic = 3, "arabic", "ar", Arabic;
+    Danish = 4, "danish", "da", Danish;
+    Dutch = 5, "dutch", "nl", Dutch;
+    Finnish = 6, "finnish", "fi", Finnish;
+    French = 7, "french", "fr", French;
+    German = 8, "german", "de", German;
+    Greek = 9, "greek", "el", Greek;
+    Hungarian = 10, "hungarian", "hu", Hungarian;
+    Italian = 11, "italian", "it", Italian;
+    Norwegian = 12, "norwegian", "no", Norwegian;
+    Portuguese = 13, "portuguese", "pt", Portuguese;
+    Romanian = 14, "romanian", "ro", Romanian;
+    Russian = 15, "russian", "ru", Russian;
+    Swedish = 16, "swedish", "sv", Swedish;
+    Tamil = 17, "tamil", "ta", Tamil;
+    Turkish = 18, "turkish", "tr", Turkish;
 }
 
 /// Common English stop words, sorted for binary search. Removed from the index (and
@@ -670,6 +737,40 @@ mod tests {
     use crate::fetch::MemoryFetch;
     use crate::terms_build::{write_term_index, write_term_index_with, TermIndexConfig};
     use futures::executor::block_on;
+
+    #[test]
+    fn language_code_and_byte_roundtrip() {
+        use Language::*;
+        const ALL: [Language; 18] = [
+            English, Spanish, Arabic, Danish, Dutch, Finnish, French, German, Greek, Hungarian,
+            Italian, Norwegian, Portuguese, Romanian, Russian, Swedish, Tamil, Turkish,
+        ];
+        let mut seen_bytes = std::collections::BTreeSet::new();
+        for lang in ALL {
+            // Byte round-trips through the canonical `From`/`from_u8` pair.
+            assert_eq!(Language::from_u8(u8::from(lang)), Some(lang));
+            assert_eq!(lang.to_u8(), u8::from(lang));
+            // Name and uppercased name both resolve back to the same language.
+            assert_eq!(Language::from_code(lang.as_code()), Some(lang));
+            assert_eq!(
+                Language::from_code(&lang.as_code().to_uppercase()),
+                Some(lang)
+            );
+            assert!(seen_bytes.insert(u8::from(lang)), "duplicate on-disk byte");
+        }
+        // Bytes are dense 1..=18 — every language present, none reused.
+        assert_eq!(seen_bytes, (1u8..=18).collect());
+        // Stable bytes — must not drift across versions.
+        assert_eq!(u8::from(English), 1);
+        assert_eq!(u8::from(Spanish), 2);
+        // ISO-639-1 aliases and whitespace/case handling.
+        assert_eq!(Language::from_code("es"), Some(Spanish));
+        assert_eq!(Language::from_code("de"), Some(German));
+        assert_eq!(Language::from_code(" Tr "), Some(Turkish));
+        assert_eq!(Language::from_code("klingon"), None);
+        assert_eq!(Language::from_u8(0), None);
+        assert_eq!(Language::from_u8(99), None);
+    }
 
     /// Builds an in-memory v2 `RRTI` over the docs at the default head boundary.
     fn build(docs: &[(u32, &str)], head_boundary: u32) -> TermIndex<MemoryFetch> {
