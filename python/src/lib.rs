@@ -528,7 +528,7 @@ fn write_term_index(
 
 /// A streaming `RRTI` term-index builder for corpora too large to hold in memory.
 /// Construct with a head boundary and optional Snowball stemming / stop-word removal,
-/// feed `(doc_id, text)` documents in chunks with `add_batch` (each is tokenized and the
+/// feed `(doc_id, text)` documents in chunks with `add_many` (each is tokenized and the
 /// text discarded — only the postings grow), then `finish(path)` writes the `.rrt`. Doc
 /// IDs should be the shared rank-order IDs so the index composes with the others.
 #[pyclass]
@@ -550,7 +550,7 @@ impl TermBuilder {
             None => None,
             Some(code) => Some(Language::from_code(code).ok_or_else(|| {
                 PyValueError::new_err(format!(
-                    "unknown stemmer language {code:?} (supported: \"english\", \"spanish\")"
+                    "unknown stemmer language {code:?}; use a Snowball name or ISO-639-1 code (e.g. \"english\"/\"en\", \"french\"/\"fr\")"
                 ))
             })?),
         };
@@ -566,7 +566,7 @@ impl TermBuilder {
     }
 
     /// Adds a batch of `(doc_id, text)` documents; the text is tokenized and discarded.
-    fn add_batch(&mut self, docs: Vec<(u32, String)>) -> PyResult<()> {
+    fn add_many(&mut self, docs: Vec<(u32, String)>) -> PyResult<()> {
         let b = self
             .inner
             .as_mut()
@@ -597,6 +597,12 @@ impl TermBuilder {
 
 fn io_err(e: std::io::Error) -> PyErr {
     PyIOError::new_err(e.to_string())
+}
+
+/// Maps a core read error (e.g. `IndexError` from parsing a manifest) to a Python
+/// `ValueError` — the read-side parallel of [`io_err`]/[`build_err`].
+fn index_err(e: impl std::fmt::Display) -> PyErr {
+    PyValueError::new_err(e.to_string())
 }
 
 /// Maps a policy name to the core's [`CorePolicy`].
@@ -799,7 +805,7 @@ impl TermSplitSetBuilder {
             None => None,
             Some(code) => Some(Language::from_code(code).ok_or_else(|| {
                 PyValueError::new_err(format!(
-                    "unknown stemmer language {code:?} (supported: \"english\", \"spanish\")"
+                    "unknown stemmer language {code:?}; use a Snowball name or ISO-639-1 code (e.g. \"english\"/\"en\", \"french\"/\"fr\")"
                 ))
             })?),
         };
@@ -946,8 +952,7 @@ impl SplitSetWriter {
         name_prefix: &str,
         bloom_bits_per_key: u32,
     ) -> PyResult<Self> {
-        let prev = CoreSplitSet::from_bytes(&manifest)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let prev = CoreSplitSet::from_bytes(&manifest).map_err(index_err)?;
         Ok(SplitSetWriter {
             inner: CoreSplitSetWriter::resume(
                 &prev,

@@ -46,13 +46,13 @@ for line in proc.stdout:
     text = ((rec.get("t") or "") + " " + (rec.get("ab") or "")).strip()
     chunk.append((int(did), text))
     if len(chunk) >= CHUNK:
-        builder.add_batch(chunk)
+        builder.add_many(chunk)
         done += len(chunk)
         chunk = []
         if done % 5_000_000 < CHUNK:
             log(f"added {done:,} docs, {builder.term_count():,} distinct terms")
 if chunk:
-    builder.add_batch(chunk)
+    builder.add_many(chunk)
     done += len(chunk)
 log(f"streamed {done:,} docs, {builder.term_count():,} distinct terms; writing {OUT}...")
 builder.finish(OUT)

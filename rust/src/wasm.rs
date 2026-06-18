@@ -858,10 +858,13 @@ impl RrsCatalog {
         Ok(RrsCatalog { inner: Some(inner) })
     }
 
-    /// The wrapped catalog. Panics only if a previous builder call left `inner`
-    /// empty, which the builder methods never do (they always restore it).
-    fn cat(&self) -> &Catalog<WasmFetch> {
-        self.inner.as_ref().expect("catalog present")
+    /// The wrapped catalog, or a clean error when a previous builder call
+    /// (`openFacets`/`openRecords`) failed and consumed it — the consuming `load_*`
+    /// builders can't restore `inner` on a fetch error, so this must not panic.
+    fn cat(&self) -> Result<&Catalog<WasmFetch>, JsError> {
+        self.inner.as_ref().ok_or_else(|| {
+            JsError::new("catalog unavailable: a prior openFacets/openRecords failed")
+        })
     }
 
     /// Boots the catalog with all three resources at once: the index at
@@ -894,7 +897,9 @@ impl RrsCatalog {
     /// and facet counts.
     #[wasm_bindgen(js_name = openFacets)]
     pub async fn open_facets(&mut self, url: String) -> Result<(), JsError> {
-        let prev = self.inner.take().expect("catalog present");
+        let prev = self.inner.take().ok_or_else(|| {
+            JsError::new("catalog unavailable: a prior openFacets/openRecords failed")
+        })?;
         self.inner = Some(
             prev.load_facets(WasmFetch::new(url))
                 .await
@@ -907,7 +912,9 @@ impl RrsCatalog {
     /// and attaches it, so [`RrsCatalog::search`] returns record bytes.
     #[wasm_bindgen(js_name = openRecords)]
     pub async fn open_records(&mut self, idx_url: String, bin_url: String) -> Result<(), JsError> {
-        let prev = self.inner.take().expect("catalog present");
+        let prev = self.inner.take().ok_or_else(|| {
+            JsError::new("catalog unavailable: a prior openFacets/openRecords failed")
+        })?;
         self.inner = Some(
             prev.load_records(WasmFetch::new(idx_url), WasmFetch::new(bin_url))
                 .await
@@ -929,7 +936,9 @@ impl RrsCatalog {
         bin_url: String,
         dict: Vec<u8>,
     ) -> Result<(), JsError> {
-        let prev = self.inner.take().expect("catalog present");
+        let prev = self.inner.take().ok_or_else(|| {
+            JsError::new("catalog unavailable: a prior openFacets/openRecords failed")
+        })?;
         self.inner = Some(
             prev.load_records_dict(WasmFetch::new(idx_url), WasmFetch::new(bin_url), dict)
                 .await
@@ -958,7 +967,7 @@ impl RrsCatalog {
     ) -> Result<JsValue, JsError> {
         let filter = filter_pairs(&filters)?;
         let page = self
-            .cat()
+            .cat()?
             .search(&query, offset, len, max_missing, &filter)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
@@ -978,7 +987,7 @@ impl RrsCatalog {
             }
             None => JsValue::NULL,
         };
-        let facet_counts = facet_counts_to_js(self.cat().fields(), &page.facet_counts);
+        let facet_counts = facet_counts_to_js(self.cat()?.fields(), &page.facet_counts);
 
         let out = Object::new();
         Reflect::set(&out, &"ids".into(), &ids.into()).map_err(|e| JsError::new(&js_err(&e)))?;
@@ -992,14 +1001,14 @@ impl RrsCatalog {
     /// `{ field, cats: [{ name, count }] }`, or an empty array when no facet sidecar is attached.
     /// Mirrors [`RrsIndex::facets`].
     #[wasm_bindgen(js_name = facets)]
-    pub fn facets(&self) -> JsValue {
-        facets_meta_array(self.cat().fields()).into()
+    pub fn facets(&self) -> Result<JsValue, JsError> {
+        Ok(facets_meta_array(self.cat()?.fields()).into())
     }
 
     /// Number of n-grams in the index dictionary.
     #[wasm_bindgen(js_name = ngramCount)]
-    pub fn ngram_count(&self) -> u32 {
-        self.cat().index().ngram_count()
+    pub fn ngram_count(&self) -> Result<u32, JsError> {
+        Ok(self.cat()?.index().ngram_count())
     }
 }
 
@@ -1712,8 +1721,8 @@ impl RrbIndex {
 
     /// Total documents in the corpus the sidecar was built over (BM25's N).
     #[wasm_bindgen(js_name = docCount)]
-    pub fn doc_count(&self) -> f64 {
-        self.inner.doc_count() as f64
+    pub fn doc_count(&self) -> u32 {
+        self.inner.doc_count()
     }
 }
 
