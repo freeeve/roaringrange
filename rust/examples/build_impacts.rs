@@ -422,7 +422,7 @@ fn merge(
     let term_count: u32 = term_i
         .try_into()
         .map_err(|_| io::Error::other("term count exceeds u32"))?;
-    if term_count as usize != rrt_idx.len() {
+    if term_count != rrt_idx.len() {
         return Err(io::Error::other(format!(
             "merged {term_count} terms but the dictionary has {}",
             rrt_idx.len()

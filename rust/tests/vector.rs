@@ -346,7 +346,7 @@ fn rerank_recovers_near_exact_topk() {
     let idx = open_index(&corpus, &params);
     let rerank = open_rerank(&corpus, dim);
     assert_eq!(rerank.dim(), dim);
-    assert_eq!(rerank.len(), n as u64);
+    assert_eq!(rerank.len(), n);
 
     let k = 10usize;
     let mut qrng = Rng::new(64);

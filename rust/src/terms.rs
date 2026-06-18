@@ -312,9 +312,11 @@ impl<F: RangeFetch> TermIndex<F> {
         })
     }
 
-    /// Number of distinct terms in the dictionary.
-    pub fn len(&self) -> usize {
-        self.term_count as usize
+    /// Number of distinct terms in the dictionary. `u32` like every other
+    /// roaringrange entity count (the doc-ID space is `u32`, so counts can't
+    /// exceed it).
+    pub fn len(&self) -> u32 {
+        self.term_count
     }
 
     /// Reports whether the dictionary is empty.

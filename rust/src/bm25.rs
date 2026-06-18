@@ -150,9 +150,10 @@ impl<F: RangeFetch> ImpactIndex<F> {
         })
     }
 
-    /// Total documents in the corpus the sidecar was built over (BM25's N).
-    pub fn doc_count(&self) -> u64 {
-        self.doc_count
+    /// Total documents in the corpus the sidecar was built over (BM25's N; `u32`
+    /// like the other entity counts — the IDF math reads the `u64` field directly).
+    pub fn doc_count(&self) -> u32 {
+        self.doc_count as u32
     }
 
     /// The byte range of the entry stripe whose sparse slot could contain
@@ -508,8 +509,8 @@ mod native {
         }
 
         /// Documents accumulated so far.
-        pub fn doc_count(&self) -> u64 {
-            self.doc_lens.len() as u64
+        pub fn doc_count(&self) -> u32 {
+            self.doc_lens.len() as u32
         }
     }
 

@@ -275,9 +275,9 @@ impl<F: RangeFetch> VectorIndex<F> {
         self.nbits
     }
 
-    /// Total number of indexed vectors.
-    pub fn len(&self) -> u64 {
-        self.n
+    /// Total number of indexed vectors (`u32`: `vector_id == doc_id`, a `u32`).
+    pub fn len(&self) -> u32 {
+        self.n as u32
     }
 
     /// Whether the index holds no vectors.
@@ -588,9 +588,9 @@ impl<F: RangeFetch> RerankStore<F> {
         self.dim
     }
 
-    /// Number of stored vectors (doc IDs `0..n`).
-    pub fn len(&self) -> u64 {
-        self.n
+    /// Number of stored vectors (doc IDs `0..n`; `u32`).
+    pub fn len(&self) -> u32 {
+        self.n as u32
     }
 
     /// Whether the sidecar holds no vectors.

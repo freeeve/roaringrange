@@ -1450,7 +1450,7 @@ impl RrviIndex {
 
     /// Total number of indexed vectors.
     pub fn len(&self) -> u32 {
-        self.inner.len() as u32
+        self.inner.len()
     }
 
     /// Whether the index holds no vectors.
@@ -1608,7 +1608,7 @@ impl RrtIndex {
 
     /// Number of distinct terms in the dictionary.
     pub fn len(&self) -> u32 {
-        self.inner.len() as u32
+        self.inner.len()
     }
 
     /// Whether the dictionary holds no terms.
