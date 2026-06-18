@@ -842,7 +842,7 @@ fn facet_counts_to_js(fields: &[Field], counts: &Option<Vec<Vec<u64>>>) -> JsVal
 #[wasm_bindgen]
 pub struct RrsCatalog {
     /// Always `Some` between calls; held in an `Option` so the consuming
-    /// builder methods (`with_facets`/`with_records`) can `take` and replace it.
+    /// builder methods (`load_facets`/`load_records`) can `take` and replace it.
     inner: Option<Catalog<WasmFetch>>,
 }
 
@@ -878,10 +878,10 @@ impl RrsCatalog {
         let inner = Catalog::open(WasmFetch::new(index_url))
             .await
             .map_err(|e| JsError::new(&e.to_string()))?
-            .with_facets(WasmFetch::new(facets_url))
+            .load_facets(WasmFetch::new(facets_url))
             .await
             .map_err(|e| JsError::new(&e.to_string()))?
-            .with_records(
+            .load_records(
                 WasmFetch::new(records_idx_url),
                 WasmFetch::new(records_bin_url),
             )
@@ -896,7 +896,7 @@ impl RrsCatalog {
     pub async fn open_facets(&mut self, url: String) -> Result<(), JsError> {
         let prev = self.inner.take().expect("catalog present");
         self.inner = Some(
-            prev.with_facets(WasmFetch::new(url))
+            prev.load_facets(WasmFetch::new(url))
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?,
         );
@@ -909,7 +909,7 @@ impl RrsCatalog {
     pub async fn open_records(&mut self, idx_url: String, bin_url: String) -> Result<(), JsError> {
         let prev = self.inner.take().expect("catalog present");
         self.inner = Some(
-            prev.with_records(WasmFetch::new(idx_url), WasmFetch::new(bin_url))
+            prev.load_records(WasmFetch::new(idx_url), WasmFetch::new(bin_url))
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?,
         );
@@ -931,7 +931,7 @@ impl RrsCatalog {
     ) -> Result<(), JsError> {
         let prev = self.inner.take().expect("catalog present");
         self.inner = Some(
-            prev.with_records_dict(WasmFetch::new(idx_url), WasmFetch::new(bin_url), dict)
+            prev.load_records_dict(WasmFetch::new(idx_url), WasmFetch::new(bin_url), dict)
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?,
         );
@@ -1214,7 +1214,7 @@ impl RrsSortCols {
 /// counts are identical to the primary order's. See `SORTCOLS.md`.
 #[wasm_bindgen]
 pub struct RrsSecondaryIndex {
-    /// Held in an `Option` so the consuming builder `with_facets` can be driven by
+    /// Held in an `Option` so the consuming builder `load_facets` can be driven by
     /// the `&mut self` `open_facets` (take, attach, replace).
     inner: Option<SecondaryIndex<WasmFetch>>,
 }
@@ -1239,7 +1239,7 @@ impl RrsSecondaryIndex {
             .take()
             .ok_or_else(|| JsError::new("secondary index unavailable"))?;
         let sec = sec
-            .with_facets(WasmFetch::new(url))
+            .load_facets(WasmFetch::new(url))
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         self.inner = Some(sec);

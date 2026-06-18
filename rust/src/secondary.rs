@@ -30,7 +30,7 @@ const PERM_COLUMN: &str = "primary";
 /// space, and an optional secondary-space facet sidecar for filtered search.
 ///
 /// Open it over the secondary `.rrs` and the perm `RRSC`, then optionally attach
-/// the secondary `.rrf` with [`SecondaryIndex::with_facets`]. The facet sidecar is
+/// the secondary `.rrf` with [`SecondaryIndex::load_facets`]. The facet sidecar is
 /// the **same** facet postings as the primary one, but with each category's doc IDs
 /// remapped into the secondary space (built once, alongside the secondary `.rrs`) —
 /// so a roaring AND against them is positionally valid in secondary space. Facet
@@ -66,7 +66,7 @@ impl<F: RangeFetch + Clone> SecondaryIndex<F> {
     /// filtered secondary search and facet counts. Builder style: consumes and
     /// returns `self`. The sidecar must hold the facet postings in **secondary** doc
     /// IDs (the build-time remap of the primary postings); see the type docs.
-    pub async fn with_facets(mut self, facets: F) -> Result<Self, IndexError> {
+    pub async fn load_facets(mut self, facets: F) -> Result<Self, IndexError> {
         self.facets = Some(FacetIndex::open(facets).await?);
         Ok(self)
     }
@@ -327,7 +327,7 @@ mod tests {
         let sec = block_on(async {
             SecondaryIndex::open(index, perm(vec![1, 3, 2, 0]))
                 .await?
-                .with_facets(facets)
+                .load_facets(facets)
                 .await
         })
         .unwrap();

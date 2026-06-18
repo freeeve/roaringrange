@@ -37,7 +37,7 @@ pub struct SearchPage {
 /// A facade bundling a text [`Index`] with an optional [`FacetIndex`] and an
 /// optional [`RecordStore`], all over the same [`RangeFetch`] type. Build one
 /// with [`Catalog::open`] and attach the optional resources with
-/// [`Catalog::with_facets`] / [`Catalog::with_records`].
+/// [`Catalog::load_facets`] / [`Catalog::load_records`].
 pub struct Catalog<F: RangeFetch + Clone> {
     index: Index<F>,
     facets: Option<FacetIndex<F>>,
@@ -58,7 +58,7 @@ impl<F: RangeFetch + Clone> Catalog<F> {
 
     /// Opens the facet sidecar at `facets` and attaches it, enabling filtered
     /// search and facet counts. Builder style: consumes and returns `self`.
-    pub async fn with_facets(mut self, facets: F) -> Result<Self, IndexError> {
+    pub async fn load_facets(mut self, facets: F) -> Result<Self, IndexError> {
         self.facets = Some(FacetIndex::open(facets).await?);
         Ok(self)
     }
@@ -66,7 +66,7 @@ impl<F: RangeFetch + Clone> Catalog<F> {
     /// Opens the record store (`idx` offset index + `bin` record blob) and
     /// attaches it, so [`Catalog::search`] returns record bytes. Builder style:
     /// consumes and returns `self`.
-    pub async fn with_records(mut self, idx: F, bin: F) -> Result<Self, IndexError> {
+    pub async fn load_records(mut self, idx: F, bin: F) -> Result<Self, IndexError> {
         self.records = Some(RecordStore::open(idx, bin).await?);
         Ok(self)
     }
@@ -75,7 +75,7 @@ impl<F: RangeFetch + Clone> Catalog<F> {
     /// sidecar's bytes), so a version-2 compressed store's records inflate
     /// transparently in [`Catalog::search`]. A raw store ignores the dictionary,
     /// so this is always safe to use. Builder style: consumes and returns `self`.
-    pub async fn with_records_dict(
+    pub async fn load_records_dict(
         mut self,
         idx: F,
         bin: F,
@@ -274,9 +274,9 @@ mod tests {
         let cat = block_on(async {
             Catalog::open(index)
                 .await?
-                .with_facets(facets)
+                .load_facets(facets)
                 .await?
-                .with_records(idx, bin)
+                .load_records(idx, bin)
                 .await
         })
         .unwrap();
@@ -307,9 +307,9 @@ mod tests {
         let cat = block_on(async {
             Catalog::open(index)
                 .await?
-                .with_facets(facets)
+                .load_facets(facets)
                 .await?
-                .with_records(idx, bin)
+                .load_records(idx, bin)
                 .await
         })
         .unwrap();
@@ -349,7 +349,7 @@ mod tests {
     fn records_without_facets() {
         let (index, _, (idx, bin)) = fixture();
         let cat =
-            block_on(async { Catalog::open(index).await?.with_records(idx, bin).await }).unwrap();
+            block_on(async { Catalog::open(index).await?.load_records(idx, bin).await }).unwrap();
         let page = block_on(cat.search("abc", 0, 2, 0, &[])).unwrap();
         assert_eq!(page.ids, vec![1, 2]);
         assert_eq!(page.records.unwrap()[1].as_deref().unwrap(), b"rec-2");

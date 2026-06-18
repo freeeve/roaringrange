@@ -177,7 +177,7 @@ async fn catalog() -> Result<&'static Catalog<CachedFetch<S3Fetch>>, Error> {
             Catalog::open(index)
                 .await
                 .map_err(|e| Error::from(format!("open index: {e}")))?
-                .with_facets(facets)
+                .load_facets(facets)
                 .await
                 .map_err(|e| Error::from(format!("open facets: {e}")))
         })

@@ -62,7 +62,7 @@ async fn main() {
     let cat = Catalog::open(FileFetch { path: rrs })
         .await
         .expect("open index")
-        .with_facets(FileFetch { path: rrf })
+        .load_facets(FileFetch { path: rrf })
         .await
         .expect("open facets");
     eprintln!("catalog open; fields={}", cat.fields().len());
