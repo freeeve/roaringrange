@@ -407,9 +407,8 @@ impl RrsIndex {
     /// before search-filtered counts report non-zero.
     #[wasm_bindgen(js_name = openFacetsFromBoot)]
     pub fn open_facets_from_boot(&mut self, meta: Vec<u8>, url: String) -> Result<(), JsError> {
-        let facets = crate::facet::FacetMeta::parse(meta)
-            .map_err(|e| JsError::new(&e.to_string()))?
-            .attach(WasmFetch::new(url));
+        let facets = crate::facet::FacetIndex::from_boot(meta, WasmFetch::new(url))
+            .map_err(|e| JsError::new(&e.to_string()))?;
         self.facets = Some(facets);
         Ok(())
     }

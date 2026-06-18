@@ -135,7 +135,18 @@ impl<F: RangeFetch> FacetIndex<F> {
         let header = fetch.read(0, HEADER_SIZE).await?;
         let meta_len = rrsf_boot_len(&header)?;
         let buf = fetch.read(0, meta_len).await?;
-        Ok(FacetMeta::parse(buf)?.attach(fetch))
+        Self::from_boot(buf, fetch)
+    }
+
+    /// Boots from already-fetched meta-region bytes (`meta`, the boot region a
+    /// bundle or hotcache inlines) paired with `fetch` for later head/tail reads —
+    /// the zero-extra-fetch constructor, mirroring [`Index::from_boot`](crate::Index::from_boot)
+    /// and [`Lookup::from_boot`](crate::Lookup::from_boot). Equivalent to
+    /// [`open_meta`](Self::open_meta) without its two header/region reads. The
+    /// underlying [`FacetMeta::parse`] + [`FacetMeta::attach`] remain available for
+    /// callers that already hold a parsed [`FacetMeta`].
+    pub fn from_boot(meta: Vec<u8>, fetch: F) -> Result<Self, IndexError> {
+        Ok(FacetMeta::parse(meta)?.attach(fetch))
     }
 
     /// [`FacetIndex::open`] with explicit tuning: `eager_limit` is the
@@ -150,7 +161,7 @@ impl<F: RangeFetch> FacetIndex<F> {
         let header = fetch.read(0, HEADER_SIZE).await?;
         let meta_len = rrsf_boot_len(&header)?;
         let buf = fetch.read(0, meta_len).await?;
-        let mut fi = FacetMeta::parse(buf)?.attach(fetch);
+        let mut fi = Self::from_boot(buf, fetch)?;
         fi.load_heads_tuned(eager_limit, top_n).await?;
         Ok(fi)
     }
