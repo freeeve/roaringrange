@@ -205,18 +205,19 @@ Legend: 🟢 additive/non-breaking · ⚠️ breaking · markers are per-item.
 
 ### Remaining plan (decided)
 
-- **N4** — rename the fetching builder methods (`Catalog::with_facets`/
-  `with_records`/`with_records_dict`, `SecondaryIndex::with_facets`) to `load_*`
-  (they're async + fallible; `with_*` stays for cheap chainable setters like
-  `RecordStore::with_dict`/`Ivfpq::with_opq`). **TODO.**
-- **T1** — standardize entity counts on **`u32`** (doc IDs are u32 system-wide, so
-  counts can't exceed the u32 ID space; most code already uses u32). Change
-  `TermIndex::len`→u32, `VectorIndex::len`/`RerankStore::len`→u32; keep genuine
-  byte-lengths (`MemoryFetch::len`) as `usize`. Update wasm `f64` conversions.
-  **TODO.**
-- **S1** — extract a shared `Cursor` trait over the byte-identical `Cursor` /
-  `SecondaryCursor` (`next`/`page`/`head_bitmap`/`loaded`/`head_count`/
-  `pending_tail`/`load_tail`). **TODO.**
+- **N4 — DONE (`88e3af1`).** Renamed the async, fallible fetching builders
+  (`Catalog::{with_facets,with_records,with_records_dict}`,
+  `SecondaryIndex::with_facets`) → `load_*`; cheap sync setters
+  (`RecordStore::with_dict`, `Ivfpq::with_opq`) keep `with_*`. Not js_name-exported,
+  so no JS break.
+- **T1 — DONE (`1a60b8a`).** Entity-count getters standardized on **`u32`**
+  (`TermIndex::len` was usize; `VectorIndex::len`/`RerankStore::len`/
+  `ImpactIndex::doc_count`/`ImpactsAccumulator::doc_count` were u64). Backing
+  on-disk u64 fields unchanged; genuine byte-lengths (`MemoryFetch::len`) stay
+  usize; cardinality/cost sums (`query_cost` etc.) stay u64.
+- **S1 — DONE (`48726b8`).** Added the `SearchCursor` trait both `Cursor` and
+  `SecondaryCursor` implement (inherent methods kept; non-breaking), re-exported
+  from the crate root, covered by a generic-paging test.
 - **N5 — DECLINED.** `SortCols::values`/`value` is the right name for a *column*
   store (you read column values by id); renaming to `get_many`/`get` would lose
   that meaning. The apparent inconsistency with `RecordStore::get_many` reflects a
