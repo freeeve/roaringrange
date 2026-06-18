@@ -196,6 +196,32 @@ Legend: 🟢 additive/non-breaking · ⚠️ breaking · markers are per-item.
   + 2 examples + tests. S3: doc note on `FileFetch::open` clarifying it is the
   synchronous file-handle `open` (vs the async fetch-ctor `open` everywhere else).
   Verified: tests pass, clippy 0 errors, fmt clean, wasm + python compile.
-- Steps remaining: N4 (`with_*`→`load_*` for fetching variants), N5 (`values`→
-  `get_many`), T1 (`len()` integer type), S1 (shared `Cursor` trait), N3 (wasm
-  `Rrs*` renames). T4-flags deferral noted in Step 2.
+- **Released `v0.18.0`** at commit `6047e08` (Steps 1–4 + the bm25 min-match
+  feature). Pushed to origin via annotated tag (the project's release mechanism;
+  no GitHub Releases). Pre-push gate (fmt + clippy `-D warnings` across the feature
+  matrix on `rust` + `openalex-builder`, gofmt) green. The `fix` commit `6047e08`
+  caught/fixed the API consumers the refactor touched (openalex-builder + 3 search
+  Lambdas → `fields()`) and a `BodyKind` feature-gating bug.
+
+### Remaining plan (decided)
+
+- **N4** — rename the fetching builder methods (`Catalog::with_facets`/
+  `with_records`/`with_records_dict`, `SecondaryIndex::with_facets`) to `load_*`
+  (they're async + fallible; `with_*` stays for cheap chainable setters like
+  `RecordStore::with_dict`/`Ivfpq::with_opq`). **TODO.**
+- **T1** — standardize entity counts on **`u32`** (doc IDs are u32 system-wide, so
+  counts can't exceed the u32 ID space; most code already uses u32). Change
+  `TermIndex::len`→u32, `VectorIndex::len`/`RerankStore::len`→u32; keep genuine
+  byte-lengths (`MemoryFetch::len`) as `usize`. Update wasm `f64` conversions.
+  **TODO.**
+- **S1** — extract a shared `Cursor` trait over the byte-identical `Cursor` /
+  `SecondaryCursor` (`next`/`page`/`head_bitmap`/`loaded`/`head_count`/
+  `pending_tail`/`load_tail`). **TODO.**
+- **N5 — DECLINED.** `SortCols::values`/`value` is the right name for a *column*
+  store (you read column values by id); renaming to `get_many`/`get` would lose
+  that meaning. The apparent inconsistency with `RecordStore::get_many` reflects a
+  genuinely different data model, not a naming defect.
+- **N3 — DEFERRED.** The wasm `Rrs*` struct renames are cosmetic and would break
+  the JS API the external QLL repo consumes — cost (downstream breakage) outweighs
+  the value. Revisit only alongside a deliberate QLL-coordinated wasm break.
+- **T4-flags — DEFERRED** (rationale in Step 2).
