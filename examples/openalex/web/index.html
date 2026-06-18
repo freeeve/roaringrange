@@ -1905,6 +1905,11 @@
       }
 
       let searchSeq = 0;   // bumped per query so a stale, slower earlier search can bail before rendering
+      // Serializes the wasm-using part of searches: a new run awaits the prior run's
+      // in-flight arm borrows (rterm/rrb/idx/rrvi/embedder) to release before it
+      // touches any wasm object — wasm-bindgen errors "recursive use of an object"
+      // on overlap (most visible in Hybrid·full's four arms under rapid re-search).
+      let searchLock = Promise.resolve();
 
       /* Live in-flight activity: while a search / page / tail pull is running, tick
          the per-query request+byte counters (the wrapped fetch updates them as each
@@ -2110,13 +2115,21 @@
 
       /* -------- run a query (resetPaging=true on new query / fuzz change) -------- */
       async function runSearch(resetPaging = true) {
-        // Thin wrapper so every exit path (and there are many early returns in the
-        // body) stops the live in-flight indicator without touching a newer run's.
+        // Supersede any in-flight search immediately (it bails at its next seq guard),
+        // then serialize the wasm-using section: wait for the prior run to release its
+        // arm borrows before this one touches any wasm object (wasm-bindgen forbids
+        // recursive/aliased use). startLive/stopLive bracket every early-return exit.
+        const mySeq = ++searchSeq;
+        const prev = searchLock;
+        let release;
+        searchLock = new Promise((r) => (release = r));
         const tok = startLive();
-        try { await runSearchInner(resetPaging); }
-        finally { stopLive(tok); }
+        try {
+          await prev;
+          if (mySeq === searchSeq) await runSearchInner(resetPaging, mySeq);
+        } finally { stopLive(tok); release(); }
       }
-      async function runSearchInner(resetPaging = true) {
+      async function runSearchInner(resetPaging = true, mySeq = searchSeq) {
         searchMode = document.querySelector('input[name="mode"]:checked')?.value || "term";
         clearTimeout(autoPullTimer);
         const q = els.q.value.trim();
@@ -2133,7 +2146,6 @@
         perfModel.query = q;   // shown in the "First page" group header
         perfModel.pageLast = null;   // paging stats are per query
         perfModel.pageAgg = null;
-        const mySeq = ++searchSeq;
         reqs = 0; bytes = 0;
         recCache.clear();
         rankedIds = null;     // a ranked mode (semantic/term/hybrid) sets this; trigram/DOI leave it null
