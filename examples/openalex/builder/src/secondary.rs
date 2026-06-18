@@ -494,7 +494,7 @@ mod tests {
             std::fs::read(&o_rrf).unwrap(),
         )))
         .unwrap();
-        let yf = sfac.fields.iter().find(|f| f.name == "year").unwrap();
+        let yf = sfac.fields().iter().find(|f| f.name == "year").unwrap();
         assert_eq!(
             yf.categories
                 .iter()

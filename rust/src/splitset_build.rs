@@ -15,10 +15,8 @@ use crate::build::{
 };
 use crate::facet::facet_key;
 use crate::ngram::ngram_keys;
-#[cfg(feature = "terms")]
-use crate::splitset::BodyKind;
 use crate::splitset::{
-    bloom_build, tlv_record, Policy, FLAG_BLOOM, FLAG_FACET, SORTCOL_FLAG_DESCENDING,
+    bloom_build, tlv_record, BodyKind, Policy, FLAG_BLOOM, FLAG_FACET, SORTCOL_FLAG_DESCENDING,
     SUMMARY_TAG_BLOOM, SUMMARY_TAG_FACET,
 };
 #[cfg(feature = "terms")]

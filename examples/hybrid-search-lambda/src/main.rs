@@ -258,7 +258,7 @@ async fn hybrid() -> Result<&'static Hybrid, Error> {
 
 fn facets_value<F: RangeFetch>(fi: &FacetIndex<F>, counts: &[Vec<u64>]) -> serde_json::Value {
     let groups: Vec<serde_json::Value> = fi
-        .fields
+        .fields()
         .iter()
         .zip(counts)
         .map(|(field, fc)| {
