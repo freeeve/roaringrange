@@ -65,6 +65,22 @@ pub fn serialize_posting(bm: &RoaringBitmap) -> Vec<u8> {
 /// — one portable RoaringBitmap per term (from [`serialize_posting`]), no head/tail split.
 /// Entries are sorted by key here (the dictionary must be key-sorted). A `stride` of 0 becomes
 /// [`DEFAULT_STRIDE`]. See `FORMAT.md`.
+/// Writes the `RRS` sparse index: every `stride`-th entry's `u64` key, little-
+/// endian. Shared by the one-shot [`write_index`] and the chunked
+/// [`chunk::merge_partials_to_rrs`] so the two layouts can't drift.
+fn write_sparse_index<W: Write, T>(
+    w: &mut W,
+    entries: &[T],
+    sparse_count: usize,
+    stride: usize,
+    key: impl Fn(&T) -> u64,
+) -> io::Result<()> {
+    for i in 0..sparse_count {
+        w.write_all(&key(&entries[i * stride]).to_le_bytes())?;
+    }
+    Ok(())
+}
+
 pub fn write_index<W: Write>(
     mut w: W,
     gram_size: u16,
@@ -89,10 +105,8 @@ pub fn write_index<W: Write>(
     w.write_all(&ngrams.to_le_bytes())?;
     w.write_all(&stride.to_le_bytes())?;
 
-    // Sparse index: dict[i*stride].key.
-    for i in 0..sparse_count {
-        w.write_all(&entries[i * stride as usize].0.to_le_bytes())?;
-    }
+    // Sparse index: every stride-th key.
+    write_sparse_index(&mut w, &entries, sparse_count, stride as usize, |e| e.0)?;
 
     // Dictionary (20 B each): key + absolute posting offset + size.
     let mut off = postings_start as u64;
@@ -810,9 +824,7 @@ pub mod chunk {
         out.write_all(&gram_size.to_le_bytes())?;
         out.write_all(&(n as u32).to_le_bytes())?;
         out.write_all(&stride.to_le_bytes())?;
-        for i in 0..sparse_count {
-            out.write_all(&dict[i * stride as usize].0.to_le_bytes())?;
-        }
+        super::write_sparse_index(out, &dict, sparse_count, stride as usize, |d| d.0)?;
         for (key, off, size) in &dict {
             out.write_all(&key.to_le_bytes())?;
             out.write_all(&off.to_le_bytes())?;
