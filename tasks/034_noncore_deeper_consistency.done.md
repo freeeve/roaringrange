@@ -61,10 +61,14 @@ in the header.
   (no actual count); `.expect()` on infallible Vec serialize; redundant
   `super::quantize_impact`.
 
-## Plan (decided)
+## Plan (decided) — DONE
 
-Do **F1 + F2 + F4(a)** now (commit per fix); F3 deferred (verdict recorded);
-F4(b) and F5 left as backlog.
+**F1 + F2 + F4(a) implemented** (commits `9f0f19f`, `0be0368`, `7423058`), each
+pre-push-gate green. **F3 deferred** (verdict recorded: shared `BuildError` enum is
+the rusty ideal, format-prefixed `io::Error::other` is the pragmatic point F1
+delivers). **F4(b)** (splitset Builder/Writer dedup — shared token-extractor/encoder
+seam) and **F5** (LOW: const naming, SplitSpec validation, IMPACT_SUPREMUM const,
+etc.) left as backlog for a future task.
 
 ## Acceptance
 
