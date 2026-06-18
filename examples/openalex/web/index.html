@@ -670,6 +670,8 @@
             <label for="mode-hybrid-tri">Hybrid·tri</label>
             <input type="radio" name="mode" id="mode-hybrid-term" value="hybrid-term" />
             <label for="mode-hybrid-term">Hybrid·term</label>
+            <input type="radio" name="mode" id="mode-hybrid-full" value="hybrid-full" />
+            <label for="mode-hybrid-full">Hybrid·full</label>
           </div>
 
           <div class="fuzz" id="fuzzmode" role="radiogroup" aria-label="Match mode">
@@ -1023,16 +1025,16 @@
           // makes that visible.
           add(".rrss manifest", fileSizes.rrss);
           add(`${rrss.splitCount()} splits · ${fmtCount(Number(rrss.docCount()))} docs`, Number(rrss.totalBytes()));
-        } else if (mode === "trigram" || mode === "hybrid-tri") {
+        } else if (mode === "trigram" || mode === "hybrid-tri" || mode === "hybrid-full") {
           add(".rrs", fileSizes.rrs); add(".rrf", fileSizes.rrf);
         }
         if (mode === "term" && splitMode && rrssTerm) {
           add(".rrss manifest", fileSizes.trrss);
           add(`${rrssTerm.splitCount()} splits · ${fmtCount(Number(rrssTerm.docCount()))} docs`, Number(rrssTerm.totalBytes()));
-        } else if (mode === "term" || mode === "hybrid-term") {
+        } else if (mode === "term" || mode === "hybrid-term" || mode === "hybrid-full") {
           add(".rrt", fileSizes.rrt);
         }
-        if ((mode === "term" || mode === "hybrid-term") && bm25Mode && RRB_URL) {
+        if (((mode === "term" || mode === "hybrid-term") && bm25Mode || mode === "hybrid-full") && RRB_URL) {
           add(".rrb impacts", fileSizes.rrb);
         }
         if (mode.startsWith("hybrid") || mode === "semantic") { add(".rrvi", fileSizes.rrvi); add(".rrm2", fileSizes.rrm2); }
@@ -1121,7 +1123,7 @@
         const wordMode = mode === "trigram" || mode === "term";
         // Server is the default for the word modes AND both hybrid modes, so srv=0 (the
         // opt-out) must survive a refresh for any of them; split is a word-mode-only fallback.
-        const serverable = wordMode || mode.startsWith("hybrid");
+        const serverable = wordMode || mode === "hybrid-tri" || mode === "hybrid-term";
         if (serverable && SERVER_DEFAULT && serverOff) params.set("srv", "0");
         if (wordMode && !serverMode && splitPref === false) params.set("split", "0");
         if ((mode === "term" || mode === "hybrid-term") && RRB_URL && bm25Off) params.set("bm25", "0");
@@ -1149,7 +1151,7 @@
         // (/search-hybrid-{tri,term} — both arms + RRF, in-region). It is the DEFAULT for all,
         // computed BEFORE the split default, which yields to it. Turning server off re-engages
         // the client-side path below (split set for the word modes, in-browser fusion for hybrid).
-        const serverCapable = (triOnly || mode === "term" || mode.startsWith("hybrid")) && SERVER_DEFAULT;
+        const serverCapable = (triOnly || mode === "term" || mode === "hybrid-tri" || mode === "hybrid-term") && SERVER_DEFAULT;
         const srv = document.querySelector(".srvtoggle"); if (srv) srv.style.display = serverCapable ? "" : "none";
         if (serverCapable) {
           serverMode = !serverOff;
@@ -1200,7 +1202,7 @@
           // Legacy deep links: "hybrid" predates the two-arm split — treat as tri+sem.
           const mode = params.get("mode") === "hybrid" ? "hybrid-tri" : params.get("mode");
           let effective = "term";   // term is the default mode now (no `mode` param needed)
-          if (["trigram", "semantic", "hybrid-tri", "hybrid-term"].includes(mode)) {
+          if (["trigram", "semantic", "hybrid-tri", "hybrid-term", "hybrid-full"].includes(mode)) {
             const r = $(`mode-${mode}`);
             if (r) { r.checked = true; effective = mode; }
           }
@@ -2258,6 +2260,50 @@
             await goPageRanked(resetPaging ? 0 : offset);
             return;
           }
+          // hybrid-full: QLL's full lexical+semantic fusion — trigram + strict BM25 +
+          // min-should-match BM25 (>= 2 of M query terms) + the semantic arm, all fused
+          // by reciprocal rank via the N-list reciprocalRankFusion. Client-only (no
+          // server endpoint); arms run sequentially for clean per-arm perf attribution.
+          if (searchMode === "hybrid-full") {
+            const termOk = await ensureTermIndex();
+            const rrbOk = termOk && (await ensureRrb());
+            if (mySeq !== searchSeq) return;
+            const t0 = performance.now();
+            let sem = null;
+            if (ok) { try { sem = await semanticIds(q, depth); } catch (_) {} }
+            const tr0 = reqs, tb0 = bytes, tt0 = performance.now();
+            let tri = [], strict = [], min2 = [];
+            try {
+              if (idx) tri = Array.from(await idx.search(q, depth));
+              if (rrbOk) {
+                strict = Array.from(await rterm.searchBm25(rrb, q, BM25_M, depth));
+                min2 = Array.from(await rterm.searchBm25MinMatch(rrb, q, BM25_M, depth, 2));
+              }
+            } catch (_) {}
+            const txMs = performance.now() - tt0, txReqs = reqs - tr0, txBytes = bytes - tb0;
+            if (mySeq !== searchSeq) return;
+            // One library-backed N-list fusion (no JS reimplementation of RRF).
+            const fused = Array.from(reciprocalRankFusion([
+              Uint32Array.from(sem ? sem.ids : []),
+              Uint32Array.from(tri),
+              Uint32Array.from(strict),
+              Uint32Array.from(min2),
+            ], RRF_K));
+            const ff = await facetFilter(fused, filters);
+            if (mySeq !== searchSeq) return;
+            cur = null;
+            rankedIds = ff.ids;
+            rankedSummary = `hybrid full (trigram + BM25 + min-match + semantic, RRF)${filters.length ? " + facets" : ""} · ${ff.ids.length} result${ff.ids.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`;
+            setPerf({
+              embed: sem ? { ms: sem.embedMs, reqs: sem.embedReqs, bytes: sem.embedBytes } : null,
+              vsearch: sem ? { ms: sem.searchMs, reqs: sem.reqs, bytes: sem.bytes } : null,
+              search: { ms: txMs, reqs: txReqs, bytes: txBytes },
+              facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
+              tail: null, tailresults: null,
+            });
+            await goPageRanked(resetPaging ? 0 : offset);
+            return;
+          }
           // hybrid: fuse a text arm with the semantic arm by reciprocal rank. The
           // text arm is the trigram intersection (hybrid-tri) or the FST term
           // postings (hybrid-term) — same fusion, different recall/precision trade.
@@ -2280,7 +2326,7 @@
             const tr0 = reqs, tb0 = bytes, tt0 = performance.now();
             try {
               text = Array.from(termArm
-                ? (hybridBm25 ? await rterm.searchBm25(rrb, q, BM25_M, depth) : await rterm.search(q, depth))
+                ? (hybridBm25 ? await rterm.searchBm25MinMatch(rrb, q, BM25_M, depth, 2) : await rterm.search(q, depth))
                 : await idx.search(q, depth));
             } catch (_) {}
             txMs = performance.now() - tt0; txReqs = reqs - tr0; txBytes = bytes - tb0;
