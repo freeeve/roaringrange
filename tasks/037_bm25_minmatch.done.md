@@ -1,4 +1,18 @@
-# Task: add min-should-match BM25 search (`searchBm25MinMatch`)
+# Task 037 — add min-should-match BM25 search (`searchBm25MinMatch`)
+
+## ✅ DONE (2026-06-18) — shipped v0.18.0 / v0.19.0
+
+`bm25::search_bm25_min_match` (k-way merge over the M head bitmaps, lenient term
+resolution) plus the `searchBm25MinMatch` wasm binding on `RrtIndex`, both purely
+additive — `search_bm25` (strict AND) is untouched. Unit tests cover the
+clamp/superset/subset invariants; `rust/examples/bm25_minmatch_eval.rs` is a
+known-item eval (strict vs min2, exact + typo regimes). The consumer (QLL
+`roaring-search.js`) and the OpenAlex demo's hybrid arms both use it
+(`min_match=2`), made data-driven in the production fusion config.
+
+(Filed from the root `TASK_bm25_minmatch.md`; original spec preserved below.)
+
+---
 
 ## Why
 

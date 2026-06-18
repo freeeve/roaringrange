@@ -1,5 +1,16 @@
 # Task 022 — v3 cutover + re-enable the split-set mode
 
+## ✅ DONE (verified 2026-06-18)
+
+Completed. The live `openalex-full.rrs` serves **RRSI v3** (CDN `Range: bytes=4-5`
+→ header `0300`, HTTP 206) and the demo has the geometric split toggle live
+(`openalex-trigram-geo/openalex.rrss`, `index.html`) with a v3 wasm reader
+deployed — the end state this cutover targeted (the split-set-default work in
+task 031 carried it the rest of the way). The original RESUME-HERE plan is
+preserved below for the record.
+
+---
+
 Coordinated migration to bring the OpenAlex demo fully consistent on **RRSI v3** and turn the
 **split-set** toggle back on. Gated on the in-flight v3 monolith build. Do NOT run the heavy
 steps while that build (or the Gemma embed) is competing for the box.
