@@ -66,13 +66,39 @@ pub(crate) const SUMMARY_TAG_TOMBSTONE: u8 = 4;
 /// Sort-column descriptor flag bit: rank is descending (higher value = better rank).
 pub const SORTCOL_FLAG_DESCENDING: u8 = 1 << 0;
 
-/// Manifest body-kind (header byte 9): the per-split data files are trigram `RRS` indexes —
-/// the default, so older manifests (which wrote `0` there) read back as trigram.
-pub const BODY_KIND_TRIGRAM: u8 = 0;
-/// Manifest body-kind (header byte 9): the per-split data files are term-level `RRTI` (FST)
-/// indexes instead of trigram `RRS`. The manifest layout is otherwise identical; only how the
-/// reader opens each split changes (see [`SplitBody`]). Requires the `terms` feature to read.
-pub const BODY_KIND_TERM: u8 = 1;
+/// How a split set's per-split data files are encoded — manifest header byte 9.
+/// The manifest layout is identical across kinds; only how the reader opens each
+/// split changes (see [`SplitBody`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyKind {
+    /// Trigram `RRS` indexes — the default, so older manifests (which wrote `0`)
+    /// read back as trigram.
+    Trigram,
+    /// Term-level `RRTI` (FST) indexes. Requires the `terms` feature to read.
+    Term,
+}
+
+impl From<BodyKind> for u8 {
+    /// The on-disk body-kind byte (`0` = trigram, `1` = term).
+    fn from(k: BodyKind) -> u8 {
+        match k {
+            BodyKind::Trigram => 0,
+            BodyKind::Term => 1,
+        }
+    }
+}
+
+impl TryFrom<u8> for BodyKind {
+    type Error = IndexError;
+    /// Parses the on-disk body-kind byte; an unknown code is a malformed manifest.
+    fn try_from(code: u8) -> Result<Self, IndexError> {
+        match code {
+            0 => Ok(BodyKind::Trigram),
+            1 => Ok(BodyKind::Term),
+            _ => Err(IndexError::Malformed("RRSS unknown body-kind code")),
+        }
+    }
+}
 
 /// How the base splits were assembled — recorded in the header so the reader adapts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,20 +113,32 @@ pub enum Policy {
 }
 
 impl Policy {
-    /// Maps the on-disk `u8` policy code to a [`Policy`], or `None` for an unknown code.
-    fn from_u8(code: u8) -> Option<Self> {
-        match code {
-            0 => Some(Policy::Tiered),
-            1 => Some(Policy::StableKey),
-            _ => None,
-        }
-    }
-
-    /// The on-disk `u8` policy code (`0`=tiered, `1`=stable-key) — the builder's encoding.
+    /// The on-disk `u8` policy code (`0`=tiered, `1`=stable-key). Thin shim over the
+    /// canonical [`From<Policy> for u8`](Policy#impl-From<Policy>-for-u8).
     pub fn to_u8(self) -> u8 {
-        match self {
+        u8::from(self)
+    }
+}
+
+impl From<Policy> for u8 {
+    /// The on-disk policy code — the builder's encoding.
+    fn from(p: Policy) -> u8 {
+        match p {
             Policy::Tiered => 0,
             Policy::StableKey => 1,
+        }
+    }
+}
+
+impl TryFrom<u8> for Policy {
+    type Error = IndexError;
+    /// Parses the on-disk policy code; an unknown code is a malformed manifest
+    /// (a strict on-disk discriminant, unlike the lenient stemmer-language byte).
+    fn try_from(code: u8) -> Result<Self, IndexError> {
+        match code {
+            0 => Ok(Policy::Tiered),
+            1 => Ok(Policy::StableKey),
+            _ => Err(IndexError::Malformed("RRSS unknown policy code")),
         }
     }
 }
@@ -287,9 +325,9 @@ pub struct SplitSet {
     /// N-gram window the splits were built with — lets the reader derive a query's keys for
     /// Bloom pruning without opening a split. `0` when unset (older/unspecified manifests).
     gram_size: u16,
-    /// How each split's data file is encoded: [`BODY_KIND_TRIGRAM`] (`RRS`) or
-    /// [`BODY_KIND_TERM`] (`RRTI`). Decides how [`open_split`] opens a split.
-    body_kind: u8,
+    /// How each split's data file is encoded ([`BodyKind`]). Decides how
+    /// [`open_split`] opens a split.
+    body_kind: BodyKind,
     sortcol: Option<SortColDescriptor>,
     splits: Vec<Split>,
     /// Concatenated per-split summary regions; sliced per split by `(summary_off, summary_len)`.
@@ -355,9 +393,8 @@ impl SplitSet {
     /// blob) into a [`SplitSet`]. Shared by [`open`](Self::open) and [`from_bytes`](Self::from_bytes).
     fn parse(header: &[u8], body: &[u8]) -> Result<SplitSet, IndexError> {
         let flags = read_u16(header, 6);
-        let policy =
-            Policy::from_u8(header[8]).ok_or(IndexError::Malformed("RRSS unknown policy"))?;
-        let body_kind = header[9]; // body-kind: 0 = trigram RRS, 1 = term RRTI
+        let policy = Policy::try_from(header[8])?;
+        let body_kind = BodyKind::try_from(header[9])?;
         let tier_count = read_u16(header, 10);
         let split_count = read_u32(header, 12) as usize;
         let base_count = read_u32(header, 16);
@@ -461,9 +498,8 @@ impl SplitSet {
         self.policy
     }
 
-    /// How each split's data file is encoded: [`BODY_KIND_TRIGRAM`] (`RRS`) or
-    /// [`BODY_KIND_TERM`] (`RRTI`).
-    pub fn body_kind(&self) -> u8 {
+    /// How each split's data file is encoded ([`BodyKind`]).
+    pub fn body_kind(&self) -> BodyKind {
         self.body_kind
     }
 
@@ -1028,7 +1064,7 @@ fn facet_file_name(data_file: &str) -> String {
 }
 
 /// An opened split body — either a trigram [`Index`] (`RRS`) or, when the manifest's body-kind
-/// is [`BODY_KIND_TERM`], a term-level [`TermIndex`] (`RRTI`). Both expose the same
+/// is [`BodyKind::Term`], a term-level [`TermIndex`] (`RRTI`). Both expose the same
 /// `search(query, limit) -> local doc IDs` contract, so the query paths stay body-agnostic.
 enum SplitBody<F: RangeFetch> {
     Trigram(Index<F>),
@@ -1056,10 +1092,10 @@ impl<F: RangeFetch> SplitBody<F> {
 async fn open_split<R: SplitFetcher>(
     resolver: &R,
     split: &Split,
-    body_kind: u8,
+    body_kind: BodyKind,
 ) -> Result<SplitBody<R::Fetch>, IndexError> {
     let fetch = resolver.fetch_named(&split.data_file);
-    if body_kind == BODY_KIND_TERM {
+    if body_kind == BodyKind::Term {
         #[cfg(feature = "terms")]
         return Ok(SplitBody::Term(TermIndex::open(fetch).await?));
         #[cfg(not(feature = "terms"))]
@@ -1221,7 +1257,7 @@ mod tests {
             base_count,
             byte_cap: 32 << 20,
             gram_size: 3,
-            body_kind: BODY_KIND_TRIGRAM,
+            body_kind: BodyKind::Trigram,
             sortcol: None,
             flags: 0,
         }
@@ -1272,7 +1308,7 @@ mod tests {
             base_count: 2,
             byte_cap: 16 << 20,
             gram_size: 3,
-            body_kind: BODY_KIND_TRIGRAM,
+            body_kind: BodyKind::Trigram,
             sortcol: Some(SortColSpec {
                 name: "corpus.rrsc".to_string(),
                 column: 3,
@@ -1369,9 +1405,10 @@ mod tests {
     #[test]
     fn policy_round_trips_through_u8() {
         for p in [Policy::Tiered, Policy::StableKey] {
-            assert_eq!(Policy::from_u8(p.to_u8()), Some(p));
+            assert_eq!(Policy::try_from(u8::from(p)).unwrap(), p);
+            assert_eq!(p.to_u8(), u8::from(p));
         }
-        assert_eq!(Policy::from_u8(2), None);
+        assert!(matches!(Policy::try_from(2), Err(IndexError::Malformed(_))));
     }
 
     #[test]
@@ -1512,7 +1549,7 @@ mod tests {
 
         let ss = open_built(&built);
         assert_eq!(ss.policy(), Policy::Tiered);
-        assert_eq!(ss.body_kind(), BODY_KIND_TERM);
+        assert_eq!(ss.body_kind(), BodyKind::Term);
         assert_eq!(ss.tier_count() as usize, built.splits.len());
         assert_eq!(ss.splits()[0].doc_id_lo, 0);
         assert_eq!(ss.splits().last().unwrap().doc_id_hi, n - 1);

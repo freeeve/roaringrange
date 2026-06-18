@@ -462,7 +462,7 @@ impl SplitSetWriter {
             base_count: self.base_count as u32,
             byte_cap: self.byte_cap,
             gram_size: self.gram_size,
-            body_kind: crate::splitset::BODY_KIND_TRIGRAM,
+            body_kind: crate::splitset::BodyKind::Trigram,
             sortcol: self.sortcol.clone(),
             flags,
         };

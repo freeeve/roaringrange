@@ -23,7 +23,7 @@
 
 use roaring::RoaringBitmap;
 use roaringrange::build::serialize_posting;
-use roaringrange::{write_splitset, Policy, SplitSetConfig, SplitSpec, BODY_KIND_TRIGRAM};
+use roaringrange::{write_splitset, BodyKind, Policy, SplitSetConfig, SplitSpec};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -302,7 +302,7 @@ fn slice(
         base_count: specs.len() as u32,
         byte_cap,
         gram_size: gram,
-        body_kind: BODY_KIND_TRIGRAM,
+        body_kind: BodyKind::Trigram,
         sortcol: None,
         flags: 0,
     };

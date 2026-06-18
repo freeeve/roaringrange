@@ -68,26 +68,17 @@ pub enum MemberTag {
 }
 
 impl MemberTag {
-    /// Maps the on-disk `u16` tag to a [`MemberTag`], or `None` for an unknown tag.
-    fn from_u16(tag: u16) -> Option<Self> {
-        match tag {
-            1 => Some(MemberTag::Rrs),
-            2 => Some(MemberTag::Rrti),
-            3 => Some(MemberTag::Rrsf),
-            4 => Some(MemberTag::Rrvi),
-            5 => Some(MemberTag::RrsrIdx),
-            6 => Some(MemberTag::RrsrBin),
-            7 => Some(MemberTag::RrsrDict),
-            8 => Some(MemberTag::Rril),
-            9 => Some(MemberTag::Rrm2),
-            10 => Some(MemberTag::Rrss),
-            _ => None,
-        }
-    }
-
-    /// The on-disk `u16` tag for this member type — the builder's encoding.
+    /// The on-disk `u16` tag for this member type. Thin shim over the canonical
+    /// [`From<MemberTag> for u16`](MemberTag#impl-From<MemberTag>-for-u16).
     pub fn to_u16(self) -> u16 {
-        match self {
+        u16::from(self)
+    }
+}
+
+impl From<MemberTag> for u16 {
+    /// The on-disk `u16` member tag — the builder's encoding.
+    fn from(t: MemberTag) -> u16 {
+        match t {
             MemberTag::Rrs => 1,
             MemberTag::Rrti => 2,
             MemberTag::Rrsf => 3,
@@ -98,6 +89,26 @@ impl MemberTag {
             MemberTag::Rril => 8,
             MemberTag::Rrm2 => 9,
             MemberTag::Rrss => 10,
+        }
+    }
+}
+
+impl TryFrom<u16> for MemberTag {
+    type Error = IndexError;
+    /// Parses the on-disk member tag; an unknown tag is a malformed hotcache.
+    fn try_from(tag: u16) -> Result<Self, IndexError> {
+        match tag {
+            1 => Ok(MemberTag::Rrs),
+            2 => Ok(MemberTag::Rrti),
+            3 => Ok(MemberTag::Rrsf),
+            4 => Ok(MemberTag::Rrvi),
+            5 => Ok(MemberTag::RrsrIdx),
+            6 => Ok(MemberTag::RrsrBin),
+            7 => Ok(MemberTag::RrsrDict),
+            8 => Ok(MemberTag::Rril),
+            9 => Ok(MemberTag::Rrm2),
+            10 => Ok(MemberTag::Rrss),
+            _ => Err(IndexError::Malformed("RRHC unknown member tag")),
         }
     }
 }
@@ -182,8 +193,7 @@ impl Hotcache {
         let mut members = Vec::with_capacity(member_count);
         for i in 0..member_count {
             let base = i * ENTRY_SIZE;
-            let tag = MemberTag::from_u16(read_u16(&body, base))
-                .ok_or(IndexError::Malformed("RRHC unknown member tag"))?;
+            let tag = MemberTag::try_from(read_u16(&body, base))?;
             let flags = read_u16(&body, base + 2);
             let name_off = read_u32(&body, base + 4) as usize;
             let name_len = read_u16(&body, base + 8) as usize;
@@ -403,10 +413,17 @@ mod tests {
             MemberTag::Rrm2,
             MemberTag::Rrss,
         ] {
-            assert_eq!(MemberTag::from_u16(tag.to_u16()), Some(tag));
+            assert_eq!(MemberTag::try_from(u16::from(tag)).unwrap(), tag);
+            assert_eq!(tag.to_u16(), u16::from(tag));
         }
-        assert_eq!(MemberTag::from_u16(0), None);
-        assert_eq!(MemberTag::from_u16(11), None);
+        assert!(matches!(
+            MemberTag::try_from(0),
+            Err(IndexError::Malformed(_))
+        ));
+        assert!(matches!(
+            MemberTag::try_from(11),
+            Err(IndexError::Malformed(_))
+        ));
     }
 
     #[test]

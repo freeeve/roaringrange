@@ -37,7 +37,7 @@ fn main() {
         "tier filtering over a set with delta splits is not supported"
     );
     eprintln!(
-        "in : {} splits, {:.1} MB manifest, {} tiers, bodyKind {}, gram {}",
+        "in : {} splits, {:.1} MB manifest, {} tiers, bodyKind {:?}, gram {}",
         ss.splits().len(),
         buf.len() as f64 / (1u64 << 20) as f64,
         ss.tier_count(),

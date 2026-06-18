@@ -16,10 +16,10 @@ use crate::build::{
 use crate::facet::facet_key;
 use crate::ngram::ngram_keys;
 #[cfg(feature = "terms")]
-use crate::splitset::BODY_KIND_TERM;
+use crate::splitset::BodyKind;
 use crate::splitset::{
-    bloom_build, tlv_record, Policy, BODY_KIND_TRIGRAM, FLAG_BLOOM, FLAG_FACET,
-    SORTCOL_FLAG_DESCENDING, SUMMARY_TAG_BLOOM, SUMMARY_TAG_FACET,
+    bloom_build, tlv_record, Policy, FLAG_BLOOM, FLAG_FACET, SORTCOL_FLAG_DESCENDING,
+    SUMMARY_TAG_BLOOM, SUMMARY_TAG_FACET,
 };
 #[cfg(feature = "terms")]
 use crate::terms::{Language, Tokenizer};
@@ -86,10 +86,9 @@ pub struct SplitSetConfig {
     /// query's keys for Bloom pruning without opening a split. Must match the splits. `0` for a
     /// term-bodied set (no n-grams).
     pub gram_size: u16,
-    /// How each split's data file is encoded: [`BODY_KIND_TRIGRAM`] (`RRS`) or
-    /// [`BODY_KIND_TERM`] (`RRTI`). Written to header byte 9; `0` (trigram) keeps older
-    /// manifests byte-identical.
-    pub body_kind: u8,
+    /// How each split's data file is encoded ([`BodyKind`]). Written to header
+    /// byte 9; trigram (`0`) keeps older manifests byte-identical.
+    pub body_kind: BodyKind,
     /// The stable-key rank source, if any.
     pub sortcol: Option<SortColSpec>,
     /// Header summary-presence flags (`FLAG_BLOOM` | `FLAG_FACET` | …).
@@ -167,7 +166,7 @@ pub fn write_splitset<W: Write>(
     w.write_all(&VERSION.to_le_bytes())?;
     w.write_all(&config.flags.to_le_bytes())?;
     w.write_all(&[config.policy.to_u8()])?;
-    w.write_all(&[config.body_kind])?; // bodyKind @9 (0 = trigram RRS, 1 = term RRTI)
+    w.write_all(&[u8::from(config.body_kind)])?; // bodyKind @9 (0 = trigram RRS, 1 = term RRTI)
     w.write_all(&config.tier_count.to_le_bytes())?;
     w.write_all(&split_count.to_le_bytes())?;
     w.write_all(&config.base_count.to_le_bytes())?;
@@ -255,7 +254,7 @@ pub(crate) fn conformance_golden() -> Vec<u8> {
         base_count: 2,
         byte_cap: 32 << 20,
         gram_size: 3,
-        body_kind: BODY_KIND_TRIGRAM,
+        body_kind: BodyKind::Trigram,
         sortcol: Some(SortColSpec {
             name: "corpus.rrsc".to_string(),
             column: 3,
@@ -748,7 +747,7 @@ impl SplitSetBuilder {
             base_count: self.specs.len() as u32,
             byte_cap: self.byte_cap,
             gram_size: self.gram_size,
-            body_kind: BODY_KIND_TRIGRAM,
+            body_kind: BodyKind::Trigram,
             sortcol: self.sortcol.take(),
             flags,
         };
@@ -762,7 +761,7 @@ impl SplitSetBuilder {
     }
 }
 
-/// Build-time configuration for a **term-bodied** ([`BODY_KIND_TERM`]) split set: like
+/// Build-time configuration for a **term-bodied** ([`BodyKind::Term`]) split set: like
 /// [`SplitBuildConfig`] but each sealed split is an `RRTI` term index rather than a trigram
 /// `RRS`. The n-gram window is replaced by the tokenizer settings (recorded per split for
 /// query/index symmetry), and there is no term Bloom (term-level Bloom pruning is deferred).
@@ -814,7 +813,7 @@ const TERM_INDEX_HEADER_EST: u64 = 128;
 /// facet-presence summaries, per-split `RRSF` sidecars, and the streaming
 /// [`drain_sealed`](Self::drain_sealed) — is identical to the trigram builder; only the open
 /// accumulator (keyed by term string, not n-gram `u64`) and [`seal`](Self::seal)'s body encoder
-/// differ. The manifest records [`BODY_KIND_TERM`] so the reader opens each split as a
+/// differ. The manifest records [`BodyKind::Term`] so the reader opens each split as a
 /// [`crate::terms::TermIndex`]. Term Bloom summaries are deferred (no summary tag 1).
 #[cfg(feature = "terms")]
 pub struct TermSplitSetBuilder {
@@ -1016,7 +1015,7 @@ impl TermSplitSetBuilder {
         )
     }
 
-    /// Seals the final open split and serializes the manifest (`body_kind = BODY_KIND_TERM`,
+    /// Seals the final open split and serializes the manifest (`body_kind = BodyKind::Term`,
     /// `gram_size = 0`), returning the manifest bytes and every split's `(filename, RRTI bytes)`.
     /// Errors if any single document's postings alone exceed the byte cap.
     pub fn finish(mut self) -> io::Result<BuiltSplitSet> {
@@ -1044,7 +1043,7 @@ impl TermSplitSetBuilder {
             base_count: self.specs.len() as u32,
             byte_cap: self.byte_cap,
             gram_size: 0, // term-bodied: no n-grams
-            body_kind: BODY_KIND_TERM,
+            body_kind: BodyKind::Term,
             sortcol: self.sortcol.take(),
             flags,
         };

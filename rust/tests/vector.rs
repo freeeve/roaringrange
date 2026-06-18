@@ -7,7 +7,7 @@
 #![cfg(feature = "vector")]
 
 use futures::executor::block_on;
-use roaringrange::vector::{reciprocal_rank_fusion, RerankStore, VectorIndex, METRIC_L2};
+use roaringrange::vector::{reciprocal_rank_fusion, Metric, RerankStore, VectorIndex};
 use roaringrange::{
     build_ivfpq, build_ivfpq_from_parts, write_rerank, IvfpqParams, IvfpqParts, MemoryFetch,
     VectorBuildError, VectorHit,
@@ -259,7 +259,7 @@ fn from_parts_matches_hand_computed_adc() {
         nlist: 2,
         m: 2,
         nbits: 2,
-        metric: METRIC_L2,
+        metric: Metric::L2,
         centroids,
         codebooks,
         opq: None,
@@ -303,7 +303,7 @@ fn from_parts_rejects_inconsistent_arrays() {
         nlist: 2,
         m: 2,
         nbits: 2,
-        metric: METRIC_L2,
+        metric: Metric::L2,
         centroids: vec![0.0; 8],
         codebooks: vec![0.0; 2 * 4 * 2],
         opq: None,

@@ -27,7 +27,7 @@ use roaringrange_core::build::{
     FacetField, DEFAULT_HEAD_BOUNDARY,
 };
 use roaringrange_core::ngram_keys;
-use roaringrange_core::vector::{METRIC_IP, METRIC_L2};
+use roaringrange_core::vector::Metric;
 use roaringrange_core::write_term_index as core_write_term_index;
 use roaringrange_core::{
     build_ivfpq, build_ivfpq_from_parts, IvfpqParams, IvfpqParts, VectorBuildError,
@@ -369,11 +369,11 @@ impl VectorBuilder {
     }
 }
 
-/// Maps a metric name to the core's metric tag.
-fn parse_metric(s: &str) -> PyResult<u8> {
+/// Maps a metric name to the core's [`Metric`].
+fn parse_metric(s: &str) -> PyResult<Metric> {
     match s.to_ascii_lowercase().as_str() {
-        "ip" | "cosine" | "inner_product" | "dot" => Ok(METRIC_IP),
-        "l2" | "euclidean" => Ok(METRIC_L2),
+        "ip" | "cosine" | "inner_product" | "dot" => Ok(Metric::InnerProduct),
+        "l2" | "euclidean" => Ok(Metric::L2),
         other => Err(PyValueError::new_err(format!(
             "unknown metric {other:?}; use 'ip' (cosine) or 'l2'"
         ))),

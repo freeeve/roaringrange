@@ -25,8 +25,8 @@ use roaring::RoaringBitmap;
 use roaringrange::build::split_posting;
 use roaringrange::terms::parse_dict_block;
 use roaringrange::{
-    write_splitset, FileFetch, Policy, SplitSetConfig, SplitSpec, TermIndex, TermIndexStreamWriter,
-    BODY_KIND_TERM,
+    write_splitset, BodyKind, FileFetch, Policy, SplitSetConfig, SplitSpec, TermIndex,
+    TermIndexStreamWriter,
 };
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -252,7 +252,7 @@ fn slice(
         base_count: specs.len() as u32,
         byte_cap,
         gram_size: 0,
-        body_kind: BODY_KIND_TERM,
+        body_kind: BodyKind::Term,
         sortcol: None,
         flags: 0,
     };

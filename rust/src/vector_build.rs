@@ -14,7 +14,7 @@
 //! layout. The output of either path is byte-compatible with the reader.
 
 use crate::vector::{
-    normalize, FLAG_OPQ, HEADER_SIZE, MAGIC, METRIC_IP, RERANK_BF16, RRVR_MAGIC, VERSION,
+    normalize, Metric, FLAG_OPQ, HEADER_SIZE, MAGIC, RERANK_BF16, RRVR_MAGIC, VERSION,
 };
 use std::error::Error;
 use std::fmt;
@@ -32,9 +32,8 @@ pub struct IvfpqParams {
     pub m: usize,
     /// Bits per PQ code (`1..=8`); each subspace gets `2^nbits` codebook entries.
     pub nbits: u8,
-    /// Metric tag: [`METRIC_IP`] (cosine on normalized vectors) or
-    /// [`crate::vector::METRIC_L2`].
-    pub metric: u8,
+    /// The similarity [`Metric`] to train/score for.
+    pub metric: Metric,
     /// Lloyd's-iteration count for every k-means run (coarse and PQ).
     pub kmeans_iters: usize,
     /// Seed for the deterministic PRNG used to initialize k-means, so a build is
@@ -51,7 +50,7 @@ impl IvfpqParams {
             nlist,
             m,
             nbits: 8,
-            metric: METRIC_IP,
+            metric: Metric::InnerProduct,
             kmeans_iters: 25,
             seed: 0x5251_5649_5252_5649,
         }
@@ -88,7 +87,7 @@ pub struct Ivfpq {
     nlist: usize,
     m: usize,
     nbits: u8,
-    metric: u8,
+    metric: Metric,
     n: u64,
     /// Optional OPQ rotation, `dim × dim` row-major. Trained externally (the
     /// hand-rolled trainer leaves it `None`); settable via [`Ivfpq::with_opq`].
@@ -156,7 +155,7 @@ impl Ivfpq {
         // Header (48 B).
         w.write_all(MAGIC)?;
         w.write_all(&VERSION.to_le_bytes())?;
-        w.write_all(&[self.metric])?;
+        w.write_all(&[u8::from(self.metric)])?;
         w.write_all(&[if self.opq.is_some() { FLAG_OPQ } else { 0 }])?;
         w.write_all(&(self.dim as u32).to_le_bytes())?;
         w.write_all(&(self.nlist as u32).to_le_bytes())?;
@@ -300,7 +299,7 @@ pub fn build_ivfpq(
     let mut ids = Vec::with_capacity(n);
     for (id, v) in vectors {
         ids.push(*id);
-        if params.metric == METRIC_IP {
+        if params.metric == Metric::InnerProduct {
             pts.extend_from_slice(&normalize(v));
         } else {
             pts.extend_from_slice(v);
@@ -375,8 +374,8 @@ pub struct IvfpqParts {
     pub m: usize,
     /// Bits per PQ code (`1..=8`); `ksub = 1<<nbits`.
     pub nbits: u8,
-    /// Metric tag ([`METRIC_IP`] / [`crate::vector::METRIC_L2`]).
-    pub metric: u8,
+    /// The similarity [`Metric`].
+    pub metric: Metric,
     /// Coarse centroids, `nlist × dim`.
     pub centroids: Vec<f32>,
     /// PQ codebooks, `m × ksub × (dim/m)`.

@@ -33,13 +33,40 @@ pub(crate) const HEADER_SIZE: usize = 48;
 /// Cluster-directory entry size: offset(u64) + count(u32).
 pub(crate) const DIR_ENTRY: usize = 12;
 
-/// Metric tag: inner product on L2-normalized vectors (cosine). The default; the
-/// stored codes encode L2 residuals, but for unit vectors L2 and inner product
-/// rank identically, so the same ADC scan serves both — only the reported score
-/// differs (see [`VectorIndex::search`]). Pass to [`crate::IvfpqParams`].
-pub const METRIC_IP: u8 = 0;
-/// Metric tag: raw L2 distance. Pass to [`crate::IvfpqParams`].
-pub const METRIC_L2: u8 = 1;
+/// The similarity metric an `RRVI` index scores with — its stable on-disk header
+/// byte. Pass to [`crate::IvfpqParams`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Metric {
+    /// Inner product on L2-normalized vectors (cosine). The default; the stored
+    /// codes encode L2 residuals, but for unit vectors L2 and inner product rank
+    /// identically, so the same ADC scan serves both — only the reported score
+    /// differs (see [`VectorIndex::search`]).
+    InnerProduct,
+    /// Raw L2 distance.
+    L2,
+}
+
+impl From<Metric> for u8 {
+    /// The on-disk metric byte (`0` = inner product, `1` = L2).
+    fn from(m: Metric) -> u8 {
+        match m {
+            Metric::InnerProduct => 0,
+            Metric::L2 => 1,
+        }
+    }
+}
+
+impl TryFrom<u8> for Metric {
+    type Error = IndexError;
+    /// Parses the on-disk metric byte; an unknown code is a malformed index.
+    fn try_from(code: u8) -> Result<Self, IndexError> {
+        match code {
+            0 => Ok(Metric::InnerProduct),
+            1 => Ok(Metric::L2),
+            _ => Err(IndexError::Malformed("RRVI unknown metric code")),
+        }
+    }
+}
 
 /// Header flag: an OPQ rotation matrix precedes the centroids in the boot region.
 pub(crate) const FLAG_OPQ: u8 = 1 << 0;
@@ -126,8 +153,8 @@ pub struct VectorIndex<F: RangeFetch> {
     ksub: usize,
     /// `dim / m`: dimensionality of each PQ subspace.
     dsub: usize,
-    /// Metric tag ([`METRIC_IP`] or [`METRIC_L2`]).
-    metric: u8,
+    /// The similarity [`Metric`] scored with.
+    metric: Metric,
     /// Total vector count.
     n: u64,
     /// Optional OPQ rotation matrix, `dim × dim` row-major (`q' = R · q`).
@@ -157,7 +184,7 @@ impl<F: RangeFetch> VectorIndex<F> {
         if version != VERSION {
             return Err(IndexError::BadVersion(version));
         }
-        let metric = header[6];
+        let metric = Metric::try_from(header[6])?;
         let flags = header[7];
         let dim = read_u32(&header, 8) as usize;
         let nlist = read_u32(&header, 12) as usize;
@@ -349,7 +376,7 @@ impl<F: RangeFetch> VectorIndex<F> {
         }
         // Normalize a copy for an inner-product index so callers need not, then
         // rotate into the index's (optionally OPQ-) space.
-        let q = if self.metric == METRIC_IP {
+        let q = if self.metric == Metric::InnerProduct {
             normalize(query)
         } else {
             query.to_vec()
@@ -418,7 +445,7 @@ impl<F: RangeFetch> VectorIndex<F> {
     /// inner-product (unit-vector) index, `‖q-x‖² = 2 - 2·cos`, so the cosine is
     /// `1 - dist/2`; for an L2 index the score is the negated distance.
     fn score_of(&self, dist: f32) -> f32 {
-        if self.metric == METRIC_IP {
+        if self.metric == Metric::InnerProduct {
             1.0 - 0.5 * dist
         } else {
             -dist
@@ -461,7 +488,7 @@ impl<F: RangeFetch> VectorIndex<F> {
 
         // The re-rank vectors live in the original (un-rotated) space, so use the
         // normalized-but-unrotated query — the same space the corpus was stored in.
-        let q = if self.metric == METRIC_IP {
+        let q = if self.metric == Metric::InnerProduct {
             normalize(query)
         } else {
             query.to_vec()
@@ -470,7 +497,7 @@ impl<F: RangeFetch> VectorIndex<F> {
             .iter()
             .zip(&vecs)
             .map(|(&id, v)| {
-                let score = if self.metric == METRIC_IP {
+                let score = if self.metric == Metric::InnerProduct {
                     dot(&q, v)
                 } else {
                     -l2_sq(&q, v)

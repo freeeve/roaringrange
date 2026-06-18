@@ -161,4 +161,24 @@ Legend: 🟢 additive/non-breaking · ⚠️ breaking · markers are per-item.
   byte guard). Verified: `cargo test --features "terms splits"` 132 pass, clippy
   clean, fmt clean, example builds, **`python/` cargo check passes**. On-disk format
   unchanged (English still byte 1). TryFrom for the strict enums folded into Step 2.
-- Steps 2–8: pending.
+- **Step 2 — T2-rest + T4 (scalar enums) — DONE (uncommitted).** Added the
+  canonical `From<E> for int` + strict `TryFrom<int> for E` (Error = `IndexError`,
+  "unknown … code") to the on-disk code enums and replaced the bare-const scalar
+  tags with enums: `Policy`/`MemberTag` (existing enums, now with From/TryFrom;
+  private `from_u8`/`from_u16` removed, readers use `try_from`, `to_u8`/`to_u16`
+  kept as shims); **`METRIC_IP`/`METRIC_L2` consts → `Metric` enum**
+  (`InnerProduct`/`L2`); **`BODY_KIND_*` consts → `BodyKind` enum**
+  (`Trigram`/`Term`). Updated all readers, builders, `IvfpqParams`/`IvfpqParts`
+  `.metric` fields, `SplitSetConfig.body_kind`, `SplitSet::body_kind()` getter,
+  lib re-exports (added `Metric`, `BodyKind`; dropped the const re-exports),
+  python (`parse_metric -> Metric`), the vector integration test, and three
+  examples. On-disk bytes unchanged. Verified: 145 lib tests + 11 vector tests
+  pass, clippy 0 errors, fmt clean, wasm builds, python checks. Lenient-vs-strict
+  rule documented: `Language` stays `Option`/`from_u8` (unknown ⇒ no stemmer);
+  the strict on-disk discriminants use `TryFrom`.
+  **DEFERRED:** the T4 *flag* bit-sets (`FLAG_*`/`SPLIT_FLAG_*`/`SORTCOL_FLAG_*`,
+  ~42 sites) — named bitflag consts combined with `&`/`|` are an accepted Rust
+  idiom (a plain enum can't model combinable flags), so a hand-rolled newtype is
+  modest type-safety for real churn + no-new-deps constraint. Revisit only if the
+  cross-type flag mixing becomes a concern.
+- Steps 3–8: pending.
