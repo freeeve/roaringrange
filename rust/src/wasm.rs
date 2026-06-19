@@ -28,7 +28,7 @@ use crate::sortcols::SortCols;
 use crate::terms::TermIndex;
 #[cfg(feature = "vector")]
 use crate::vector::VectorIndex;
-use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint32Array, Uint8Array};
+use js_sys::{Array, ArrayBuffer, Float64Array, Object, Reflect, Uint32Array, Uint8Array};
 use roaring::RoaringBitmap;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -1514,16 +1514,36 @@ impl RrviHits {
 /// id. This is the same [`crate::vector::reciprocal_rank_fusion`] every native
 /// consumer uses, so the browser can fuse any number of arms (e.g. trigram + BM25 +
 /// min-should-match + semantic) in one call without drifting from the library's
-/// ranking. `kParam` is conventionally ~60. Returns a `Uint32Array`.
+/// ranking. `kParam` is conventionally ~60.
+///
+/// `weights` is optional: omit it (or pass `undefined`) for the equal-vote fusion;
+/// pass a `Float64Array` parallel to `lists` to up- or down-weight individual arms
+/// (e.g. boost a lone semantic list against several lexical ones). Weights may be
+/// fractional or `> 1`; a length mismatch is a clean error. Returns a `Uint32Array`.
 #[cfg(feature = "vector")]
 #[wasm_bindgen(js_name = reciprocalRankFusion)]
-pub fn reciprocal_rank_fusion_js(lists: Vec<Uint32Array>, k_param: f64) -> Vec<u32> {
+pub fn reciprocal_rank_fusion_js(
+    lists: Vec<Uint32Array>,
+    k_param: f64,
+    weights: Option<Float64Array>,
+) -> Result<Vec<u32>, JsError> {
     let vecs: Vec<Vec<u32>> = lists.iter().map(Uint32Array::to_vec).collect();
     let refs: Vec<&[u32]> = vecs.iter().map(Vec::as_slice).collect();
-    crate::vector::reciprocal_rank_fusion(&refs, k_param)
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect()
+    let fused = match weights {
+        None => crate::vector::reciprocal_rank_fusion(&refs, k_param),
+        Some(w) => {
+            let w = w.to_vec();
+            if w.len() != refs.len() {
+                return Err(JsError::new(&format!(
+                    "reciprocalRankFusion: {} weights for {} lists (must match)",
+                    w.len(),
+                    refs.len()
+                )));
+            }
+            crate::vector::reciprocal_rank_fusion_weighted(&refs, &w, k_param)
+        }
+    };
+    Ok(fused.into_iter().map(|(id, _)| id).collect())
 }
 
 /// The in-browser model2vec query embedder (mode 2) exposed to JavaScript: turns

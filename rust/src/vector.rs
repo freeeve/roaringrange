@@ -635,15 +635,103 @@ impl<F: RangeFetch> RerankStore<F> {
 /// lists needing comparable scores — the standard way to blend the trigram
 /// (`RRS`) and vector (`RRVI`) result sets. Returns `(doc_id, fused_score)` sorted
 /// best-first, ties broken by ascending doc ID. `k_param` is conventionally ~60.
+///
+/// Every list votes equally; use [`reciprocal_rank_fusion_weighted`] to up- or
+/// down-weight individual lists.
 pub fn reciprocal_rank_fusion(lists: &[&[u32]], k_param: f64) -> Vec<(u32, f64)> {
+    reciprocal_rank_fusion_weighted(lists, &vec![1.0; lists.len()], k_param)
+}
+
+/// Per-list-weighted reciprocal-rank fusion: list `i` contributes
+/// `weights[i] / (k_param + rank + 1)` for each doc it ranks, rather than the flat
+/// `1.0` vote of [`reciprocal_rank_fusion`]. This lets a caller boost or trim
+/// individual arms (e.g. lift a lone semantic list against several lexical ones)
+/// without re-implementing fusion. Weights may be fractional or `> 1`; a `0.0`
+/// weight contributes nothing to any doc's score. With every weight `1.0` the
+/// result is identical to [`reciprocal_rank_fusion`].
+///
+/// Returns `(doc_id, fused_score)` sorted best-first, ties broken by ascending doc
+/// ID. Panics if `weights.len() != lists.len()` — a caller contract violation, not
+/// runtime data (the wasm binding reports the mismatch as a clean error instead).
+pub fn reciprocal_rank_fusion_weighted(
+    lists: &[&[u32]],
+    weights: &[f64],
+    k_param: f64,
+) -> Vec<(u32, f64)> {
+    assert_eq!(
+        lists.len(),
+        weights.len(),
+        "reciprocal_rank_fusion_weighted: one weight per list"
+    );
     use std::collections::HashMap;
     let mut acc: HashMap<u32, f64> = HashMap::new();
-    for list in lists {
+    for (list, &weight) in lists.iter().zip(weights) {
         for (rank, &id) in list.iter().enumerate() {
-            *acc.entry(id).or_insert(0.0) += 1.0 / (k_param + rank as f64 + 1.0);
+            *acc.entry(id).or_insert(0.0) += weight / (k_param + rank as f64 + 1.0);
         }
     }
     let mut out: Vec<(u32, f64)> = acc.into_iter().collect();
     out.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     out
+}
+
+#[cfg(test)]
+mod rrf_tests {
+    use super::{reciprocal_rank_fusion, reciprocal_rank_fusion_weighted};
+
+    /// Unit weights reproduce the unweighted fusion exactly: the wrapper delegates
+    /// with all-`1.0` weights, so the identical accumulation runs.
+    #[test]
+    fn unit_weights_equal_unweighted() {
+        let a = [10u32, 20, 30];
+        let b = [30u32, 40, 10];
+        let lists: [&[u32]; 2] = [&a, &b];
+        let base = reciprocal_rank_fusion(&lists, 60.0);
+        let weighted = reciprocal_rank_fusion_weighted(&lists, &[1.0, 1.0], 60.0);
+        assert_eq!(base, weighted);
+    }
+
+    /// Weighting reorders ties; a `0.0` weight zeroes a list's contribution.
+    #[test]
+    fn weights_reorder_and_zero_drops_contribution() {
+        let l0 = [1u32];
+        let l1 = [2u32];
+        let lists: [&[u32]; 2] = [&l0, &l1];
+        // Same rank in different lists: equal weights tie-break to the lower id.
+        assert_eq!(
+            reciprocal_rank_fusion_weighted(&lists, &[1.0, 1.0], 60.0)[0].0,
+            1
+        );
+        // Boosting list 1 lifts doc 2 above doc 1.
+        assert_eq!(
+            reciprocal_rank_fusion_weighted(&lists, &[1.0, 3.0], 60.0)[0].0,
+            2
+        );
+        // A 0.0 weight: doc 2 scores exactly 0 and sorts below doc 1.
+        let zeroed = reciprocal_rank_fusion_weighted(&lists, &[1.0, 0.0], 60.0);
+        assert_eq!(zeroed[0].0, 1);
+        assert_eq!(zeroed.iter().find(|(id, _)| *id == 2).unwrap().1, 0.0);
+    }
+
+    /// Fractional and `> 1` weights both scale a hit's contribution linearly.
+    #[test]
+    fn fractional_and_large_weights_scale_scores() {
+        let l0 = [1u32];
+        let l1 = [2u32];
+        let lists: [&[u32]; 2] = [&l0, &l1];
+        let out = reciprocal_rank_fusion_weighted(&lists, &[0.5, 3.0], 60.0);
+        assert_eq!(out[0].0, 2); // 3.0-weighted doc 2 outranks 0.5-weighted doc 1
+        let score = |id: u32| out.iter().find(|(d, _)| *d == id).unwrap().1;
+        assert!((score(1) - 0.5 / 61.0).abs() < 1e-12);
+        assert!((score(2) - 3.0 / 61.0).abs() < 1e-12);
+    }
+
+    /// One weight per list is required.
+    #[test]
+    #[should_panic(expected = "one weight per list")]
+    fn mismatched_weights_panic() {
+        let l0 = [1u32];
+        let lists: [&[u32]; 1] = [&l0];
+        reciprocal_rank_fusion_weighted(&lists, &[1.0, 2.0], 60.0);
+    }
 }

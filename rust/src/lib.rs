@@ -112,7 +112,10 @@ pub use sortcols::{ColInfo, SortCols, Value, ValueType};
 #[cfg(feature = "vector")]
 pub use model2vec::Model2vec;
 #[cfg(feature = "vector")]
-pub use vector::{reciprocal_rank_fusion, Metric, RerankStore, VectorHit, VectorIndex};
+pub use vector::{
+    reciprocal_rank_fusion, reciprocal_rank_fusion_weighted, Metric, RerankStore, VectorHit,
+    VectorIndex,
+};
 #[cfg(all(feature = "vector", not(target_arch = "wasm32")))]
 pub use vector_build::{
     build_ivfpq, build_ivfpq_from_parts, write_rerank, Ivfpq, IvfpqParams, IvfpqParts,
