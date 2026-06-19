@@ -80,6 +80,49 @@ pub struct Field {
     pub categories: Vec<Category>,
 }
 
+/// One facet selection: a `(field, category)` pair, optionally **negated** to
+/// EXCLUDE the matching docs instead of including them. Includes OR within a
+/// field and AND across fields (the positive set `P`); excludes union across all
+/// fields and are subtracted (`P ANDNOT X`), so a doc in any excluded category is
+/// dropped. Build with [`FilterSel::include`] / [`FilterSel::exclude`], or from a
+/// `(field, category)` tuple (which defaults to include).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterSel {
+    /// Facet field name (e.g. `"format"`).
+    pub field: String,
+    /// Category value within the field (e.g. `"Short Stories"`).
+    pub category: String,
+    /// When `true`, EXCLUDE docs in this category instead of including them.
+    pub negate: bool,
+}
+
+impl FilterSel {
+    /// An include selection — keep docs in this `(field, category)`.
+    pub fn include(field: impl Into<String>, category: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            category: category.into(),
+            negate: false,
+        }
+    }
+
+    /// An exclude selection — drop docs in this `(field, category)`.
+    pub fn exclude(field: impl Into<String>, category: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            category: category.into(),
+            negate: true,
+        }
+    }
+}
+
+impl<S: Into<String>, T: Into<String>> From<(S, T)> for FilterSel {
+    /// A bare `(field, category)` tuple is an include selection.
+    fn from((field, category): (S, T)) -> Self {
+        Self::include(field, category)
+    }
+}
+
 /// A range-fetchable facet sidecar. Holds the meta region in memory.
 pub struct FacetIndex<F: RangeFetch> {
     fetch: F,
@@ -357,7 +400,54 @@ impl<F: RangeFetch> FacetIndex<F> {
                 }
             }
         }
-        ResolvedFilter::new(self.fetch.clone(), by_field.into_values().collect())
+        ResolvedFilter::new(
+            self.fetch.clone(),
+            by_field.into_values().collect(),
+            Vec::new(),
+        )
+    }
+
+    /// Resolves [`FilterSel`] selections (includes and/or excludes) into a
+    /// [`ResolvedFilter`]. Include selections behave exactly like
+    /// [`resolve`](Self::resolve) — grouped by field so categories within a field
+    /// OR and distinct fields AND (the positive set `P`). Exclude selections
+    /// (`negate`) are collected into one flat union `X` across all fields; the
+    /// resolved filter yields `P ANDNOT X`, so a doc in ANY excluded category is
+    /// dropped. An exclude whose category fails to resolve here simply contributes
+    /// nothing to `X` (nothing to remove) — unlike a failed include arm, it does
+    /// NOT make the filter match-nothing. With no includes, `P` is the whole
+    /// corpus and the result is "everything except `X`".
+    pub fn resolve_sels(&self, sels: &[FilterSel]) -> ResolvedFilter<F>
+    where
+        F: Clone,
+    {
+        let mut by_field: BTreeMap<&str, Vec<CatRange>> = BTreeMap::new();
+        let mut excludes: Vec<CatRange> = Vec::new();
+        for sel in sels {
+            let resolved = self
+                .fields
+                .iter()
+                .find(|f| f.name == sel.field)
+                .and_then(|field| field.categories.iter().find(|c| c.name == sel.category))
+                .map(|c| c.range);
+            if sel.negate {
+                if let Some(r) = resolved {
+                    excludes.push(r);
+                }
+            } else {
+                // Create the field's arm even when unresolved: a selected field
+                // with no resolvable category is an empty arm that matches nothing.
+                let ranges = by_field.entry(sel.field.as_str()).or_default();
+                if let Some(r) = resolved {
+                    ranges.push(r);
+                }
+            }
+        }
+        ResolvedFilter::new(
+            self.fetch.clone(),
+            by_field.into_values().collect(),
+            excludes,
+        )
     }
 
     /// An upper bound on how many docs can satisfy the facet filter, from the
@@ -401,6 +491,12 @@ impl<F: RangeFetch> FacetIndex<F> {
     /// Computes the per-category document counts within `result` — i.e. how many
     /// of the query's (head) results fall in each category. Returned as a vector
     /// per field, aligned with `self.fields[i].categories`. In-memory; no fetches.
+    ///
+    /// `result` is whatever the caller passes — for a facet-filtered search that is
+    /// the post-filter head, so the counts reflect the **post-exclusion** survivors
+    /// (an excluded category contributes ~0, since its docs were removed). Every
+    /// category still appears in its field's list regardless of selection, so the
+    /// UI can offer to toggle (un-exclude) any of them.
     pub fn counts(&self, result: &RoaringBitmap) -> Vec<Vec<u64>> {
         self.fields
             .iter()

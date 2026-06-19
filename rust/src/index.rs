@@ -611,7 +611,7 @@ impl<F: RangeFetch> Index<F> {
         // Drop a no-constraint filter so the cursor never does facet tail reads.
         let filter = filter.filter(|f| !f.is_empty());
         if let Some(f) = &filter {
-            head_result &= f.head_bitmap().await?;
+            f.apply_head(&mut head_result).await?;
         }
         let results: Vec<u32> = head_result.iter().collect();
         Ok(Cursor {
@@ -650,18 +650,25 @@ pub(crate) struct CatRange {
 pub struct ResolvedFilter<F: RangeFetch> {
     fetch: F,
     fields: Vec<Vec<CatRange>>,
+    /// Excluded (negated) category ranges, unioned across all fields: the result
+    /// is `includes ANDNOT (OR of these)`. Empty for an include-only filter.
+    excludes: Vec<CatRange>,
 }
 
 impl<F: RangeFetch> ResolvedFilter<F> {
-    /// Builds a filter from a fetcher and per-field category ranges. An empty
-    /// `fields` means "no constraint".
-    pub(crate) fn new(fetch: F, fields: Vec<Vec<CatRange>>) -> Self {
-        Self { fetch, fields }
+    /// Builds a filter from a fetcher, the per-field include category ranges, and
+    /// the flat exclude union. Empty `fields` and `excludes` means "no constraint".
+    pub(crate) fn new(fetch: F, fields: Vec<Vec<CatRange>>, excludes: Vec<CatRange>) -> Self {
+        Self {
+            fetch,
+            fields,
+            excludes,
+        }
     }
 
-    /// Whether the filter imposes no constraint.
+    /// Whether the filter imposes no constraint (no includes and no excludes).
     pub fn is_empty(&self) -> bool {
-        self.fields.is_empty()
+        self.fields.is_empty() && self.excludes.is_empty()
     }
 
     /// Whether some selected field resolved to **no** categories — an arm that
@@ -671,23 +678,83 @@ impl<F: RangeFetch> ResolvedFilter<F> {
         self.fields.iter().any(|cats| cats.is_empty())
     }
 
-    /// The combined head-side filter bitmap.
+    /// The combined head-side **include** bitmap (positive set `P`, head side).
     async fn head_bitmap(&self) -> Result<RoaringBitmap, IndexError> {
         self.combine(|c| (c.head_off, c.head_size as usize)).await
     }
 
-    /// The combined tail-side filter bitmap.
+    /// The combined tail-side **include** bitmap (positive set `P`, tail side).
     async fn tail_bitmap(&self) -> Result<RoaringBitmap, IndexError> {
         self.combine(|c| (c.tail_off, c.tail_size as usize)).await
     }
 
-    /// The full filter bitmap over both head and tail postings — the complete set
-    /// of doc IDs satisfying the selected facets. Used to filter an arbitrary
-    /// (e.g. vector-search) doc-ID list, which can touch the tail; the trigram
-    /// cursor applies head and tail separately as it paginates.
+    /// The union of the **excluded** categories' postings on one side (`X`), or an
+    /// empty bitmap when nothing is excluded. Excludes have no field structure — a
+    /// doc is dropped if it matches ANY of them — so they simply OR together.
+    async fn exclude_union(
+        &self,
+        range_of: impl Fn(&CatRange) -> (u64, usize),
+    ) -> Result<RoaringBitmap, IndexError> {
+        if self.excludes.is_empty() {
+            return Ok(RoaringBitmap::new());
+        }
+        let ranges: Vec<(u64, usize)> = self.excludes.iter().map(range_of).collect();
+        let datas =
+            crate::fetch::read_coalesced(&self.fetch, &ranges, crate::fetch::COALESCE_GAP).await?;
+        let mut x = RoaringBitmap::new();
+        for bytes in datas {
+            x |= deserialize(&bytes)?;
+        }
+        Ok(x)
+    }
+
+    /// Applies the head-side filter to `result` in place: intersect with the
+    /// positive include set (when any include is selected), then subtract the
+    /// excluded categories. An excludes-only filter keeps `result` and just
+    /// removes `X`.
+    pub(crate) async fn apply_head(&self, result: &mut RoaringBitmap) -> Result<(), IndexError> {
+        if !self.fields.is_empty() {
+            *result &= self.head_bitmap().await?;
+        }
+        if !self.excludes.is_empty() {
+            *result -= self
+                .exclude_union(|c| (c.head_off, c.head_size as usize))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Applies the tail-side filter to `result` in place — the tail-posting
+    /// counterpart of [`apply_head`](Self::apply_head).
+    pub(crate) async fn apply_tail(&self, result: &mut RoaringBitmap) -> Result<(), IndexError> {
+        if !self.fields.is_empty() {
+            *result &= self.tail_bitmap().await?;
+        }
+        if !self.excludes.is_empty() {
+            *result -= self
+                .exclude_union(|c| (c.tail_off, c.tail_size as usize))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The full filter bitmap over both head and tail postings — the include set
+    /// satisfying the selected facets, minus the excluded categories (`P ANDNOT
+    /// X`). Used to filter an arbitrary (e.g. vector-search) doc-ID list. NOTE:
+    /// with no includes there is no positive set, so this returns empty; filter a
+    /// candidate list with [`membership_bitmap`](Self::membership_bitmap) instead,
+    /// which subtracts the excludes from the candidates directly.
     pub async fn full_bitmap(&self) -> Result<RoaringBitmap, IndexError> {
         let mut b = self.head_bitmap().await?;
         b |= self.tail_bitmap().await?;
+        if !self.excludes.is_empty() {
+            b -= self
+                .exclude_union(|c| (c.head_off, c.head_size as usize))
+                .await?;
+            b -= self
+                .exclude_union(|c| (c.tail_off, c.tail_size as usize))
+                .await?;
+        }
         Ok(b)
     }
 
@@ -760,6 +827,31 @@ impl<F: RangeFetch> ResolvedFilter<F> {
             if acc.is_empty() {
                 break;
             }
+        }
+        // Subtract the excluded categories, read at the same container granularity
+        // as the positive wave (only the candidates' buckets).
+        if !self.excludes.is_empty() && !acc.is_empty() {
+            let xfuts = self.excludes.iter().map(|c| async move {
+                let mut bm = RoaringBitmap::new();
+                if head_needed && c.head_size > 0 {
+                    bm |= deserialize(&fetch.read(c.head_off, c.head_size as usize).await?)?;
+                }
+                if !tail_keys.is_empty() && c.tail_size > 0 {
+                    bm |= crate::posting::read_posting_subset(
+                        fetch,
+                        c.tail_off,
+                        c.tail_size as usize,
+                        tail_keys,
+                    )
+                    .await?;
+                }
+                Ok::<RoaringBitmap, IndexError>(bm)
+            });
+            let mut x = RoaringBitmap::new();
+            for r in join_all(xfuts).await {
+                x |= r?;
+            }
+            acc -= x;
         }
         Ok(acc)
     }
@@ -956,7 +1048,7 @@ impl<F: RangeFetch> Cursor<F> {
         tail_and.remove_range(0..EAGER_DOC_BOUND);
         if !tail_and.is_empty() {
             if let Some(f) = &self.filter {
-                tail_and &= f.tail_bitmap().await?;
+                f.apply_tail(&mut tail_and).await?;
             }
             self.results.extend(tail_and.iter());
         }

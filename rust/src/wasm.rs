@@ -16,7 +16,7 @@
 //! must support HTTP Range requests; pass the index URL to [`RrsIndex::open`].
 
 use crate::catalog::Catalog;
-use crate::facet::{FacetIndex, Field};
+use crate::facet::{FacetIndex, Field, FilterSel};
 use crate::fetch::{FetchError, RangeFetch};
 use crate::index::{Cursor, Index};
 use crate::lookup::Lookup;
@@ -319,17 +319,89 @@ fn filter_pairs(filters: &Array) -> Result<Vec<(String, String)>, JsError> {
     Ok(pairs)
 }
 
-/// Filters a ranked doc-ID list by the selected facet `pairs` and returns the survivors
-/// (input order preserved) plus search-filtered counts over them. Shared by the text index and
-/// the standalone facet binding.
+/// Parses a JS facet-filter array into [`FilterSel`]s. Each entry is EITHER a
+/// `[field, category]` (legacy include) or `[field, category, exclude]` **array**,
+/// OR a `{ field, category, exclude? }` **object** (preferred — `exclude` defaults
+/// to `false` = include). An `exclude`/3rd-element `true` removes docs in that
+/// category. Throws on a malformed entry so a bad filter fails loudly; an empty
+/// array means "no filter".
+fn filter_sels(filters: &Array) -> Result<Vec<FilterSel>, JsError> {
+    let mut sels = Vec::with_capacity(filters.length() as usize);
+    for entry in filters.iter() {
+        let sel = if Array::is_array(&entry) {
+            let arr: Array = entry.unchecked_into();
+            let field = arr
+                .get(0)
+                .as_string()
+                .ok_or_else(|| JsError::new("facet filter field must be a string"))?;
+            let category = arr
+                .get(1)
+                .as_string()
+                .ok_or_else(|| JsError::new("facet filter category must be a string"))?;
+            let negate = match arr.length() {
+                0 | 1 => return Err(JsError::new("facet filter array needs [field, category]")),
+                2 => false,
+                _ => arr
+                    .get(2)
+                    .as_bool()
+                    .ok_or_else(|| JsError::new("facet filter exclude flag must be a boolean"))?,
+            };
+            FilterSel {
+                field,
+                category,
+                negate,
+            }
+        } else if entry.is_object() {
+            let field = Reflect::get(&entry, &JsValue::from_str("field"))
+                .ok()
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| JsError::new("facet filter object needs a string `field`"))?;
+            let category = Reflect::get(&entry, &JsValue::from_str("category"))
+                .ok()
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| JsError::new("facet filter object needs a string `category`"))?;
+            let negate = Reflect::get(&entry, &JsValue::from_str("exclude"))
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            FilterSel {
+                field,
+                category,
+                negate,
+            }
+        } else {
+            return Err(JsError::new(
+                "each facet filter must be a [field, category] array or {field, category, exclude} object",
+            ));
+        };
+        sels.push(sel);
+    }
+    Ok(sels)
+}
+
+/// Flattens [`FilterSel`]s to `(field, category)` pairs for the resident
+/// cost / count-bound estimators. `include_only` drops excludes (the count bound
+/// is over includes — excludes only shrink the set); the cost pass keeps all
+/// selections, since an excluded category's posting is fetched and subtracted too.
+fn sel_pairs(sels: &[FilterSel], include_only: bool) -> Vec<(String, String)> {
+    sels.iter()
+        .filter(|s| !(include_only && s.negate))
+        .map(|s| (s.field.clone(), s.category.clone()))
+        .collect()
+}
+
+/// Filters a ranked doc-ID list by the selected facet `sels` (includes AND-ed across
+/// fields, excludes subtracted) and returns the survivors (input order preserved) plus
+/// search-filtered counts over them. Shared by the text index and the standalone facet
+/// binding. See [`filter_sels`] for the accepted JS entry shapes (array or object).
 async fn filtered_ids(
     facets: Option<&FacetIndex<WasmFetch>>,
     ids: Vec<u32>,
-    pairs: Vec<(String, String)>,
+    sels: Vec<FilterSel>,
 ) -> Result<FilteredIds, JsError> {
     let kept = match facets {
-        Some(facets) if !pairs.is_empty() => {
-            let filter = facets.resolve(&pairs);
+        Some(facets) if !sels.is_empty() => {
+            let filter = facets.resolve_sels(&sels);
             if filter.is_empty() {
                 ids
             } else {
@@ -458,7 +530,7 @@ impl RrsIndex {
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         if let (Some(filters), Some(f)) = (filters, self.facets.as_ref()) {
-            total += f.filter_cost(&filter_pairs(&filters)?);
+            total += f.filter_cost(&sel_pairs(&filter_sels(&filters)?, false));
         }
         Ok(total as f64)
     }
@@ -481,7 +553,7 @@ impl RrsIndex {
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         if let (Some(filters), Some(f)) = (filters, self.facets.as_ref()) {
-            if let Some(bound) = f.filter_count_bound(&filter_pairs(&filters)?) {
+            if let Some(bound) = f.filter_count_bound(&sel_pairs(&filter_sels(&filters)?, true)) {
                 if bound < count {
                     count = bound;
                 }
@@ -522,9 +594,9 @@ impl RrsIndex {
         max_missing: usize,
         filters: Array,
     ) -> Result<RrsCursor, JsError> {
-        let pairs = filter_pairs(&filters)?;
+        let sels = filter_sels(&filters)?;
         let filter = match &self.facets {
-            Some(facets) if !pairs.is_empty() => Some(facets.resolve(&pairs)),
+            Some(facets) if !sels.is_empty() => Some(facets.resolve_sels(&sels)),
             _ => None,
         };
         let inner = self
@@ -546,7 +618,7 @@ impl RrsIndex {
     /// `FilteredIds`.
     #[wasm_bindgen(js_name = filterIds)]
     pub async fn filter_ids(&self, ids: Vec<u32>, filters: Array) -> Result<FilteredIds, JsError> {
-        filtered_ids(self.facets.as_ref(), ids, filter_pairs(&filters)?).await
+        filtered_ids(self.facets.as_ref(), ids, filter_sels(&filters)?).await
     }
 
     /// Number of n-grams in the index dictionary.
@@ -635,7 +707,7 @@ impl RrfFacets {
     /// `RrsIndex.filterIds`). Resolves to a `FilteredIds`.
     #[wasm_bindgen(js_name = filterIds)]
     pub async fn filter_ids(&self, ids: Vec<u32>, filters: Array) -> Result<FilteredIds, JsError> {
-        filtered_ids(Some(&self.inner), ids, filter_pairs(&filters)?).await
+        filtered_ids(Some(&self.inner), ids, filter_sels(&filters)?).await
     }
 }
 
@@ -965,7 +1037,7 @@ impl RrsCatalog {
         max_missing: usize,
         filters: Array,
     ) -> Result<JsValue, JsError> {
-        let filter = filter_pairs(&filters)?;
+        let filter = filter_sels(&filters)?;
         let page = self
             .cat()?
             .search(&query, offset, len, max_missing, &filter)

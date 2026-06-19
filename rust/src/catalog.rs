@@ -11,7 +11,7 @@
 //! the index, the facet sidecar, and the record store's offset index / blob are
 //! independent resources, each opened with its own fetcher.
 
-use crate::facet::FacetIndex;
+use crate::facet::{FacetIndex, FilterSel};
 use crate::fetch::RangeFetch;
 use crate::index::{Index, IndexError};
 use crate::records::RecordStore;
@@ -111,11 +111,13 @@ impl<F: RangeFetch + Clone> Catalog<F> {
 
     /// Runs the full search flow for `query` and returns one [`SearchPage`].
     ///
-    /// The `filter` is a list of `(field, category)` selections (within-field OR,
-    /// across-field AND), resolved against the facet sidecar when one is attached
-    /// and ignored otherwise. `max_missing` is the fuzzy tolerance forwarded to
-    /// the cursor (0 = strict AND of every n-gram). The page covers ranked doc
-    /// IDs `[offset, offset+limit)`.
+    /// The `filter` is a list of [`FilterSel`] selections: includes OR within a
+    /// field and AND across fields, while excludes (`negate`) union across all
+    /// fields and are subtracted (`includes ANDNOT excludes`), so a doc in any
+    /// excluded category is dropped. Resolved against the facet sidecar when one is
+    /// attached and ignored otherwise. `max_missing` is the fuzzy tolerance
+    /// forwarded to the cursor (0 = strict AND of every n-gram). The page covers
+    /// ranked doc IDs `[offset, offset+limit)`.
     ///
     /// When a record store is attached the page's record bytes are fetched; when
     /// a facet sidecar is attached the search-filtered facet counts over the
@@ -126,10 +128,10 @@ impl<F: RangeFetch + Clone> Catalog<F> {
         offset: usize,
         limit: usize,
         max_missing: usize,
-        filter: &[(String, String)],
+        filter: &[FilterSel],
     ) -> Result<SearchPage, IndexError> {
         let resolved = match &self.facets {
-            Some(f) if !filter.is_empty() => Some(f.resolve(filter)),
+            Some(f) if !filter.is_empty() => Some(f.resolve_sels(filter)),
             _ => None,
         };
         let mut cursor = self
@@ -246,10 +248,8 @@ mod tests {
         (index, facets, store)
     }
 
-    fn pairs(sel: &[(&str, &str)]) -> Vec<(String, String)> {
-        sel.iter()
-            .map(|(f, c)| (f.to_string(), c.to_string()))
-            .collect()
+    fn pairs(sel: &[(&str, &str)]) -> Vec<FilterSel> {
+        sel.iter().map(|&(f, c)| FilterSel::include(f, c)).collect()
     }
 
     #[test]
@@ -354,5 +354,69 @@ mod tests {
         assert_eq!(page.ids, vec![1, 2]);
         assert_eq!(page.records.unwrap()[1].as_deref().unwrap(), b"rec-2");
         assert!(page.facet_counts.is_none());
+    }
+
+    fn full_cat() -> Catalog<MemoryFetch> {
+        let (index, facets, (idx, bin)) = fixture();
+        block_on(async {
+            Catalog::open(index)
+                .await?
+                .load_facets(facets)
+                .await?
+                .load_records(idx, bin)
+                .await
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn exclude_only_filter_removes_matching_docs() {
+        // No include: the full query head {1,2,3,4,5}(+tail) minus audiobook{2,4}.
+        let page = block_on(full_cat().search(
+            "abc",
+            0,
+            100,
+            0,
+            &[FilterSel::exclude("format", "audiobook")],
+        ))
+        .unwrap();
+        assert_eq!(page.ids, vec![1, 3, 5, HEAD_BOUNDARY + 1]);
+        // Counts over the post-exclusion survivors {1,3,5}; the excluded category
+        // still lists (audiobook = 0) so the UI can offer to un-exclude it.
+        assert_eq!(page.facet_counts.unwrap(), vec![vec![3u64, 0], vec![2, 1]]);
+    }
+
+    #[test]
+    fn include_and_exclude_combine() {
+        // ebook{1,3,5,tail} ANDNOT es{4,5} = {1,3,tail}.
+        let page = block_on(full_cat().search(
+            "abc",
+            0,
+            100,
+            0,
+            &[
+                FilterSel::include("format", "ebook"),
+                FilterSel::exclude("language", "es"),
+            ],
+        ))
+        .unwrap();
+        assert_eq!(page.ids, vec![1, 3, HEAD_BOUNDARY + 1]);
+    }
+
+    #[test]
+    fn multiple_excludes_union() {
+        // query {1,2,3,4,5,tail} ANDNOT (audiobook{2,4} ∪ es{4,5}) = {1,3,tail}.
+        let page = block_on(full_cat().search(
+            "abc",
+            0,
+            100,
+            0,
+            &[
+                FilterSel::exclude("format", "audiobook"),
+                FilterSel::exclude("language", "es"),
+            ],
+        ))
+        .unwrap();
+        assert_eq!(page.ids, vec![1, 3, HEAD_BOUNDARY + 1]);
     }
 }
