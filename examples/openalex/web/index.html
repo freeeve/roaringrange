@@ -2207,7 +2207,7 @@
               // doc-ID space); a query the .rrt can't resolve returns them as-is.
               if (useBm25 && ids.length) ids = Array.from(await rterm.rerankIds(rrb, q, Uint32Array.from(ids), depth));
             } else if (useBm25) {
-              ids = Array.from(await rterm.searchBm25(rrb, q, BM25_M, depth));
+              ids = Array.from((await rterm.searchBm25(rrb, q, BM25_M, depth)).ids);
             } else {
               ids = Array.from(await rterm.search(q, depth));
             }
@@ -2288,8 +2288,8 @@
             try {
               if (idx) tri = Array.from(await idx.search(q, depth));
               if (rrbOk) {
-                strict = Array.from(await rterm.searchBm25(rrb, q, BM25_M, depth));
-                min2 = Array.from(await rterm.searchBm25MinMatch(rrb, q, BM25_M, depth, 2));
+                strict = Array.from((await rterm.searchBm25(rrb, q, BM25_M, depth)).ids);
+                min2 = Array.from((await rterm.searchBm25MinMatch(rrb, q, BM25_M, depth, 2)).ids);
               }
             } catch (_) {}
             const txMs = performance.now() - tt0, txReqs = reqs - tr0, txBytes = bytes - tb0;
@@ -2338,7 +2338,7 @@
             const tr0 = reqs, tb0 = bytes, tt0 = performance.now();
             try {
               text = Array.from(termArm
-                ? (hybridBm25 ? await rterm.searchBm25MinMatch(rrb, q, BM25_M, depth, 2) : await rterm.search(q, depth))
+                ? (hybridBm25 ? (await rterm.searchBm25MinMatch(rrb, q, BM25_M, depth, 2)).ids : await rterm.search(q, depth))
                 : await idx.search(q, depth));
             } catch (_) {}
             txMs = performance.now() - tt0; txReqs = reqs - tr0; txBytes = bytes - tb0;

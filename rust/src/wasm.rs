@@ -1581,6 +1581,47 @@ impl Model2vecEmbedder {
     }
 }
 
+/// Aligned local doc IDs + BM25 scores from a term-index BM25 search, best-first.
+/// In JavaScript `ids` is a `Uint32Array` and `scores` a `Float32Array` (index `i`
+/// of each is the same hit), mirroring the vector reader's `RrviHits` so the two
+/// scored-search shapes match.
+#[cfg(feature = "terms")]
+#[wasm_bindgen]
+pub struct RrtHits {
+    ids: Vec<u32>,
+    scores: Vec<f32>,
+}
+
+#[cfg(feature = "terms")]
+#[wasm_bindgen]
+impl RrtHits {
+    /// The matching local doc IDs (`Uint32Array`), best-first.
+    #[wasm_bindgen(getter)]
+    pub fn ids(&self) -> Vec<u32> {
+        self.ids.clone()
+    }
+
+    /// The BM25 scores (`Float32Array`) aligned with `ids`; higher is better.
+    #[wasm_bindgen(getter)]
+    pub fn scores(&self) -> Vec<f32> {
+        self.scores.clone()
+    }
+}
+
+#[cfg(feature = "terms")]
+impl RrtHits {
+    /// Splits scored BM25 hits into aligned id/score vectors for JS.
+    fn from_scored(scored: Vec<crate::bm25::ScoredDoc>) -> Self {
+        let mut ids = Vec::with_capacity(scored.len());
+        let mut scores = Vec::with_capacity(scored.len());
+        for s in scored {
+            ids.push(s.doc_id);
+            scores.push(s.score);
+        }
+        RrtHits { ids, scores }
+    }
+}
+
 /// A range-fetchable `RRTI` term-level inverted index exposed to JavaScript. Boot
 /// holds only the small resident block router in memory (O(#blocks), not O(vocab));
 /// each query range-fetches the dict blocks and postings it needs. Built with
@@ -1650,7 +1691,7 @@ impl RrtIndex {
     /// BM25 search via the `.rrb` impact sidecar: intersect the query terms'
     /// postings, take the first `m` candidates in static-rank order (the
     /// candidate window bounding the rerank cost), and return the top `k` doc IDs
-    /// by BM25 score (ties keep static rank). Resolves to a `Uint32Array`.
+    /// by BM25 score (ties keep static rank), as aligned ids + scores (`RrtHits`).
     #[wasm_bindgen(js_name = searchBm25)]
     pub async fn search_bm25(
         &self,
@@ -1658,18 +1699,18 @@ impl RrtIndex {
         query: &str,
         m: usize,
         k: usize,
-    ) -> Result<Vec<u32>, JsError> {
+    ) -> Result<RrtHits, JsError> {
         let scored = crate::bm25::search_bm25(&self.inner, &impacts.inner, query, m, k)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(scored.into_iter().map(|s| s.doc_id).collect())
+        Ok(RrtHits::from_scored(scored))
     }
 
     /// Min-should-match BM25 search: keep docs present in **≥ `min_match`** of the
     /// query's resolved terms (clamped to `[1, M]`; `min_match == M` is strict AND
     /// like [`Self::search_bm25`], `min_match == 1` is the union), take the first
-    /// `m` qualifiers in static-rank order, and return the top `k` local doc IDs by
-    /// BM25 score. Same contract as `searchBm25`; resolves to a `Uint32Array`.
+    /// `m` qualifiers in static-rank order, and return the top `k` hits by BM25
+    /// score as aligned ids + scores. Same contract as `searchBm25`; → `RrtHits`.
     #[wasm_bindgen(js_name = searchBm25MinMatch)]
     pub async fn search_bm25_min_match(
         &self,
@@ -1678,12 +1719,12 @@ impl RrtIndex {
         m: usize,
         k: usize,
         min_match: usize,
-    ) -> Result<Vec<u32>, JsError> {
+    ) -> Result<RrtHits, JsError> {
         let scored =
             crate::bm25::search_bm25_min_match(&self.inner, &impacts.inner, query, m, k, min_match)
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(scored.into_iter().map(|s| s.doc_id).collect())
+        Ok(RrtHits::from_scored(scored))
     }
 
     /// Reranks caller-supplied candidate doc IDs (ANY mode's results — the shared
