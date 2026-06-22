@@ -242,4 +242,13 @@ fn main() {
         started.elapsed().as_secs_f64(),
     );
     eprintln!("note: reuse the existing openalex-full.rrf / .rril (unchanged by v3); work dir {} can be removed", work_dir.display());
+    eprintln!(
+        "\n⚠ GATE before uploading: this build is only correct if `{idx}` is the S3-LIVE \
+         records-full. The doc-id == records-position invariant silently breaks if a stale/divergent \
+         local records was used. Verify against the live records (re-fetch if unsure):\n  \
+         cargo run --release --features zstd --example verify_monolith_aligned -- \\\n    {out} \
+         <records.idx> <records.bin> <records.dict>",
+        idx = idx_path,
+        out = out_rrs.display(),
+    );
 }

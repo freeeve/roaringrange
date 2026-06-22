@@ -66,13 +66,18 @@ far better. `AWS_PROFILE=openalex-admin` for all S3.
      records-full.idx records-full.bin openalex-full.dict 484369476 \
      openalex-full.rrs [chunk_docs sized to box RAM]
    ```
-2. **Verify alignment BEFORE upload** (the gate that prevents re-breaking prod):
-   query the new monolith and confirm the ids map to the right records.
+2. **Verify alignment BEFORE upload** — the mandatory gate that prevents re-breaking
+   prod. Run `verify_monolith_aligned` against the **same live records** (samples
+   docs across the corpus and confirms each is listed under its own record's rarest
+   trigrams; a monolith built from a different records ordering fails here):
    ```
-   cargo run --release --example query_rrs -- openalex-full.rrs "roaring bitmap"
+   cargo run --release --features zstd --example verify_monolith_aligned -- \
+     openalex-full.rrs records.idx records.bin openalex-full.dict 300
    ```
-   The returned ids must be the roaring-bitmap papers in `records-full` (cross-
-   check vs the term Lambda's ids, which are correct), NOT collisions papers.
+   Must print `OK: monolith is doc-id-aligned with these records.` (exit 0). A
+   non-zero exit / `MISALIGNED` means the build used the wrong records — do NOT
+   upload. (Spot-check too: `query_rrs openalex-full.rrs "roaring bitmap"` should
+   return the roaring-bitmap papers, cross-checked against the term Lambda's ids.)
 3. **Re-slice the geo split** from the verified monolith:
    ```
    cargo run --release --features "splits" --example slice_trigram_monolith -- \

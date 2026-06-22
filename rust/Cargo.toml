@@ -94,6 +94,12 @@ required-features = ["splits", "zstd", "hotcache"]
 name = "build_trigram_monolith"
 required-features = ["zstd"]
 
+# Doc-ID alignment guard: samples docs and confirms a trigram `.rrs` lists each under its own
+# record's rarest trigrams. Run against the live records before uploading a rebuilt monolith.
+[[example]]
+name = "verify_monolith_aligned"
+required-features = ["zstd"]
+
 # Opens an RRSS split set from disk and runs a query — a smoke check for a built split set.
 [[example]]
 name = "splitset_verify"
