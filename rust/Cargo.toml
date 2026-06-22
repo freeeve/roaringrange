@@ -261,3 +261,8 @@ required-features = ["terms", "splits"]
 [[example]]
 name = "slice_trigram_monolith"
 required-features = ["splits"]
+
+# Debug aid: print raw record bytes for given doc ids from an RRSR store.
+[[example]]
+name = "dump_record"
+required-features = ["zstd"]

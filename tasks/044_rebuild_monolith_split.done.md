@@ -1,5 +1,21 @@
 # Task 044 — rebuild the trigram monolith + geo split from the correct records
 
+## ❌ CLOSED — NOT A BUG (misdiagnosis, 2026-06-22)
+
+The monolith was **never misaligned**. A full rebuild from the live records
+produced **identical** result ids; `verify_monolith_aligned` passes; and
+`dump_record` confirms each trigram hit's record genuinely contains all 9 "roaring
+bitmap" trigrams (`match=true`). The "wrong" results are **trigram substring
+false-positives**: long popular docs (3000+-trigram physics papers, shallow ranks)
+contain all the short 3-grams and out-rank the real roaring-bitmap papers (short,
+deep ranks 11M–36M), which ARE in the result set but buried. Term/hybrid modes
+match word tokens and are correct. **No rebuild or upload needed.** The real lever
+is relevance for multi-word trigram queries (phrase/proximity — task 042 — or steer
+the demo to term/hybrid). The keepers from this investigation: `verify_monolith_aligned`
+and `dump_record` (rust/examples). Original (mistaken) plan preserved below.
+
+---
+
 The live server-trigram demo returns **wrong documents** (e.g. `roaring bitmap` →
 proton-proton-collision papers). Root cause: the trigram monolith
 `openalex-full.rrs` (and the geo split sliced from it) was built on a **different
