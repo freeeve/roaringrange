@@ -27,9 +27,13 @@ fn main() {
     let idx = block_on(Index::open(fetch)).expect("open index");
     println!("opened {path} (gram_size={})", idx.gram_size());
 
+    let limit: usize = std::env::var("RRS_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
     for q in &queries {
         let t = Instant::now();
-        let hits = block_on(idx.search(q, 20)).expect("search");
+        let hits = block_on(idx.search(q, limit)).expect("search");
         let top: Vec<u32> = hits.iter().take(8).copied().collect();
         println!(
             "  {:?}: {} hits in {:.1}ms  top doc ids: {:?}",

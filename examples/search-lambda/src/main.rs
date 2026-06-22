@@ -271,10 +271,23 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         // stays well inside API Gateway's hard 30-second cap. The old design ran
         // the FULL tail intersection on page 0 for an exact total, which the 484M
         // corpus blew past that cap on common-trigram queries.
-        let ids = cur
+        // The cursor's tail scan returns BOUNDED work per call (a first-paint bias for
+        // interactive clients that page a persistent cursor repeatedly). This Lambda is
+        // stateless — a fresh cursor per request — so a single `page` call surfaces only
+        // the first sliver of the tail and an `offset > 0` page comes back empty. Drive
+        // the scan until THIS page is filled (or the tail is exhausted), so every offset
+        // returns its full slice. Bounded by `offset + limit`, not the whole tail, so it
+        // stays well inside API Gateway's 30s cap for paginated requests.
+        let mut ids = cur
             .page(offset, limit)
             .await
             .map_err(|e| Error::from(format!("page: {e}")))?;
+        while ids.len() < limit && cur.pending_tail() {
+            ids = cur
+                .page(offset, limit)
+                .await
+                .map_err(|e| Error::from(format!("page: {e}")))?;
+        }
         // total = results materialized so far (a lower bound while `more`), the
         // same incremental contract the client-side cursor renders as "N+".
         let total = cur.loaded();
