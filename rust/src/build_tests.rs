@@ -1016,6 +1016,44 @@ fn assert_build_golden(name: &str, got: &[u8]) {
     );
 }
 
+/// The RRVI/RRVR serializers over the fixed fixture must equal the committed goldens that
+/// `go/vector_test.go` also asserts (mirrors `gen_rrvi_golden.rs`): a deterministically
+/// assembled IVFPQ model written to RRVI, and a bf16 re-rank blob.
+#[cfg(feature = "vector")]
+#[test]
+fn rrvi_golden_matches() {
+    use crate::{build_ivfpq_from_parts, write_rerank, IvfpqParts, Metric};
+
+    let parts = IvfpqParts {
+        dim: 4,
+        nlist: 2,
+        m: 2,
+        nbits: 2,
+        metric: Metric::L2,
+        centroids: vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
+        codebooks: vec![
+            0.25, -0.25, 0.5, -0.5, 0.75, -0.75, 1.0, -1.0, 1.25, -1.25, 1.5, -1.5, 1.75, -1.75,
+            2.0, -2.0,
+        ],
+        opq: Some(vec![
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ]),
+        ids: vec![10, 20, 30, 40, 50],
+        assignments: vec![0, 1, 0, 1, 0],
+        codes: vec![1, 2, 0, 3, 2, 1, 3, 0, 1, 1],
+    };
+    assert_build_golden("rrvi", &build_ivfpq_from_parts(parts).unwrap().to_bytes());
+
+    let vectors = vec![
+        vec![1.1, -2.2, 0.0, 3.5],
+        vec![100.25, -0.125, 42.0, 7.7],
+        vec![0.0, 0.0, 0.0, 0.0],
+    ];
+    let mut rerank = Vec::new();
+    write_rerank(&mut rerank, 4, &vectors, false).unwrap();
+    assert_build_golden("rrvr", &rerank);
+}
+
 /// The trigram monolith built from the fixed corpus must equal the committed golden that
 /// `go/monolithbuild_test.go` also asserts (mirrors `gen_rrs_monolith_golden.rs`): the
 /// in-memory tokenize → per-trigram `RoaringBitmap` → `write_index` path.

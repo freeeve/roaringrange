@@ -20,14 +20,20 @@ roaringrange-specific; only the `.rrvi`/RRVR serialization is, and that stays he
   exactly**. PQ codebooks/codes are FMA-sensitive across languages, so PQ quality is checked
   by `TestTrainRecall` instead — **recall@10 = 0.85** vs a brute-force baseline.
 
+- **`WriteRRVI` + `WriteRerank` landed** (`go/vector.go`): the byte-exact `.rrvi` / `.rrvr`
+  serializers consuming the `go-ivfpq` `Model` (roaringrange `go/` now depends on
+  `github.com/freeeve/go-ivfpq v0.1.0`). Golden-conformed against Rust `Ivfpq::write` /
+  `write_rerank` via `gen_rrvi_golden` + `go/vector_test.go` + Rust
+  `build_tests::rrvi_golden_matches` (deterministic `build_ivfpq_from_parts` fixture +
+  bf16 `f32ToBF16` round-to-nearest-even). The train → serialize → reader-format loop is
+  closed.
+
 ## Remaining
 
-1. **roaringrange `go/`: `WriteRRVI(model)`** — the byte-exact `.rrvi` serializer (the
-   `Ivfpq::write` layout: 48-B header, opq?, centroids, codebooks, `nlist×12` directory, then
-   per-cluster `[ids][codes]`) consuming the `go-ivfpq` `Model`, plus `WriteRerank` (bf16
-   `RRVR`). This is deterministic given the trained arrays → golden-testable against Rust.
-2. **roaringrange `go/`: RRVI reader/search** (if a Go query path is wanted) → end-to-end
-   recall parity vs the Rust-built index.
+1. **Perf pass on `~/go-ivfpq`** (requested): allocation reductions first, then a profiling
+   pass — the `go-stemmers` / fst perf-plan pattern.
+2. **(Optional) RRVI reader/search in Go** — only if a Go *query* path is wanted; needed for
+   end-to-end recall parity vs the Rust-built index, not for building/serializing.
 
 ## Why recall, not byte-exact, for the higher level
 

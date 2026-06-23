@@ -6,6 +6,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/freeeve/fst-go v0.1.0 h1:O9qvw6GGxkTh2hb0TzJKjK29KwEBDhEi9JVvMdMpS9g=
 github.com/freeeve/fst-go v0.1.0/go.mod h1:zQHqj43wmnXZLvMFGceMb549lDcgyRGJw4xIVnVO6Zs=
+github.com/freeeve/go-ivfpq v0.1.0 h1:m4HUFIXTqQajgcw26Pc+xdVSWv66DSkucrkyBJyB+eU=
+github.com/freeeve/go-ivfpq v0.1.0/go.mod h1:hIDRgFpPy2P3Sk0q4Y/8XdCeQLuMCja+LtNa3WYM/Ks=
 github.com/freeeve/go-stemmers v0.0.0-20260606195828-3c78df9017f5 h1:0wX7Qz3XG3seGek1UnRO32IKF5tRoJB35LxCUCNXI5k=
 github.com/freeeve/go-stemmers v0.0.0-20260606195828-3c78df9017f5/go.mod h1:dcWXNghdzPDH46QYDvDtDOcXIDhieNz0jNdM7T87MZk=
 github.com/klauspost/compress v1.18.6 h1:2jupLlAwFm95+YDR+NwD2MEfFO9d4z4Prjl1XXDjuao=

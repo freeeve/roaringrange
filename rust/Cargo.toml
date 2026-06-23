@@ -295,3 +295,8 @@ required-features = ["zstd"]
 # Generates the RRS trigram-monolith conformance golden for the Go monolith writer (task 051).
 [[example]]
 name = "gen_rrs_monolith_golden"
+
+# Generates the RRVI/RRVR conformance goldens for the Go vector serializers (task 050).
+[[example]]
+name = "gen_rrvi_golden"
+required-features = ["vector"]
