@@ -275,3 +275,7 @@ required-features = ["terms"]
 # Generates the RRIL (.rril) conformance golden for the Go lookup builder (task 046).
 [[example]]
 name = "gen_rril_golden"
+
+# Generates the RRSC (.rrsc) conformance golden for the Go sortcols builder (task 048).
+[[example]]
+name = "gen_rrsc_golden"

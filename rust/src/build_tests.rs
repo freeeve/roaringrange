@@ -982,3 +982,31 @@ fn rril_golden_matches() {
     crate::build::write_lookup(&mut out, &entries).unwrap();
     assert_build_golden("rril", &out);
 }
+
+/// `write_sortcols` over the fixed columns must equal the committed golden that
+/// `go/sortcols_test.go` also asserts (mirrors `gen_rrsc_golden.rs`).
+#[test]
+fn rrsc_golden_matches() {
+    use crate::build::{write_sortcols, ColumnValues, SortColumn};
+    let cols = vec![
+        SortColumn {
+            name: "year".to_string(),
+            values: ColumnValues::U16(vec![2020, 2019, 2021, 2018]),
+        },
+        SortColumn {
+            name: "citations".to_string(),
+            values: ColumnValues::U32(vec![100, 5, 9999, 0]),
+        },
+        SortColumn {
+            name: "delta".to_string(),
+            values: ColumnValues::I32(vec![-5, 10, -100, 42]),
+        },
+        SortColumn {
+            name: "score".to_string(),
+            values: ColumnValues::F32(vec![1.5, -2.25, 0.0, 3.5]),
+        },
+    ];
+    let mut out = Vec::new();
+    write_sortcols(&mut out, cols).unwrap();
+    assert_build_golden("rrsc", &out);
+}
