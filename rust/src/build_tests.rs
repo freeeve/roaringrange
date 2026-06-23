@@ -940,6 +940,61 @@ fn write_records_zstd_round_trips_with_dict() {
     );
 }
 
+/// Reads the length-prefixed `records_corpus.bin` fixture (`u32 count`, then
+/// `count × (u32 len + bytes)`) written by the `gen_records_zstd_fixture` example.
+#[cfg(feature = "zstd")]
+fn read_fixture_corpus(path: &str) -> Vec<Vec<u8>> {
+    let raw = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let count = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
+    let mut off = 4;
+    let mut recs = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = u32::from_le_bytes(raw[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        recs.push(raw[off..off + len].to_vec());
+        off += len;
+    }
+    recs
+}
+
+/// Cross-language conformance for the Go records-zstd builder (task 049): the Go
+/// `WriteRecordsZstd` encodes each record with klauspost/compress, so the frame
+/// bytes differ from libzstd's — this asserts the **production reader's ruzstd
+/// decode path** inflates that Go-built store correctly against the shared
+/// dictionary, every record matching the fixture corpus. The companion Go test
+/// (`TestOpenRecordStoreWithDictReadsRustStore`) proves the other direction. The
+/// fixtures are committed by `gen_records_zstd_fixture` + the Go test's
+/// `RR_UPDATE_FIXTURES=1` path. Gated on the `zstd` feature.
+#[cfg(feature = "zstd")]
+#[test]
+fn go_built_zstd_store_reads_back_through_ruzstd() {
+    use crate::records::RecordStore;
+
+    let dir = "../go/testdata";
+    let idx = std::fs::read(format!("{dir}/records_go_zstd.idx")).expect("go store idx");
+    let bin = std::fs::read(format!("{dir}/records_go_zstd.bin")).expect("go store bin");
+    let dict = std::fs::read(format!("{dir}/records.dict")).expect("records dict");
+    let corpus = read_fixture_corpus(&format!("{dir}/records_corpus.bin"));
+
+    // Version-2 framed store.
+    assert_eq!(u16::from_le_bytes(idx[4..6].try_into().unwrap()), 2);
+
+    let store = block_on(RecordStore::open_with_dict(
+        MemoryFetch::new(idx),
+        MemoryFetch::new(bin),
+        dict,
+    ))
+    .unwrap();
+    assert_eq!(store.len() as usize, corpus.len());
+    for (d, rec) in corpus.iter().enumerate() {
+        assert_eq!(
+            &block_on(store.get(d as u32)).unwrap().unwrap(),
+            rec,
+            "klauspost-built record {d} must decode through ruzstd"
+        );
+    }
+}
+
 /// Reads `go/testdata/<name>_build_golden.txt` (`<name> <hex>`) and asserts `got`
 /// matches it byte-for-byte — the shared-golden conformance both the Go tests and
 /// these Rust tests assert, so neither port drifts. Regenerate via the matching

@@ -94,6 +94,14 @@ func WriteRecords(bin, idx io.Writer, records [][]byte) error {
 	return nil
 }
 
+// recordDecompressor inflates a version-2 zstd frame (tag 1) against the shared
+// dictionary. It is supplied by OpenRecordStoreWithDict (records_zstd.go) so the
+// klauspost dependency stays isolated there — a plain OpenRecordStore leaves it
+// nil and a compressed record errors with ErrCompressedRecord.
+type recordDecompressor interface {
+	decompress(frame []byte) ([]byte, error)
+}
+
 // RecordStore is a reference reader over an RRSR record store accessed by byte
 // range: an offset index (idx) over a record blob (bin). It mirrors the browser
 // reader's access pattern — one ranged read of the 16-byte offset pair in the
@@ -103,13 +111,15 @@ type RecordStore struct {
 	bin     io.ReaderAt
 	count   uint32
 	version uint16
+	decomp  recordDecompressor // nil unless opened via OpenRecordStoreWithDict
 }
 
 // OpenRecordStore boots the store: reads the 16-byte index header and validates
 // magic and version. idx addresses the offset index, bin the record blob.
 // Accepts version 1 (untagged raw records) and version 2 ([tag][payload]-framed
 // records, matching the Rust reader); a version-2 zstd-compressed frame (tag 1)
-// errors at Get — this reference reader carries no zstd decoder.
+// errors at Get — open with OpenRecordStoreWithDict (records_zstd.go) to attach a
+// dictionary-backed zstd decoder.
 func OpenRecordStore(idx, bin io.ReaderAt) (*RecordStore, error) {
 	header := make([]byte, recordHeaderSize)
 	if _, err := idx.ReadAt(header, 0); err != nil {
@@ -160,7 +170,9 @@ func (s *RecordStore) Get(id uint32) (data []byte, ok bool, err error) {
 }
 
 // decode unwraps a version-2 [tag][payload] frame; a version-1 store (and the
-// empty record) passes through raw, mirroring the Rust reader's decode.
+// empty record) passes through raw, mirroring the Rust reader's decode. A zstd
+// frame (tag 1) inflates through the dictionary-backed decompressor attached by
+// OpenRecordStoreWithDict, or errors with ErrCompressedRecord when none is set.
 func (s *RecordStore) decode(raw []byte) (data []byte, ok bool, err error) {
 	if s.version == VersionRecord || len(raw) == 0 {
 		return raw, true, nil
@@ -169,7 +181,14 @@ func (s *RecordStore) decode(raw []byte) (data []byte, ok bool, err error) {
 	case recordTagRaw:
 		return raw[1:], true, nil
 	case recordTagZstd:
-		return nil, false, ErrCompressedRecord
+		if s.decomp == nil {
+			return nil, false, ErrCompressedRecord
+		}
+		out, derr := s.decomp.decompress(raw[1:])
+		if derr != nil {
+			return nil, false, derr
+		}
+		return out, true, nil
 	default:
 		return nil, false, ErrTruncated
 	}

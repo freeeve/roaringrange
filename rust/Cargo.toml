@@ -284,3 +284,10 @@ name = "gen_rrsc_golden"
 [[example]]
 name = "gen_rrhc_golden"
 required-features = ["hotcache"]
+
+# Generates the cross-language fixtures (corpus, trained dict, Rust-built zstd
+# store) for the Go records-zstd builder (task 049). Needs the native zstd
+# encoder + dictionary trainer.
+[[example]]
+name = "gen_records_zstd_fixture"
+required-features = ["zstd"]
