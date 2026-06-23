@@ -279,3 +279,8 @@ name = "gen_rril_golden"
 # Generates the RRSC (.rrsc) conformance golden for the Go sortcols builder (task 048).
 [[example]]
 name = "gen_rrsc_golden"
+
+# Generates the RRHC (.rrhc) conformance golden for the Go hotcache builder (task 047).
+[[example]]
+name = "gen_rrhc_golden"
+required-features = ["hotcache"]

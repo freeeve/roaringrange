@@ -1010,3 +1010,45 @@ fn rrsc_golden_matches() {
     write_sortcols(&mut out, cols).unwrap();
     assert_build_golden("rrsc", &out);
 }
+
+/// `write_hotcache` over the fixed members must equal the committed golden that
+/// `go/hotcache_test.go` also asserts (mirrors `gen_rrhc_golden.rs`).
+#[cfg(feature = "hotcache")]
+#[test]
+fn rrhc_golden_matches() {
+    use crate::hotcache::MemberTag;
+    use crate::hotcache_build::{write_hotcache, MemberSpec};
+    let members = vec![
+        MemberSpec {
+            tag: MemberTag::Rrs,
+            data_file: "a.rrs".to_string(),
+            boot_off: 16,
+            boot_len: 8,
+            boot_bytes: vec![0xA0; 8],
+        },
+        MemberSpec {
+            tag: MemberTag::Rrti,
+            data_file: "terms.rrt".to_string(),
+            boot_off: 16,
+            boot_len: 16,
+            boot_bytes: vec![0xB1; 16],
+        },
+        MemberSpec {
+            tag: MemberTag::Rrvi,
+            data_file: "vec.rrvi".to_string(),
+            boot_off: 48,
+            boot_len: 40,
+            boot_bytes: vec![0xC2; 40],
+        },
+        MemberSpec {
+            tag: MemberTag::RrsrIdx,
+            data_file: "records.idx".to_string(),
+            boot_off: 0,
+            boot_len: 4,
+            boot_bytes: vec![0xD3; 4],
+        },
+    ];
+    let mut out = Vec::new();
+    write_hotcache(&mut out, &members, 16).unwrap();
+    assert_build_golden("rrhc", &out);
+}
