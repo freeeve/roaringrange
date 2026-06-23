@@ -939,3 +939,46 @@ fn write_records_zstd_round_trips_with_dict() {
         "expected Malformed without a dictionary, got {got:?}"
     );
 }
+
+/// Reads `go/testdata/<name>_build_golden.txt` (`<name> <hex>`) and asserts `got`
+/// matches it byte-for-byte — the shared-golden conformance both the Go tests and
+/// these Rust tests assert, so neither port drifts. Regenerate via the matching
+/// `gen_<name>_golden` example if the format intentionally changes.
+fn assert_build_golden(name: &str, got: &[u8]) {
+    let path = format!("../go/testdata/{name}_build_golden.txt");
+    let golden = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let hex = golden
+        .trim()
+        .strip_prefix(&format!("{name} "))
+        .unwrap_or_else(|| panic!("golden {name:?} missing '<name> <hex>' prefix"));
+    let want: Vec<u8> = (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+        .collect();
+    assert_eq!(
+        got,
+        want.as_slice(),
+        "{name} build drifted from the committed golden"
+    );
+}
+
+/// `write_lookup` over the fixed entries must equal the committed golden that
+/// `go/lookup_test.go` also asserts (mirrors `gen_rril_golden.rs`).
+#[test]
+fn rril_golden_matches() {
+    let entries: Vec<(String, u32)> = [
+        ("978-0-13-468599-1", 5u32),
+        ("B07XYZ1234", 2),
+        ("978-0-13-468599-1", 9),
+        ("isbn:0262033844", 7),
+        ("", 3),
+        ("!!!", 4),
+        ("AbC123", 1),
+        ("b07xyz1234", 8),
+    ]
+    .iter()
+    .map(|(s, d)| (s.to_string(), *d))
+    .collect();
+    let mut out = Vec::new();
+    crate::build::write_lookup(&mut out, &entries).unwrap();
+    assert_build_golden("rril", &out);
+}

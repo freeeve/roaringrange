@@ -271,3 +271,7 @@ required-features = ["zstd"]
 [[example]]
 name = "gen_rrsb_golden"
 required-features = ["terms"]
+
+# Generates the RRIL (.rril) conformance golden for the Go lookup builder (task 046).
+[[example]]
+name = "gen_rril_golden"
