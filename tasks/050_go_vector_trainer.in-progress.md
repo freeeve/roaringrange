@@ -7,25 +7,27 @@ roaringrange-specific; only the `.rrvi`/RRVR serialization is, and that stays he
 
 ## Progress
 
-- **`~/go-ivfpq` scaffolded + core landed** (committed locally, not yet pushed): `Rng`
-  (xorshift64\*) and `KMeans` (Lloyd's) + `normalize`.
-- **Cross-implementation conformance wired.** A `#[cfg(test)]` printer in
-  `rust/src/vector_build.rs` (`conformance_ref::print_kmeans_ref`, gated on
-  `RR_UPDATE_FIXTURES=1`, no public-API change) emits the `Rng` sequence and a k-means run
-  over a fixed well-separated corpus, every `f32` as its raw `u32` bits, into
-  `~/go-ivfpq/testdata/kmeans_ref.txt`. The Go tests assert the Rng sequence **and** the
-  k-means result match — assignments exact, **centroids bit-for-bit** (they hold bit-exact
-  because well-separated assignments are robust and the centroid mean has no fused mul-add).
+- **`~/go-ivfpq` scaffolded + trainer landed** (committed locally): `Rng` (xorshift64\*),
+  `KMeans` (Lloyd's), `normalize`, **`Train` (`= build_ivfpq`)**, **`FromParts`
+  (`= build_ivfpq_from_parts`)**, and `Reconstruct` (centroid + PQ-decoded residual).
+- **Cross-implementation conformance wired.** Two `#[cfg(test)]` printers in
+  `rust/src/vector_build.rs` (`conformance_ref::print_kmeans_ref` / `print_ivfpq_ref`, gated
+  on `RR_UPDATE_FIXTURES=1`, no public-API change) emit the `Rng` sequence, a k-means run, and
+  a full `build_ivfpq` model over fixed corpora — every `f32` as its raw `u32` bits — into
+  `~/go-ivfpq/testdata/{kmeans_ref,ivfpq_ref}.txt`. The Go tests assert the
+  cross-language-robust parts match: the Rng sequence and k-means **centroids bit-for-bit**
+  (assignments exact), and the trainer's **coarse centroids bit-for-bit + list membership
+  exactly**. PQ codebooks/codes are FMA-sensitive across languages, so PQ quality is checked
+  by `TestTrainRecall` instead — **recall@10 = 0.85** vs a brute-force baseline.
 
 ## Remaining
 
-1. **`Train`** (`= build_ivfpq`): residuals → per-subspace PQ codebooks + per-vector codes →
-   scatter into inverted lists. Reuses `KMeans`. Cross-check vs the Rust `build_ivfpq` model
-   (likely assignments-exact + codebooks bit-or-ε), then **recall@k vs brute force**.
-2. **`FromParts`** (`= build_ivfpq_from_parts`): assemble + validate an externally-trained
-   model (e.g. FAISS export).
-3. **roaringrange `go/`**: `WriteRRVI(model)` byte-exact serializer + `WriteRerank` (bf16),
-   then the RRVI reader/search + end-to-end recall parity vs the Rust-built index.
+1. **roaringrange `go/`: `WriteRRVI(model)`** — the byte-exact `.rrvi` serializer (the
+   `Ivfpq::write` layout: 48-B header, opq?, centroids, codebooks, `nlist×12` directory, then
+   per-cluster `[ids][codes]`) consuming the `go-ivfpq` `Model`, plus `WriteRerank` (bf16
+   `RRVR`). This is deterministic given the trained arrays → golden-testable against Rust.
+2. **roaringrange `go/`: RRVI reader/search** (if a Go query path is wanted) → end-to-end
+   recall parity vs the Rust-built index.
 
 ## Why recall, not byte-exact, for the higher level
 

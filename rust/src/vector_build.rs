@@ -655,4 +655,78 @@ mod conformance_ref {
         println!("IVFPQREF centroids {}", hexf(&centroids));
         println!("IVFPQREF assign {}", ints(&assign));
     }
+
+    /// 32 vectors in 8 dims, 4 well-separated clusters of 8: each cluster's signal
+    /// lives in a distinct dim pair, with structured per-dim jitter so the PQ
+    /// subspaces carry real residual signal.
+    fn ivfpq_fixture_vectors() -> (Vec<(u32, Vec<f32>)>, usize) {
+        let (dim, k, per) = (8usize, 4usize, 8usize);
+        let mut out = Vec::new();
+        let mut id = 0u32;
+        for c in 0..k {
+            for j in 0..per {
+                let mut v = vec![0f32; dim];
+                v[2 * c] = 5.0;
+                v[2 * c + 1] = 5.0;
+                for (d, slot) in v.iter_mut().enumerate() {
+                    *slot += (((c * per + j + d) % 7) as f32 - 3.0) * 0.1;
+                }
+                out.push((id, v));
+                id += 1;
+            }
+        }
+        (out, dim)
+    }
+
+    /// Reference fixture for the Go `Train` (`build_ivfpq`): the full trained model
+    /// over a fixed corpus, `f32`s as raw `u32` bits. Coarse centroids + list
+    /// membership are bit-exact cross-language; PQ codebooks/codes are validated by
+    /// recall on the Go side, so they are dumped for inspection but not asserted equal.
+    /// Written to `~/go-ivfpq/testdata/ivfpq_ref.txt`.
+    #[test]
+    fn print_ivfpq_ref() {
+        if std::env::var("RR_UPDATE_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let (vectors, dim) = ivfpq_fixture_vectors();
+        let mut params = super::IvfpqParams::new(dim, 4, 2);
+        params.nbits = 4;
+        params.metric = super::Metric::L2;
+        params.kmeans_iters = 10;
+        let model = super::build_ivfpq(&vectors, &params).unwrap();
+
+        let hexf = |xs: &[f32]| {
+            xs.iter()
+                .map(|x| format!("{:08x}", x.to_bits()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let flat_vecs: Vec<f32> = vectors.iter().flat_map(|(_, v)| v.clone()).collect();
+        let sizes: Vec<String> = model.list_ids.iter().map(|l| l.len().to_string()).collect();
+        let list_ids: Vec<String> = model
+            .list_ids
+            .iter()
+            .flatten()
+            .map(|x| x.to_string())
+            .collect();
+        let list_codes: Vec<String> = model
+            .list_codes
+            .iter()
+            .flatten()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+
+        println!("IVFPQREF2 dim {}", model.dim);
+        println!("IVFPQREF2 nlist {}", model.nlist);
+        println!("IVFPQREF2 m {}", model.m);
+        println!("IVFPQREF2 nbits {}", model.nbits);
+        println!("IVFPQREF2 metric {}", u8::from(model.metric));
+        println!("IVFPQREF2 n {}", model.n);
+        println!("IVFPQREF2 vectors {}", hexf(&flat_vecs));
+        println!("IVFPQREF2 centroids {}", hexf(&model.centroids));
+        println!("IVFPQREF2 codebooks {}", hexf(&model.codebooks));
+        println!("IVFPQREF2 list_sizes {}", sizes.join(" "));
+        println!("IVFPQREF2 list_ids {}", list_ids.join(" "));
+        println!("IVFPQREF2 list_codes {}", list_codes.join(" "));
+    }
 }
