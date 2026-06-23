@@ -266,3 +266,8 @@ required-features = ["splits"]
 [[example]]
 name = "dump_record"
 required-features = ["zstd"]
+
+# Generates the RRSB (.rrb) conformance golden for the Go BM25 builder (task 045).
+[[example]]
+name = "gen_rrsb_golden"
+required-features = ["terms"]

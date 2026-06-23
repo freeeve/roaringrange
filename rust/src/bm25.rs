@@ -906,4 +906,48 @@ mod tests {
         let mut rrb = Vec::new();
         assert!(write_impacts(&mut rrb, &dict, &acc, DEFAULT_K1, DEFAULT_B).is_err());
     }
+
+    /// The Rust `write_impacts` output for the fixed corpus must equal the committed
+    /// golden that `go/bm25_test.go` also asserts — pinning both ports to one golden
+    /// (regenerate via the `gen_rrsb_golden` example if the format intentionally
+    /// changes). Mirrors `gen_rrsb_golden.rs`'s build.
+    #[test]
+    fn rrsb_golden_matches() {
+        use std::collections::BTreeSet;
+        let corpus = [
+            "the quick brown fox jumps over the lazy dog",
+            "quick brown bitmaps roaring over data",
+            "roaring fox bitmaps fast and quick",
+            "the lazy dog and the quick fox",
+        ];
+        let mut acc = ImpactsAccumulator::new(Tokenizer::plain());
+        for d in &corpus {
+            acc.add_doc(d);
+        }
+        let tok = Tokenizer::plain();
+        let mut terms: BTreeSet<String> = BTreeSet::new();
+        for d in &corpus {
+            for t in tok.tokenize(d) {
+                terms.insert(t);
+            }
+        }
+        let dict: Vec<(String, u64)> = terms
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.clone(), (i as u64) * 16 + 100))
+            .collect();
+        let mut out = Vec::new();
+        write_impacts(&mut out, &dict, &acc, DEFAULT_K1, DEFAULT_B).unwrap();
+
+        let golden = std::fs::read_to_string("../go/testdata/rrsb_build_golden.txt")
+            .expect("read go/testdata/rrsb_build_golden.txt");
+        let hex = golden
+            .trim()
+            .strip_prefix("rrsb ")
+            .expect("golden 'rrsb <hex>' prefix");
+        let want: Vec<u8> = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+        assert_eq!(out, want, "RRSB build drifted from the committed golden");
+    }
 }
