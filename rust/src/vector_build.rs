@@ -580,3 +580,79 @@ impl Rng {
         (self.next_u64() % n as u64) as usize
     }
 }
+
+/// Prints the cross-implementation reference fixture for the standalone Go IVFPQ
+/// trainer (`~/go-ivfpq`, task 050): the `Rng` output sequence and a `kmeans` run
+/// over a fixed well-separated corpus, every `f32` emitted as its raw `u32` bits
+/// (`{:08x}`) so the Go side reconstructs identical inputs and compares bit-exact.
+/// Gated behind `RR_UPDATE_FIXTURES=1` so it is a no-op in normal test runs; the
+/// `IVFPQREF`-prefixed stdout lines are captured into
+/// `~/go-ivfpq/testdata/kmeans_ref.txt`:
+///
+///   RR_UPDATE_FIXTURES=1 cargo test --features vector \
+///       conformance_ref::print_kmeans_ref -- --nocapture --exact
+#[cfg(test)]
+mod conformance_ref {
+    use super::{kmeans, Rng};
+
+    /// 24 points in 4 dims, 3 well-separated clusters of 8 with small deterministic
+    /// jitter — separated enough that assignments are unambiguous (so a bit-level
+    /// divergence in the distance reduction cannot flip a cluster).
+    fn fixture_points() -> (Vec<f32>, usize, usize, usize) {
+        let (dim, k, per) = (4usize, 3usize, 8usize);
+        let centers = [
+            [10.0f32, 0.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0, 0.0],
+            [0.0, 0.0, 10.0, 0.0],
+        ];
+        let mut pts = Vec::with_capacity(k * per * dim);
+        for (c, center) in centers.iter().enumerate() {
+            for j in 0..per {
+                let off = (((c * per + j) % 5) as f32 - 2.0) * 0.1;
+                for &cv in center {
+                    pts.push(cv + off);
+                }
+            }
+        }
+        (pts, k * per, dim, k)
+    }
+
+    #[test]
+    fn print_kmeans_ref() {
+        if std::env::var("RR_UPDATE_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let seed = 0x5251_5649_5252_5649u64;
+        let mut seq_rng = Rng::new(seed);
+        let seq: Vec<String> = (0..16)
+            .map(|_| format!("{:016x}", seq_rng.next_u64()))
+            .collect();
+
+        let (pts, n, dim, k) = fixture_points();
+        let iters = 25usize;
+        let mut rng = Rng::new(seed);
+        let (centroids, assign) = kmeans(&pts, n, dim, k, iters, &mut rng);
+
+        let hexf = |xs: &[f32]| {
+            xs.iter()
+                .map(|x| format!("{:08x}", x.to_bits()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let ints = |xs: &[u32]| {
+            xs.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        println!("IVFPQREF rng_seed {seed:016x}");
+        println!("IVFPQREF rng_seq {}", seq.join(" "));
+        println!("IVFPQREF dim {dim}");
+        println!("IVFPQREF k {k}");
+        println!("IVFPQREF iters {iters}");
+        println!("IVFPQREF n {n}");
+        println!("IVFPQREF points {}", hexf(&pts));
+        println!("IVFPQREF centroids {}", hexf(&centroids));
+        println!("IVFPQREF assign {}", ints(&assign));
+    }
+}
