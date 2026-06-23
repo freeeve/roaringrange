@@ -291,3 +291,7 @@ required-features = ["hotcache"]
 [[example]]
 name = "gen_records_zstd_fixture"
 required-features = ["zstd"]
+
+# Generates the RRS trigram-monolith conformance golden for the Go monolith writer (task 051).
+[[example]]
+name = "gen_rrs_monolith_golden"

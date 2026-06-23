@@ -1016,6 +1016,32 @@ fn assert_build_golden(name: &str, got: &[u8]) {
     );
 }
 
+/// The trigram monolith built from the fixed corpus must equal the committed golden that
+/// `go/monolithbuild_test.go` also asserts (mirrors `gen_rrs_monolith_golden.rs`): the
+/// in-memory tokenize → per-trigram `RoaringBitmap` → `write_index` path.
+#[test]
+fn rrs_monolith_golden_matches() {
+    use crate::build::{serialize_posting, write_index, DEFAULT_STRIDE};
+    use crate::ngram_keys;
+    use roaring::RoaringBitmap;
+    use std::collections::HashMap;
+
+    let docs = ["roaring bitmaps", "roaring range", "", "bitmap range index"];
+    let mut open: HashMap<u64, RoaringBitmap> = HashMap::new();
+    for (id, text) in docs.iter().enumerate() {
+        for k in ngram_keys(text, 3) {
+            open.entry(k).or_default().insert(id as u32);
+        }
+    }
+    let entries: Vec<(u64, Vec<u8>)> = open
+        .into_iter()
+        .map(|(k, bm)| (k, serialize_posting(&bm)))
+        .collect();
+    let mut out = Vec::new();
+    write_index(&mut out, 3, DEFAULT_STRIDE, entries).unwrap();
+    assert_build_golden("rrs_monolith", &out);
+}
+
 /// `write_lookup` over the fixed entries must equal the committed golden that
 /// `go/lookup_test.go` also asserts (mirrors `gen_rril_golden.rs`).
 #[test]
