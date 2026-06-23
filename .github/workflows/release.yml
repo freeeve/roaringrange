@@ -39,15 +39,19 @@ jobs:
         platform:
           - { runner: ubuntu-latest, target: x86_64, manylinux: auto }
           - { runner: ubuntu-latest, target: aarch64, manylinux: auto }
-          - { runner: macos-13, target: x86_64, manylinux: '' }
+          # Both macOS arches build on the Apple-Silicon runner: the x86_64 wheel is
+          # cross-compiled (maturin-action adds the x86_64-apple-darwin target). The
+          # retired macos-13 Intel runner is avoided — it starved the queue for hours
+          # and blocked the whole release (publish needs every wheel leg to finish).
+          - { runner: macos-14, target: x86_64, manylinux: '' }
           - { runner: macos-14, target: aarch64, manylinux: '' }
           - { runner: windows-latest, target: x64, manylinux: '' }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Pin a standard (GIL) interpreter for the native macOS/Windows abi3 build
       # so it never picks up a free-threaded default. Ignored by the Linux
       # manylinux container build (which builds abi3 with its own interpreter).
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Build wheels
@@ -58,7 +62,7 @@ jobs:
           args: --release --out dist
           manylinux: ${{ matrix.platform.manylinux }}
           sccache: 'true'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
           path: python/dist/*.whl
@@ -74,7 +78,7 @@ jobs:
     permissions:
       id-token: write # required for Trusted Publishing
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
