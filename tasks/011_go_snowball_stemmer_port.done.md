@@ -1,6 +1,23 @@
 # Task 011 — Byte-exact Go port of `rust-stemmers` (Snowball English / Porter2)
 
-**Status:** in progress — stemmer DONE (spun out to a standalone repo); roaringrange-side wiring remains.
+**Status:** DONE — stemmer spun out to a standalone repo, and the roaringrange-side
+wiring is complete and shipped (see below). File closed.
+
+## Closed (2026-06-23)
+
+The roaringrange-side wiring the 2026-06-07 "Still TODO" section flagged as open is
+all present in `go/terms.go`:
+- depends on + imports `github.com/freeeve/go-stemmers` (the stemmer) and
+  `github.com/freeeve/fst-go` (the block-dict FST router);
+- `WriteTermIndex` — the monolithic RRTI `.rrt` Go writer;
+- `TermTokenize` / `TermTokenizer` — the ported Tantivy SimpleTokenizer + LowerCaser
+  + stopwords + stemmer.
+
+The build-time↔query-time stemming invariant (this task's whole reason to exist) is
+pinned byte-for-byte to the Rust pipeline by the committed `rrti_term_split_golden.txt`
+conformance golden (tokenize→stem→stopwords→postings→`.rrt`), asserted in
+`go/termsplitsetbuild_test.go` and `go/bm25_test.go`. The original outcome notes below
+are retained for history.
 
 ## Outcome (2026-06-06)
 
