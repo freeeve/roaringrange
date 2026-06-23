@@ -7,7 +7,7 @@ go 1.25
 
 require (
 	github.com/RoaringBitmap/roaring/v2 v2.14.4
-	github.com/freeeve/roaringrange v0.0.0
+	github.com/freeeve/roaringrange/go v0.0.0
 	github.com/freeeve/roaringsearch v0.5.9
 )
 
@@ -21,4 +21,4 @@ require (
 	github.com/mschoch/smat v0.2.0 // indirect
 )
 
-replace github.com/freeeve/roaringrange => ../../go
+replace github.com/freeeve/roaringrange/go => ../../go

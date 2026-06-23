@@ -1,4 +1,4 @@
-module github.com/freeeve/roaringrange
+module github.com/freeeve/roaringrange/go
 
 go 1.25
 

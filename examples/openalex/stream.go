@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/RoaringBitmap/roaring/v2"
-	rr "github.com/freeeve/roaringrange"
+	rr "github.com/freeeve/roaringrange/go"
 	rs "github.com/freeeve/roaringsearch"
 )
 

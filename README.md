@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/freeeve/roaringrange/actions/workflows/ci.yml/badge.svg)](https://github.com/freeeve/roaringrange/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/freeeve/roaringrange/badge.svg?branch=main)](https://coveralls.io/github/freeeve/roaringrange?branch=main)
-[![Go Report Card](https://goreportcard.com/badge/github.com/freeeve/roaringrange)](https://goreportcard.com/report/github.com/freeeve/roaringrange)
-[![Go Reference](https://pkg.go.dev/badge/github.com/freeeve/roaringrange.svg)](https://pkg.go.dev/github.com/freeeve/roaringrange)
+[![Go Report Card](https://goreportcard.com/badge/github.com/freeeve/roaringrange/go)](https://goreportcard.com/report/github.com/freeeve/roaringrange/go)
+[![Go Reference](https://pkg.go.dev/badge/github.com/freeeve/roaringrange/go.svg)](https://pkg.go.dev/github.com/freeeve/roaringrange/go)
 [![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=freeeve_roaringrange&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=freeeve_roaringrange)
 [![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=freeeve_roaringrange&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=freeeve_roaringrange)
 [![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=freeeve_roaringrange&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=freeeve_roaringrange)
@@ -81,7 +81,7 @@ ordering and facets.
 
 | path | what |
 |---|---|
-| `go/` | core Go module (`github.com/freeeve/roaringrange`): `Transcode` (FTSR→RRS), `Open`/`Index` reference reader, `WriteFacets`, `NgramKeys` |
+| `go/` | core Go module (`github.com/freeeve/roaringrange/go` — the module path includes the `go/` subdir, so external importers `go get github.com/freeeve/roaringrange/go` and the tags are `go/vX.Y.Z`): `Transcode` (FTSR→RRS), `Open`/`Index` reference reader, `WriteFacets`, `NgramKeys` |
 | `*.md` (root) | the frozen on-disk format specs — see the [On-disk formats](#on-disk-formats) table below |
 | `rust/` | Rust crate `roaringrange`: reader (`Catalog` over `Index`/`FacetIndex`/`RecordStore`) + native `build` writers; both exposed to WASM (`wasm-pack`). Optional `vector` feature adds the `RRVI` similarity-search reader + IVFPQ trainer |
 | `rust/examples/` | runnable examples, each with a `//!` header stating its purpose and exact `cargo run … --example … [--features …]` command |
