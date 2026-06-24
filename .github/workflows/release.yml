@@ -54,6 +54,16 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      # Track the git tag: derive the wheel version from the tag (v1.2.3 -> 1.2.3)
+      # so the PyPI version always matches the release tag — no manual pyproject
+      # bump, no drift. Cross-OS via the resident Python. Tag pushes only; a
+      # workflow_dispatch run keeps pyproject's static version.
+      - name: Version the wheel from the tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          python -c "import os,re,pathlib; v=os.environ['GITHUB_REF_NAME'].removeprefix('v'); p=pathlib.Path('python/pyproject.toml'); p.write_text(re.sub(r'(?m)^version = \".*?\"', f'version = \"{v}\"', p.read_text(), count=1))"
+          grep '^version' python/pyproject.toml
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
