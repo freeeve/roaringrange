@@ -375,6 +375,39 @@ fn filtered_counts_include_tail_not_just_head() {
 }
 
 #[test]
+fn counts_for_prices_named_categories_exactly() {
+    let en = bm(&[1, 2, BUCKET + 5, 3 * BUCKET + 9]);
+    let es = bm(&[3, BUCKET + 1, BUCKET + 2, 5 * BUCKET]);
+    let facets = block_on(FacetIndex::open(MemoryFetch::new(build_rrsf(&[(
+        "language",
+        vec![("en", en.clone()), ("es", es.clone())],
+    )]))))
+    .unwrap();
+    let result: RoaringBitmap = en
+        .iter()
+        .chain(es.iter())
+        .chain([7u32, BUCKET + 100].iter().copied())
+        .collect();
+
+    // Exact head+tail counts for the named pairs, in order; an unknown pair -> 0.
+    let pairs = [
+        ("language".to_string(), "es".to_string()),
+        ("language".to_string(), "en".to_string()),
+        ("language".to_string(), "nope".to_string()),
+    ];
+    let got = block_on(facets.counts_for(&result, &pairs)).unwrap();
+    assert_eq!(
+        got,
+        vec![
+            result.intersection_len(&es),
+            result.intersection_len(&en),
+            0
+        ]
+    );
+    assert_eq!(got, vec![4, 4, 0]);
+}
+
+#[test]
 fn membership_bitmap_matches_full_bitmap_via_container_seeks() {
     // Tail postings dense enough to exceed the subset reader's whole-read
     // threshold: several buckets each holding a >4096-card container (an ~8 KB

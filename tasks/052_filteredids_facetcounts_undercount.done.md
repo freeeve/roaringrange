@@ -32,7 +32,10 @@ head-only count. `wasm.rs::filtered_ids` passes `FACET_COUNTS_TOP_PER_FIELD = 64
 `top_per_field == 0` still prices every category (the conformance test). Benchmark
 (`examples/bench_facet_counts.rs`, run on the live DeepLibby sidecar): **216,068 reads → 541**
 (~400×), 841 ms → 63 ms. Trade-off: the unshown long-tail categories are head-only/approximate
-again — fine for a facet panel.
+again — fine for a facet panel. For the exact count of a *specific* long-tail category a user
+expands or searches, added `FacetIndex::counts_for(result, &pairs)` (wasm `countsFor(ids, pairs)`
+on `RrfFacets`/`RrsIndex`) — exact head+tail counts for the named `[field, category]` pairs, ~one
+tail fetch each, returned as a `Uint32Array`.
 
 ## Symptom
 

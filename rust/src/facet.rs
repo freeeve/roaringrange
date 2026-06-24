@@ -563,37 +563,14 @@ impl<F: RangeFetch> FacetIndex<F> {
             }
         }
 
-        let fetch = &self.fetch;
         let tail_keys = &tail_keys;
         let futs = targets.iter().map(|&(fi, ci)| {
             let c = &self.fields[fi].categories[ci];
             async move {
-                // Head: the resident posting, or fetched if a sized head was not
-                // loaded (large-sidecar boot keeps only top categories' heads).
-                let head_n = if head_needed && c.head.is_empty() && c.range.head_size > 0 {
-                    let bytes = fetch
-                        .read(c.range.head_off, c.range.head_size as usize)
-                        .await?;
-                    let h = RoaringBitmap::deserialize_from(&bytes[..])
-                        .map_err(|_| IndexError::Malformed("RRSF head posting"))?;
-                    result.intersection_len(&h)
-                } else {
-                    result.intersection_len(&c.head)
-                };
-                // Tail: only the buckets the result spans (container granularity).
-                let tail_n = if !tail_keys.is_empty() && c.range.tail_size > 0 {
-                    let t = crate::posting::read_posting_subset(
-                        fetch,
-                        c.range.tail_off,
-                        c.range.tail_size as usize,
-                        tail_keys,
-                    )
+                let n = self
+                    .count_category(c, result, head_needed, tail_keys)
                     .await?;
-                    result.intersection_len(&t)
-                } else {
-                    0
-                };
-                Ok::<(usize, usize, u64), IndexError>((fi, ci, head_n + tail_n))
+                Ok::<(usize, usize, u64), IndexError>((fi, ci, n))
             }
         });
 
@@ -602,6 +579,84 @@ impl<F: RangeFetch> FacetIndex<F> {
             counts[fi][ci] = n;
         }
         Ok(counts)
+    }
+
+    /// Exact head+tail count of one category's posting within `result`: the resident
+    /// head (or a fetched one if a sized head was not resident-loaded) plus the tail,
+    /// fetched at container granularity (only the buckets `result` spans, derived
+    /// once by the caller as `head_needed` + `tail_keys`). Shared by
+    /// [`counts_full`](Self::counts_full) and [`counts_for`](Self::counts_for).
+    async fn count_category(
+        &self,
+        c: &Category,
+        result: &RoaringBitmap,
+        head_needed: bool,
+        tail_keys: &[u16],
+    ) -> Result<u64, IndexError> {
+        let head_n = if head_needed && c.head.is_empty() && c.range.head_size > 0 {
+            let bytes = self
+                .fetch
+                .read(c.range.head_off, c.range.head_size as usize)
+                .await?;
+            let h = RoaringBitmap::deserialize_from(&bytes[..])
+                .map_err(|_| IndexError::Malformed("RRSF head posting"))?;
+            result.intersection_len(&h)
+        } else {
+            result.intersection_len(&c.head)
+        };
+        let tail_n = if !tail_keys.is_empty() && c.range.tail_size > 0 {
+            let t = crate::posting::read_posting_subset(
+                &self.fetch,
+                c.range.tail_off,
+                c.range.tail_size as usize,
+                tail_keys,
+            )
+            .await?;
+            result.intersection_len(&t)
+        } else {
+            0
+        };
+        Ok(head_n + tail_n)
+    }
+
+    /// Exact head+tail counts within `result` for specific named `(field, category)`
+    /// pairs — the on-demand companion to [`counts_full`](Self::counts_full), which
+    /// only prices the top categories per field. Use it to fetch the exact filtered
+    /// count of a long-tail category the user expands or searches for (each pair
+    /// costs ~one tail fetch). An unknown field/category yields `0`. Returns one
+    /// count per input pair, in order.
+    pub async fn counts_for(
+        &self,
+        result: &RoaringBitmap,
+        pairs: &[(String, String)],
+    ) -> Result<Vec<u64>, IndexError> {
+        // Distinct tail buckets the result spans; bucket 0 is the head.
+        let mut tail_keys: Vec<u16> = Vec::new();
+        let mut head_needed = false;
+        for id in result.iter() {
+            let k = (id >> 16) as u16;
+            if k == 0 {
+                head_needed = true;
+            } else if tail_keys.last() != Some(&k) {
+                tail_keys.push(k);
+            }
+        }
+
+        let tail_keys = &tail_keys;
+        let futs = pairs.iter().map(|(fname, cname)| {
+            let cat = self
+                .fields
+                .iter()
+                .find(|f| &f.name == fname)
+                .and_then(|f| f.categories.iter().find(|c| &c.name == cname));
+            async move {
+                match cat {
+                    Some(c) => self.count_category(c, result, head_needed, tail_keys).await,
+                    None => Ok(0),
+                }
+            }
+        });
+        futures::future::join_all(futs).await.into_iter().collect()
     }
 }
 

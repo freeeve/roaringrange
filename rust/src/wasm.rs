@@ -640,6 +640,26 @@ impl RrsIndex {
         filtered_ids(self.facets.as_ref(), ids, filter_sels(&filters)?).await
     }
 
+    /// Exact head+tail filtered counts for specific `[field, category]` pairs over
+    /// `ids` — the on-demand companion to `filterIds().facetCounts()` for long-tail
+    /// categories the cap leaves head-only. One count per pair, in order
+    /// (`Uint32Array`); an unknown pair, or no facet sidecar open, yields 0.
+    #[wasm_bindgen(js_name = countsFor)]
+    pub async fn counts_for(&self, ids: Vec<u32>, pairs: Array) -> Result<Vec<u32>, JsError> {
+        let pairs = filter_pairs(&pairs)?;
+        match &self.facets {
+            Some(f) => {
+                let result: RoaringBitmap = ids.into_iter().collect();
+                let counts = f
+                    .counts_for(&result, &pairs)
+                    .await
+                    .map_err(|e| JsError::new(&e.to_string()))?;
+                Ok(counts.into_iter().map(|n| n as u32).collect())
+            }
+            None => Ok(vec![0u32; pairs.len()]),
+        }
+    }
+
     /// Number of n-grams in the index dictionary.
     #[wasm_bindgen(js_name = ngramCount)]
     pub fn ngram_count(&self) -> u32 {
@@ -727,6 +747,24 @@ impl RrfFacets {
     #[wasm_bindgen(js_name = filterIds)]
     pub async fn filter_ids(&self, ids: Vec<u32>, filters: Array) -> Result<FilteredIds, JsError> {
         filtered_ids(Some(&self.inner), ids, filter_sels(&filters)?).await
+    }
+
+    /// Exact head+tail filtered counts for specific `[field, category]` pairs over
+    /// `ids` — the on-demand companion to `filterIds().facetCounts()`, which prices
+    /// only the top categories per field. Use it to fetch the exact count of a
+    /// long-tail category the user expands or searches for (each pair ≈ one tail
+    /// fetch). Returns one count per pair, in order, as a `Uint32Array`; an unknown
+    /// `[field, category]` yields 0.
+    #[wasm_bindgen(js_name = countsFor)]
+    pub async fn counts_for(&self, ids: Vec<u32>, pairs: Array) -> Result<Vec<u32>, JsError> {
+        let result: RoaringBitmap = ids.into_iter().collect();
+        let pairs = filter_pairs(&pairs)?;
+        let counts = self
+            .inner
+            .counts_for(&result, &pairs)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(counts.into_iter().map(|n| n as u32).collect())
     }
 }
 
