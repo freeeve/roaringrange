@@ -726,10 +726,14 @@ pub struct RrfFacets {
 
 #[wasm_bindgen]
 impl RrfFacets {
-    /// Boots the facet sidecar at `url` (header + category metadata; postings are
-    /// range-fetched on demand). Resolves to an `RrfFacets`.
+    /// Boots the facet sidecar at `url` — **meta region only** (header + field +
+    /// category tables + string blob), so `facets()` (the global list of names +
+    /// full-corpus counts the browse UI shows) is ready in a couple of ranged reads
+    /// even on a sidecar with 100k+ categories. The head/tail postings are NOT loaded
+    /// here; `filterIds`/`facetCounts`/`countsFor` range-fetch exactly the postings
+    /// they touch (see task 053). Resolves to an `RrfFacets`.
     pub async fn open(url: String) -> Result<RrfFacets, JsError> {
-        let inner = FacetIndex::open(WasmFetch::new(url))
+        let inner = FacetIndex::open_meta(WasmFetch::new(url))
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(RrfFacets { inner })

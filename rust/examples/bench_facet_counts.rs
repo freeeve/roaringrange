@@ -54,13 +54,27 @@ fn main() {
         )
     };
 
+    // Boot A: heads-loaded (the RrsIndex cursor path — `counts()` needs resident heads).
     let t = Instant::now();
-    let facets = block_on(FacetIndex::open(fetch.clone())).expect("open FacetIndex");
-    let (boot_r, boot_b) = snap();
+    let _heads = block_on(FacetIndex::open(fetch.clone())).expect("open FacetIndex");
+    println!(
+        "open()       boot {:>9.2?}  reads +{}  bytes +{}",
+        t.elapsed(),
+        snap().0,
+        snap().1
+    );
+
+    // Boot B: meta-only (the RrfFacets browse path — task 053). `facets()` (names +
+    // full-corpus counts) is ready from this; postings load on demand at filter time.
+    let (mr0, mb0) = snap();
+    let t = Instant::now();
+    let facets = block_on(FacetIndex::open_meta(fetch.clone())).expect("open_meta");
     let ncats: usize = facets.fields().iter().map(|f| f.categories.len()).sum();
     println!(
-        "boot: {:?}, {boot_r} reads, {boot_b} bytes | {} fields, {ncats} categories",
+        "open_meta()  boot {:>9.2?}  reads +{}  bytes +{} | {} fields, {ncats} categories\n",
         t.elapsed(),
+        snap().0 - mr0,
+        snap().1 - mb0,
         facets.fields().len()
     );
 

@@ -520,19 +520,20 @@ impl<F: RangeFetch> FacetIndex<F> {
     ///
     /// Because a wide sidecar can hold *hundreds of thousands* of categories (one
     /// fetch each would be ruinous over HTTP), only the top `top_per_field`
-    /// categories per field — ranked by the free head-only count, a good filtered
-    /// proxy since the head holds the top-ranked docs — are priced exactly; the rest
-    /// (the long tail a facet UI never shows) keep their head-only count.
-    /// `top_per_field == 0` prices **every** category (exact for all; for small
-    /// sidecars / tests). Returned per field, aligned with
-    /// `self.fields[i].categories`. Async because the tails are range-fetched.
+    /// categories per field — ranked by full-corpus frequency (the resident meta,
+    /// no fetch — what a facet UI shows) — are priced exactly; the rest (the long
+    /// tail a facet UI never shows) keep their head-only count. A non-resident head
+    /// (meta-only boot) is fetched for the priced categories. `top_per_field == 0`
+    /// prices **every** category (exact for all; for small sidecars / tests).
+    /// Returned per field, aligned with `self.fields[i].categories`. Async because
+    /// the postings are range-fetched.
     pub async fn counts_full(
         &self,
         result: &RoaringBitmap,
         top_per_field: usize,
     ) -> Result<Vec<Vec<u64>>, IndexError> {
-        // Free head-only counts: the baseline for the unshown long tail, and the
-        // rank key for which categories are worth an exact (fetched) head+tail count.
+        // Free head-only counts: the baseline for the unshown long tail (zero on a
+        // meta-only boot, where no head is resident — the long tail is not displayed).
         let mut counts = self.counts(result);
 
         // Distinct tail buckets the result spans; bucket 0 is the head.
@@ -547,8 +548,10 @@ impl<F: RangeFetch> FacetIndex<F> {
             }
         }
 
-        // The categories to price exactly: top `top_per_field` per field by head
-        // count (all of them when `top_per_field == 0` or the field is small).
+        // The categories to price exactly: top `top_per_field` per field by
+        // full-corpus frequency (the resident meta — no fetch, and available even on a
+        // meta-only boot where head counts are all zero), which is what a facet UI
+        // shows. All of them when `top_per_field == 0` or the field is small.
         let mut targets: Vec<(usize, usize)> = Vec::new();
         for (fi, f) in self.fields.iter().enumerate() {
             let m = f.categories.len();
@@ -557,7 +560,7 @@ impl<F: RangeFetch> FacetIndex<F> {
             } else {
                 let mut idx: Vec<usize> = (0..m).collect();
                 idx.select_nth_unstable_by(top_per_field - 1, |&a, &b| {
-                    counts[fi][b].cmp(&counts[fi][a])
+                    f.categories[b].count.cmp(&f.categories[a].count)
                 });
                 targets.extend(idx[..top_per_field].iter().map(|&ci| (fi, ci)));
             }
