@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "roaringrange"
-version = "0.1.0"
+version = "0.1.1"
 description = "Build static, range-fetchable full-text search datasets (RRS/RRSF/RRSR) from Python — search millions of records in the browser with no backend"
 readme = "README.md"
 license = { text = "MIT" }
