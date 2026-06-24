@@ -513,15 +513,28 @@ impl<F: RangeFetch> FacetIndex<F> {
     /// posting — head (docs `[0, 65536)`) **and** tail (`>= 65536`). Unlike the
     /// in-memory [`counts`](Self::counts), which intersects only the resident head
     /// and so undercounts whenever `result` spans tail buckets (the search path is
-    /// fine — a query's head *is* its top results — but an arbitrary
-    /// corpus-spanning filtered id list is not), this fetches each category's tail
-    /// at container granularity: only the buckets `result` actually spans, like the
-    /// filter path's [`read_posting_subset`](crate::posting::read_posting_subset),
-    /// so a broad category costs KBs rather than its whole (often multi-MB) tail. A
-    /// head that was not resident-loaded (large-sidecar boot) is fetched too.
-    /// Returned per field, aligned with `self.fields[i].categories`. Async because
-    /// the tails are range-fetched.
-    pub async fn counts_full(&self, result: &RoaringBitmap) -> Result<Vec<Vec<u64>>, IndexError> {
+    /// fine — a query's head *is* its top results — but an arbitrary corpus-spanning
+    /// filtered id list is not), this fetches the tail at container granularity (only
+    /// the buckets `result` spans, like the filter path's
+    /// [`read_posting_subset`](crate::posting::read_posting_subset)).
+    ///
+    /// Because a wide sidecar can hold *hundreds of thousands* of categories (one
+    /// fetch each would be ruinous over HTTP), only the top `top_per_field`
+    /// categories per field — ranked by the free head-only count, a good filtered
+    /// proxy since the head holds the top-ranked docs — are priced exactly; the rest
+    /// (the long tail a facet UI never shows) keep their head-only count.
+    /// `top_per_field == 0` prices **every** category (exact for all; for small
+    /// sidecars / tests). Returned per field, aligned with
+    /// `self.fields[i].categories`. Async because the tails are range-fetched.
+    pub async fn counts_full(
+        &self,
+        result: &RoaringBitmap,
+        top_per_field: usize,
+    ) -> Result<Vec<Vec<u64>>, IndexError> {
+        // Free head-only counts: the baseline for the unshown long tail, and the
+        // rank key for which categories are worth an exact (fetched) head+tail count.
+        let mut counts = self.counts(result);
+
         // Distinct tail buckets the result spans; bucket 0 is the head.
         let mut tail_keys: Vec<u16> = Vec::new();
         let mut head_needed = false;
@@ -534,47 +547,56 @@ impl<F: RangeFetch> FacetIndex<F> {
             }
         }
 
-        let fetch = &self.fetch;
-        let tail_keys = &tail_keys;
-        let mut futs = Vec::new();
+        // The categories to price exactly: top `top_per_field` per field by head
+        // count (all of them when `top_per_field == 0` or the field is small).
+        let mut targets: Vec<(usize, usize)> = Vec::new();
         for (fi, f) in self.fields.iter().enumerate() {
-            for (ci, c) in f.categories.iter().enumerate() {
-                futs.push(async move {
-                    // Head: the resident posting, or fetched if a sized head was not
-                    // loaded (large-sidecar boot keeps only top categories' heads).
-                    let head_n = if head_needed && c.head.is_empty() && c.range.head_size > 0 {
-                        let bytes = fetch
-                            .read(c.range.head_off, c.range.head_size as usize)
-                            .await?;
-                        let h = RoaringBitmap::deserialize_from(&bytes[..])
-                            .map_err(|_| IndexError::Malformed("RRSF head posting"))?;
-                        result.intersection_len(&h)
-                    } else {
-                        result.intersection_len(&c.head)
-                    };
-                    // Tail: only the buckets the result spans (container granularity).
-                    let tail_n = if !tail_keys.is_empty() && c.range.tail_size > 0 {
-                        let t = crate::posting::read_posting_subset(
-                            fetch,
-                            c.range.tail_off,
-                            c.range.tail_size as usize,
-                            tail_keys,
-                        )
-                        .await?;
-                        result.intersection_len(&t)
-                    } else {
-                        0
-                    };
-                    Ok::<(usize, usize, u64), IndexError>((fi, ci, head_n + tail_n))
+            let m = f.categories.len();
+            if top_per_field == 0 || m <= top_per_field {
+                targets.extend((0..m).map(|ci| (fi, ci)));
+            } else {
+                let mut idx: Vec<usize> = (0..m).collect();
+                idx.select_nth_unstable_by(top_per_field - 1, |&a, &b| {
+                    counts[fi][b].cmp(&counts[fi][a])
                 });
+                targets.extend(idx[..top_per_field].iter().map(|&ci| (fi, ci)));
             }
         }
 
-        let mut counts: Vec<Vec<u64>> = self
-            .fields
-            .iter()
-            .map(|f| vec![0u64; f.categories.len()])
-            .collect();
+        let fetch = &self.fetch;
+        let tail_keys = &tail_keys;
+        let futs = targets.iter().map(|&(fi, ci)| {
+            let c = &self.fields[fi].categories[ci];
+            async move {
+                // Head: the resident posting, or fetched if a sized head was not
+                // loaded (large-sidecar boot keeps only top categories' heads).
+                let head_n = if head_needed && c.head.is_empty() && c.range.head_size > 0 {
+                    let bytes = fetch
+                        .read(c.range.head_off, c.range.head_size as usize)
+                        .await?;
+                    let h = RoaringBitmap::deserialize_from(&bytes[..])
+                        .map_err(|_| IndexError::Malformed("RRSF head posting"))?;
+                    result.intersection_len(&h)
+                } else {
+                    result.intersection_len(&c.head)
+                };
+                // Tail: only the buckets the result spans (container granularity).
+                let tail_n = if !tail_keys.is_empty() && c.range.tail_size > 0 {
+                    let t = crate::posting::read_posting_subset(
+                        fetch,
+                        c.range.tail_off,
+                        c.range.tail_size as usize,
+                        tail_keys,
+                    )
+                    .await?;
+                    result.intersection_len(&t)
+                } else {
+                    0
+                };
+                Ok::<(usize, usize, u64), IndexError>((fi, ci, head_n + tail_n))
+            }
+        });
+
         for r in futures::future::join_all(futs).await {
             let (fi, ci, n) = r?;
             counts[fi][ci] = n;

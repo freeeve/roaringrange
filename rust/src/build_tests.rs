@@ -358,8 +358,8 @@ fn filtered_counts_include_tail_not_just_head() {
     let lang = &facets.fields()[0];
     let idx = |name: &str| lang.categories.iter().position(|c| c.name == name).unwrap();
 
-    // counts_full (head + tail) equals the true intersection over each category.
-    let full = block_on(facets.counts_full(&result)).unwrap();
+    // counts_full (head + tail, uncapped) equals the true intersection over each category.
+    let full = block_on(facets.counts_full(&result, 0)).unwrap();
     assert_eq!(full[0][idx("en")], result.intersection_len(&en));
     assert_eq!(full[0][idx("es")], result.intersection_len(&es));
     assert_eq!(full[0][idx("en")], 4);

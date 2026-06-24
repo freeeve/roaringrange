@@ -21,6 +21,19 @@ boot skipped it. `wasm.rs::filtered_ids` now calls `counts_full` instead of the 
 **Note:** this is a wasm-reader fix — consumers (DeepLibby shell, the OpenAlex demo) must rebuild
 + redeploy the wasm to pick it up.
 
+## Perf follow-up (2026-06-24)
+
+The first `counts_full` fetched every category's tail. On a **wide** sidecar that is ruinous:
+the DeepLibby `.rrf` has **108,126 categories**, so a single drill-down did **216,068**
+range-reads / 26.5 MB (~841 ms local; effectively a hang over HTTP). Fix: `counts_full` now
+takes a `top_per_field` cap — it prices exactly (head+tail) only the top-N categories per field
+(ranked by the free head-only count, the displayed ones), and the unshown long tail keeps its
+head-only count. `wasm.rs::filtered_ids` passes `FACET_COUNTS_TOP_PER_FIELD = 64`;
+`top_per_field == 0` still prices every category (the conformance test). Benchmark
+(`examples/bench_facet_counts.rs`, run on the live DeepLibby sidecar): **216,068 reads → 541**
+(~400×), 841 ms → 63 ms. Trade-off: the unshown long-tail categories are head-only/approximate
+again — fine for a facet panel.
+
 ## Symptom
 
 `RrfFacets.filterIds(ids, pairs)` returns the **correct** survivor `ids`, but the

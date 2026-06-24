@@ -394,6 +394,12 @@ fn sel_pairs(sels: &[FilterSel], include_only: bool) -> Vec<(String, String)> {
 /// fields, excludes subtracted) and returns the survivors (input order preserved) plus
 /// search-filtered counts over them. Shared by the text index and the standalone facet
 /// binding. See [`filter_sels`] for the accepted JS entry shapes (array or object).
+/// How many categories per field `filterIds` prices exactly (head+tail) — the rest
+/// of a wide sidecar's long tail keep their head-only count. A facet panel shows only
+/// the top few per field, so this bounds the per-drill-down fetches to a few hundred
+/// instead of one per category (100K+ on the DeepLibby sidecar).
+const FACET_COUNTS_TOP_PER_FIELD: usize = 64;
+
 async fn filtered_ids(
     facets: Option<&FacetIndex<WasmFetch>>,
     ids: Vec<u32>,
@@ -422,10 +428,12 @@ async fn filtered_ids(
     let bitmap: RoaringBitmap = kept.iter().copied().collect();
     // Full counts over head AND tail: `kept` is an arbitrary, corpus-spanning id
     // list, so the in-memory head-only `counts()` would undercount (see task 052).
+    // Capped at the top categories per field so a wide sidecar (100K+ categories)
+    // does not issue a fetch per category — the long tail stays head-only.
     let counts = match facets {
         Some(f) => {
             let c = f
-                .counts_full(&bitmap)
+                .counts_full(&bitmap, FACET_COUNTS_TOP_PER_FIELD)
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?;
             facets_array_js(f.fields(), &c).into()

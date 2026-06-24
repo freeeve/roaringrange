@@ -300,3 +300,7 @@ name = "gen_rrs_monolith_golden"
 [[example]]
 name = "gen_rrvi_golden"
 required-features = ["vector"]
+
+# Benchmarks FacetIndex::counts() vs counts_full() over a real .rrf (task 052 follow-up).
+[[example]]
+name = "bench_facet_counts"
