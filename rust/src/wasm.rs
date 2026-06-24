@@ -420,7 +420,18 @@ async fn filtered_ids(
         _ => ids,
     };
     let bitmap: RoaringBitmap = kept.iter().copied().collect();
-    let counts = facet_counts_js(facets, &bitmap);
+    // Full counts over head AND tail: `kept` is an arbitrary, corpus-spanning id
+    // list, so the in-memory head-only `counts()` would undercount (see task 052).
+    let counts = match facets {
+        Some(f) => {
+            let c = f
+                .counts_full(&bitmap)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            facets_array_js(f.fields(), &c).into()
+        }
+        None => Array::new().into(),
+    };
     Ok(FilteredIds { ids: kept, counts })
 }
 

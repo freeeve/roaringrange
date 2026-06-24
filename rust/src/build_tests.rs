@@ -336,6 +336,45 @@ fn filter_cost_prices_categories_from_resident_meta() {
 }
 
 #[test]
+fn filtered_counts_include_tail_not_just_head() {
+    // Categories with docs in BOTH the head bucket and tail buckets — the case the
+    // in-memory head-only `counts()` undercounts (task 052: `FilteredIds.facetCounts`).
+    let en = bm(&[1, 2, BUCKET + 5, 3 * BUCKET + 9]); // head {1,2}, tail 2
+    let es = bm(&[3, BUCKET + 1, BUCKET + 2, 5 * BUCKET]); // head {3}, tail 3
+    let facets = block_on(FacetIndex::open(MemoryFetch::new(build_rrsf(&[(
+        "language",
+        vec![("en", en.clone()), ("es", es.clone())],
+    )]))))
+    .unwrap();
+
+    // A corpus-spanning result that is a superset of every en/es doc (+ unrelated docs
+    // in head and tail), so the true per-category count equals that category's size.
+    let result: RoaringBitmap = en
+        .iter()
+        .chain(es.iter())
+        .chain([7u32, BUCKET + 100, 9 * BUCKET].iter().copied())
+        .collect();
+
+    let lang = &facets.fields()[0];
+    let idx = |name: &str| lang.categories.iter().position(|c| c.name == name).unwrap();
+
+    // counts_full (head + tail) equals the true intersection over each category.
+    let full = block_on(facets.counts_full(&result)).unwrap();
+    assert_eq!(full[0][idx("en")], result.intersection_len(&en));
+    assert_eq!(full[0][idx("es")], result.intersection_len(&es));
+    assert_eq!(full[0][idx("en")], 4);
+    assert_eq!(full[0][idx("es")], 4);
+
+    // The head-only counts() undercounts — it misses the tail docs (the fixed bug).
+    let head_only = facets.counts(&result);
+    assert!(
+        head_only[0][idx("en")] < full[0][idx("en")],
+        "head-only counts must undercount when the result spans the tail"
+    );
+    assert_eq!(head_only[0][idx("en")], 2); // only the head docs {1,2}
+}
+
+#[test]
 fn membership_bitmap_matches_full_bitmap_via_container_seeks() {
     // Tail postings dense enough to exceed the subset reader's whole-read
     // threshold: several buckets each holding a >4096-card container (an ~8 KB
