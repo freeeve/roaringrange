@@ -75,7 +75,7 @@ fn encode_corpus(records: &[Vec<u8>]) -> Vec<u8> {
 }
 
 fn main() {
-    let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../go/testdata");
+    let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../testdata");
     let records = fixture_records();
 
     let samples = training_samples();

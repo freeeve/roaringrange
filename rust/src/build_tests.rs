@@ -970,7 +970,7 @@ fn read_fixture_corpus(path: &str) -> Vec<Vec<u8>> {
 fn go_built_zstd_store_reads_back_through_ruzstd() {
     use crate::records::RecordStore;
 
-    let dir = "../go/testdata";
+    let dir = "../testdata";
     let idx = std::fs::read(format!("{dir}/records_go_zstd.idx")).expect("go store idx");
     let bin = std::fs::read(format!("{dir}/records_go_zstd.bin")).expect("go store bin");
     let dict = std::fs::read(format!("{dir}/records.dict")).expect("records dict");
@@ -995,12 +995,12 @@ fn go_built_zstd_store_reads_back_through_ruzstd() {
     }
 }
 
-/// Reads `go/testdata/<name>_build_golden.txt` (`<name> <hex>`) and asserts `got`
+/// Reads `testdata/<name>_build_golden.txt` (`<name> <hex>`) and asserts `got`
 /// matches it byte-for-byte — the shared-golden conformance both the Go tests and
 /// these Rust tests assert, so neither port drifts. Regenerate via the matching
 /// `gen_<name>_golden` example if the format intentionally changes.
 fn assert_build_golden(name: &str, got: &[u8]) {
-    let path = format!("../go/testdata/{name}_build_golden.txt");
+    let path = format!("../testdata/{name}_build_golden.txt");
     let golden = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let hex = golden
         .trim()

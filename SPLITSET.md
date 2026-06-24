@@ -198,8 +198,8 @@ the existing native writers:
 ## Conformance
 
 A Go build side reproduces split assignment + the manifest **byte-for-byte** (same discipline
-as `go/conformance/`'s n-gram keys), so a split set built by either language reads in either.
-Shipped: `go/splitset.go` + `go/splitsetbuild.go` reproduce the manifest and every split `RRS`
+as `conformance/`'s n-gram keys), so a split set built by either language reads in either.
+Shipped: `splitset.go` + `splitsetbuild.go` reproduce the manifest and every split `RRS`
 (incl. per-split `RRSF` facet sidecars and term Bloom filters) byte-for-byte against a shared
 golden — see the Status section.
 
@@ -240,11 +240,11 @@ split is an `Index`, stable-key rank is `SortCols`, the manifest evolves `RRHC`)
 - **Ingestion writer** `splitset_write::SplitSetWriter` — pure `new`/`resume`/`add`/`delete`/
   `memtable_bytes`/`flush`/`compact` (bytes in, bytes out); flush seals an L0 delta + a
   cutover manifest, compact merges deltas into one absolute-id split dropping tombstoned docs.
-- **Conformance** — the Go build side (`go/splitset.go` manifest writer + `go/splitsetbuild.go`
+- **Conformance** — the Go build side (`splitset.go` manifest writer + `splitsetbuild.go`
   `SplitSetBuilder`) reproduces the manifest **and** every split `RRS` (split assignment,
   head/tail roaring serialization, and term Bloom filters) **byte-for-byte**, proven by a shared
-  golden (`go/testdata/rrss_build_golden.txt`) asserted on both sides (`splitset_build::tests`
-  ⇄ `go/splitsetbuild_test.go`).
+  golden (`testdata/rrss_build_golden.txt`) asserted on both sides (`splitset_build::tests`
+  ⇄ `splitsetbuild_test.go`).
 - **Benchmark** `rust/examples/splitset_bench.rs` — the monolith-vs-`RRSS` byte/request table.
 - **Wasm** `RrssIndex` (`wasm` + `splits`) — `open(manifestUrl, baseUrl)` + `search` +
   `searchFiltered(query, filters, limit)` (facet filter entries `"field\tcategory"`).

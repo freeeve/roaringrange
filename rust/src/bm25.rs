@@ -939,8 +939,8 @@ mod tests {
         let mut out = Vec::new();
         write_impacts(&mut out, &dict, &acc, DEFAULT_K1, DEFAULT_B).unwrap();
 
-        let golden = std::fs::read_to_string("../go/testdata/rrsb_build_golden.txt")
-            .expect("read go/testdata/rrsb_build_golden.txt");
+        let golden = std::fs::read_to_string("../testdata/rrsb_build_golden.txt")
+            .expect("read testdata/rrsb_build_golden.txt");
         let hex = golden
             .trim()
             .strip_prefix("rrsb ")

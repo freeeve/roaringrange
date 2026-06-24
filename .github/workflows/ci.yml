@@ -21,15 +21,14 @@ jobs:
             exit 1
           fi
       - name: Test with coverage
-        working-directory: go
         run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
       - name: Upload coverage to Coveralls
         uses: coverallsapp/github-action@v2
         with:
-          file: go/coverage.out
+          file: coverage.out
           format: golang
       - name: Conformance (roaringsearch ⇄ roaringrange)
-        working-directory: go/conformance
+        working-directory: conformance
         run: go test ./...
       - name: Example builds
         working-directory: examples/openalex

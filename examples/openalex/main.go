@@ -33,7 +33,7 @@ import (
 	"sort"
 	"strings"
 
-	rr "github.com/freeeve/roaringrange/go"
+	rr "github.com/freeeve/roaringrange"
 	rs "github.com/freeeve/roaringsearch"
 )
 
