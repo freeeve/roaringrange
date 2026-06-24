@@ -37,20 +37,21 @@ expands or searches, added `FacetIndex::counts_for(result, &pairs)` (wasm `count
 on `RrfFacets`/`RrsIndex`) — exact head+tail counts for the named `[field, category]` pairs, ~one
 tail fetch each, returned as a `Uint32Array`.
 
-## Known leftover (separate from the per-category fix) — OPEN
+## Browse-vs-search totals — RESOLVED (2026-06-24, "N+" display)
 
-**Browse vs search report different *totals*.** The overall filtered-result count differs
-between the browse path (`RrfFacets.filterIds(ids, filters)` → `FilteredIds.ids.length`) and
-the search path (`RrssIndex`). This is the result TOTAL, not the per-category histogram, so it
-is independent of the head/tail counts fix + the top-N cap above.
+**Root cause confirmed:** the browse path (`RrfFacets.filterIds` → `FilteredIds.ids.length`)
+checks every id and returns ALL survivors, so its total is **exact and unbounded** (cheap — the
+`.rrf` is one compact sidecar). The split-set search (`RrssIndex.search`/`search_filtered`,
+`splitset.rs:654-681`) is **tiered and short-circuits at `limit`** — it stops once it has a page
+of hits and never counts the rest, and there is no client-side exact-total method (exact totals
+are deliberately offloaded to the Lambda's in-region scan). So when the true match count exceeds
+the page depth, browse showed e.g. 186K while the split search showed ~600 (the cap).
 
-Likely cause (to verify): the browse path is **exact** — `filterIds` checks every id, so its
-total is the true survivor count. The text/search path's filtered count is an **upper bound**
-(`RrsIndex.countEstimate` / the filter-count-bound estimator explicitly sets `exact = false` for
-any facet filter — "a filter bound is never exact"), and `RrssIndex`'s per-split aggregation may
-diverge similarly. So the two totals legitimately differ (exact vs bound). The fix is to make the
-displayed total consistent — either surface the exact count on the search path too, or document
-the bound. Tracked for a future roaringrange session.
+**Fix (chosen: cheap + honest "N+"):** the demo now marks a lexical split/term search `rankedCapped`
+when it fills its ranked depth (`SEM_K_FILTER`=600 / `SEM_K`=250), and renders the result count +
+pager with a `+` ("600+ results") — the same "+" idiom the trigram cursor already uses for an
+incremental tail (`tailPending`). Semantic/hybrid stay un-capped (they are a top-K ranking, not
+"more matches"). No expensive client-side full scan re-introduced. `examples/openalex/web/index.html`.
 
 ## Symptom
 

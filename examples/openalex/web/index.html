@@ -1088,6 +1088,10 @@
       // returns the whole ranked list up front, so paging is a client-side slice of
       // it (no re-search, no extra index bytes). null in trigram/DOI mode.
       let rankedIds = null;
+      // True when a lexical ranked search (split/term) filled its ranked depth, so the
+      // result count is a capped lower bound (more matches exist) — rendered with a "+".
+      // Stays false for semantic/hybrid (those are a top-K ranking, not "more matches").
+      let rankedCapped = false;
       let rankedSummary = "";   // search-phase summary prefix; goPageRanked appends each page's record-fetch ms
       // Header-only result count for the current trigram query: roaring postings
       // record per-container cardinalities in their descriptive header, so a
@@ -1630,7 +1634,12 @@
             ` · <button type="button" id="loadall" title="scans every match — can be 100s of MB" style="background:none;border:none;padding:0;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;text-decoration:underline;text-underline-offset:2px">exact count</button>`;
           els.resultcount.innerHTML = `${lead}${bound}${exact}`;
         } else {
-          els.resultcount.innerHTML = `<b>${fmt(total)}</b> result${total === 1 ? "" : "s"}`;
+          // A depth-capped lexical split/term search gets a "+": the ranked list is a
+          // top-N slice, so the count is a lower bound (the browse path counts all docs).
+          const more = rankedCapped
+            ? `<span title="the split/term search is capped at its ranked depth — there are more matches than shown">+</span>`
+            : "";
+          els.resultcount.innerHTML = `<b>${fmt(total)}${more}</b> result${total === 1 ? "" : "s"}`;
         }
       }
 
@@ -1642,7 +1651,7 @@
         if (!lastTotal) { els.pager.hidden = true; return; }
         els.pager.hidden = false;
         const from = offset + 1, to = offset + lastPage.length;
-        els.pginfo.textContent = `${fmt(from)}–${fmt(to)} of ${fmt(lastTotal)}${tailPending ? "+" : ""}`;
+        els.pginfo.textContent = `${fmt(from)}–${fmt(to)} of ${fmt(lastTotal)}${(tailPending || rankedCapped) ? "+" : ""}`;
       }
 
       /* -------- paging: pull a page of doc IDs, then fetch their records --------
@@ -2149,6 +2158,7 @@
         reqs = 0; bytes = 0;
         recCache.clear();
         rankedIds = null;     // a ranked mode (semantic/term/hybrid) sets this; trigram/DOI leave it null
+        rankedCapped = false; // only a depth-capped lexical split/term search sets this true
         autoRouted = false;   // each query re-prices; only the trigram path below may set it
         countBound = null;    // header-only count (exact or ≤ bound); trigram strict-AND only
         // DOI exact-lookup fast path: a DOI-shaped query resolves to the exact work
@@ -2215,6 +2225,7 @@
           catch (e) { els.mSummary.textContent = `term error: ${e}`; return; }
           if (mySeq !== searchSeq) return;
           const searchMs = performance.now() - t0, searchReqs = reqs - r0, searchBytes = bytes - b0;
+          rankedCapped = ids.length >= depth; // lexical search filled its ranked depth -> more matches exist
           const ff = await facetFilter(ids, filters);
           if (mySeq !== searchSeq) return;
           cur = null;
@@ -2384,12 +2395,15 @@
           try {
             if (filters.length && sidecarable) {
               sids = Array.from(await rrss.searchFiltered(q, SEM_K_FILTER, pairs));
+              rankedCapped = sids.length >= SEM_K_FILTER;
             } else if (filters.length) {
               const raw = Array.from(await rrss.search(q, SEM_K_FILTER));
+              rankedCapped = raw.length >= SEM_K_FILTER;
               if (mySeq !== searchSeq) return;
               sids = (await facetFilter(raw, filters)).ids;
             } else {
               sids = Array.from(await rrss.search(q, SEM_K));
+              rankedCapped = sids.length >= SEM_K;
             }
           } catch (e) { els.mSummary.textContent = `split error: ${e}`; return; }
           if (mySeq !== searchSeq) return;
