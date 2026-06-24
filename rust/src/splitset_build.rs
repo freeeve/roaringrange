@@ -1138,7 +1138,7 @@ mod conformance_full_build {
     fn golden() -> HashMap<String, Vec<u8>> {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../go/testdata/rrss_build_golden.txt"
+            "/../testdata/rrss_build_golden.txt"
         );
         let text = std::fs::read_to_string(path).expect("read shared golden");
         text.lines()
@@ -1187,7 +1187,7 @@ mod conformance_full_build {
         let built = conformance_build();
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../go/testdata/rrss_build_golden.txt"
+            "/../testdata/rrss_build_golden.txt"
         );
         std::fs::write(path, super::golden_text(&built)).expect("write shared golden");
     }
@@ -1227,7 +1227,7 @@ mod term_conformance {
     fn golden() -> HashMap<String, Vec<u8>> {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../go/testdata/rrti_term_split_golden.txt"
+            "/../testdata/rrti_term_split_golden.txt"
         );
         let text = std::fs::read_to_string(path).expect("read shared term golden");
         text.lines()
@@ -1274,7 +1274,7 @@ mod term_conformance {
         let built = term_conformance_build();
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../go/testdata/rrti_term_split_golden.txt"
+            "/../testdata/rrti_term_split_golden.txt"
         );
         std::fs::write(path, super::golden_text(&built)).expect("write shared term golden");
     }
@@ -1288,7 +1288,7 @@ mod geo_conformance {
     fn golden_path() -> &'static str {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../go/testdata/rrss_geo_build_golden.txt"
+            "/../testdata/rrss_geo_build_golden.txt"
         )
     }
 
