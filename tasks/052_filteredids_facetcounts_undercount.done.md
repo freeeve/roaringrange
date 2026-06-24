@@ -37,6 +37,21 @@ expands or searches, added `FacetIndex::counts_for(result, &pairs)` (wasm `count
 on `RrfFacets`/`RrsIndex`) — exact head+tail counts for the named `[field, category]` pairs, ~one
 tail fetch each, returned as a `Uint32Array`.
 
+## Known leftover (separate from the per-category fix) — OPEN
+
+**Browse vs search report different *totals*.** The overall filtered-result count differs
+between the browse path (`RrfFacets.filterIds(ids, filters)` → `FilteredIds.ids.length`) and
+the search path (`RrssIndex`). This is the result TOTAL, not the per-category histogram, so it
+is independent of the head/tail counts fix + the top-N cap above.
+
+Likely cause (to verify): the browse path is **exact** — `filterIds` checks every id, so its
+total is the true survivor count. The text/search path's filtered count is an **upper bound**
+(`RrsIndex.countEstimate` / the filter-count-bound estimator explicitly sets `exact = false` for
+any facet filter — "a filter bound is never exact"), and `RrssIndex`'s per-split aggregation may
+diverge similarly. So the two totals legitimately differ (exact vs bound). The fix is to make the
+displayed total consistent — either surface the exact count on the search path too, or document
+the bound. Tracked for a future roaringrange session.
+
 ## Symptom
 
 `RrfFacets.filterIds(ids, pairs)` returns the **correct** survivor `ids`, but the
