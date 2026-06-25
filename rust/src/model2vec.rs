@@ -64,9 +64,19 @@ impl Model2vec {
             return Err(IndexError::Malformed("RRM2 unk_id out of vocab range"));
         }
 
+        // `vocab_size`/`dim` are header fields; compute the section offsets with
+        // checked arithmetic so a crafted header overflows to an error instead of
+        // wrapping past the `b.len()` bound below (which would then slice — and
+        // `HashMap::with_capacity(vocab_size)` allocate — out of bounds).
         let scales_off = HEADER_SIZE;
-        let codes_off = scales_off + vocab_size * 4;
-        let vocab_off = codes_off + vocab_size * dim;
+        let codes_off = vocab_size
+            .checked_mul(4)
+            .and_then(|x| x.checked_add(scales_off))
+            .ok_or(IndexError::Malformed("RRM2 size overflow"))?;
+        let vocab_off = vocab_size
+            .checked_mul(dim)
+            .and_then(|x| x.checked_add(codes_off))
+            .ok_or(IndexError::Malformed("RRM2 size overflow"))?;
         if b.len() < vocab_off {
             return Err(IndexError::Malformed("RRM2 truncated"));
         }

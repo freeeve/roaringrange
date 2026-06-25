@@ -300,12 +300,24 @@ impl<F: RangeFetch> TermIndex<F> {
         let router_bytes = fetch.read(HEADER_SIZE as u64, router_len as usize).await?;
         let router =
             Map::new(router_bytes).map_err(|_| IndexError::Malformed("RRTI invalid router FST"))?;
-        let dict_start = HEADER_SIZE as u64 + router_len;
+        // `Map::new` validates the header/footer but not every interior node, so a
+        // corrupted node would `assert!`-panic deep in the fst crate when a query
+        // streams it (and wasm aborts on panic — uncatchable). Verify the FST's
+        // CRC32 up front: the router is small and resident, so this one-time scan is
+        // cheap, and it rejects any byte-level corruption before a query reaches it.
+        router
+            .as_fst()
+            .verify()
+            .map_err(|_| IndexError::Malformed("RRTI router FST failed checksum"))?;
+        // `router_len`/`dict_len` are untrusted header fields; saturate the offset
+        // sums so a crafted header can't overflow here — a saturated offset simply
+        // fails the later range fetch with an out-of-range error.
+        let dict_start = (HEADER_SIZE as u64).saturating_add(router_len);
         Ok(Self {
             fetch,
             router,
             dict_start,
-            postings_offset: dict_start + dict_len,
+            postings_offset: dict_start.saturating_add(dict_len),
             head_boundary,
             term_count,
             tokenizer,
@@ -393,16 +405,28 @@ impl<F: RangeFetch> TermIndex<F> {
 
     /// Fetches one term's head posting and learns its tail's location.
     async fn head_block(&self, head_off: u64, head_size: usize) -> Result<HeadBlock, IndexError> {
-        let base = self.postings_offset + head_off;
-        let block = self.fetch.read(base, 4 + head_size).await?;
-        if block.len() < 4 + head_size {
+        // `head_off`/`head_size` are parsed from the (untrusted) dictionary; guard
+        // every offset sum so a crafted entry can't overflow into a panic. A bad
+        // value resolves to either a malformed error or an out-of-range fetch.
+        let base = self
+            .postings_offset
+            .checked_add(head_off)
+            .ok_or(IndexError::Malformed("RRTI head posting offset overflow"))?;
+        let want = head_size
+            .checked_add(4)
+            .ok_or(IndexError::Malformed("RRTI head posting size overflow"))?;
+        let block = self.fetch.read(base, want).await?;
+        if block.len() < want {
             return Err(IndexError::Malformed("RRTI short term posting block"));
         }
         let tail_size = read_u32(&block, 0) as usize;
-        let head = deserialize(&block[4..4 + head_size])?;
+        let head = deserialize(&block[4..want])?;
+        let tail_off = base
+            .checked_add(want as u64)
+            .ok_or(IndexError::Malformed("RRTI tail offset overflow"))?;
         Ok(HeadBlock {
             head,
-            tail_off: base + 4 + head_size as u64,
+            tail_off,
             tail_size,
         })
     }
@@ -582,7 +606,10 @@ impl<F: RangeFetch> TermIndex<F> {
     /// surface (joining build-side term stats with the on-disk layout for the
     /// `.rrb` impact sidecar), not a query-path API.
     pub async fn dict_terms(&self) -> Result<Vec<(String, u64)>, IndexError> {
-        let mut out = Vec::with_capacity(self.term_count as usize);
+        // `term_count` is a header field; an inflated value must not pre-allocate
+        // gigabytes. Cap the capacity hint — the vec still grows to the true count
+        // (bounded by the actual dictionary blocks iterated below).
+        let mut out = Vec::with_capacity((self.term_count as usize).min(1 << 20));
         for (off, len) in self.dict_block_locs() {
             let block = self.fetch.read(off, len).await?;
             for (term, head_off, _) in parse_dict_block(&block) {

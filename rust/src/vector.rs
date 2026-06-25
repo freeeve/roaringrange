@@ -204,29 +204,47 @@ impl<F: RangeFetch> VectorIndex<F> {
         let ksub = 1usize << nbits;
         let dsub = dim / m;
 
-        // Boot-region layout, all sizes derived from the header.
-        let opq_size = if flags & FLAG_OPQ != 0 {
-            dim * dim * 4
+        // Boot-region layout, all sizes derived from header fields an attacker
+        // controls. Compute element counts and byte sizes with checked arithmetic:
+        // a wrapping `nlist * dim * 4` would yield a small `boot_size`, a short
+        // fetch that passes the exact-length check, and then out-of-bounds slices
+        // in `read_f32_vec`. On overflow, reject the file as malformed.
+        let mul = |a: usize, b: usize| {
+            a.checked_mul(b)
+                .ok_or(IndexError::Malformed("RRVI boot size overflow"))
+        };
+        let add = |a: usize, b: usize| {
+            a.checked_add(b)
+                .ok_or(IndexError::Malformed("RRVI boot size overflow"))
+        };
+        let opq_count = if flags & FLAG_OPQ != 0 {
+            mul(dim, dim)?
         } else {
             0
         };
-        let centroids_size = nlist * dim * 4;
-        let codebooks_size = m * ksub * dsub * 4;
-        let dir_size = nlist * DIR_ENTRY;
-        let boot_size = opq_size + centroids_size + codebooks_size + dir_size;
+        let n_centroids = mul(nlist, dim)?;
+        let n_codebooks = mul(mul(m, ksub)?, dsub)?;
+        let opq_size = mul(opq_count, 4)?;
+        let centroids_size = mul(n_centroids, 4)?;
+        let codebooks_size = mul(n_codebooks, 4)?;
+        let dir_size = mul(nlist, DIR_ENTRY)?;
+        let boot_size = add(
+            add(add(opq_size, centroids_size)?, codebooks_size)?,
+            dir_size,
+        )?;
         let boot = fetch.read(HEADER_SIZE as u64, boot_size).await?;
 
         let mut off = 0usize;
         let opq = if opq_size != 0 {
-            let v = read_f32_vec(&boot, off, dim * dim);
+            let v = read_f32_vec(&boot, off, opq_count);
             off += opq_size;
             Some(v)
         } else {
             None
         };
-        let centroids = read_f32_vec(&boot, off, nlist * dim);
+        let centroids = read_f32_vec(&boot, off, n_centroids);
         off += centroids_size;
-        let codebooks = read_f32_vec(&boot, off, m * ksub * dsub);
+        let codebooks = read_f32_vec(&boot, off, n_codebooks);
         off += codebooks_size;
 
         let mut dir_offsets = Vec::with_capacity(nlist);

@@ -32,6 +32,15 @@ const TAG_RAW: u8 = 0;
 /// Frame tag for a zstd frame compressed against the shared dictionary.
 const TAG_ZSTD_DICT: u8 = 1;
 
+/// Upper bound on a single record's decompressed size. A zstd frame from an
+/// untrusted store can inflate to gigabytes from a handful of bytes (a
+/// decompression bomb); records are document metadata, so 64 MiB is orders of
+/// magnitude above any legitimate record while bounding the allocation. A frame
+/// that decodes past this is rejected as malformed. Only the `zstd` decode paths
+/// reference it, so it is gated to that feature to stay dead-code-clean without it.
+#[cfg(feature = "zstd")]
+const MAX_DECOMPRESSED_RECORD: u64 = 64 << 20;
+
 /// A range-fetchable record store: an offset index (`idx`) over a record blob
 /// (`bin`). Both are addressed through [`RangeFetch`], so the same reader serves
 /// native callers and the browser. A version-2 store may carry a shared zstd
@@ -144,14 +153,21 @@ impl<F: RangeFetch> RecordStore<F> {
         let dict = self.dict.as_deref().ok_or(IndexError::Malformed(
             "compressed record but no dictionary set",
         ))?;
-        // Stream the frame through a fresh dictionary-seeded decoder via
-        // `read_to_end`, so no decompressed-size guess is needed.
-        let mut decoder = zstd::stream::read::Decoder::with_dictionary(frame, dict)
+        // Stream the frame through a fresh dictionary-seeded decoder, but cap the
+        // output (see `MAX_DECOMPRESSED_RECORD`): an untrusted frame can be a zstd
+        // "bomb" that inflates to gigabytes from a few bytes and OOMs the reader.
+        let decoder = zstd::stream::read::Decoder::with_dictionary(frame, dict)
             .map_err(|_| IndexError::Malformed("zstd frame header failed to decode"))?;
         let mut out = Vec::new();
         decoder
+            .take(MAX_DECOMPRESSED_RECORD + 1)
             .read_to_end(&mut out)
             .map_err(|_| IndexError::Malformed("zstd frame failed to decode"))?;
+        if out.len() as u64 > MAX_DECOMPRESSED_RECORD {
+            return Err(IndexError::Malformed(
+                "decompressed record exceeds size cap",
+            ));
+        }
         Ok(out)
     }
 
@@ -175,12 +191,19 @@ impl<F: RangeFetch> RecordStore<F> {
         let mut fd = FrameDecoder::new();
         fd.add_dict(dictionary)
             .map_err(|_| IndexError::Malformed("zstd dictionary failed to load"))?;
-        let mut decoder = StreamingDecoder::new_with_decoder(frame, fd)
+        let decoder = StreamingDecoder::new_with_decoder(frame, fd)
             .map_err(|_| IndexError::Malformed("zstd frame header failed to decode"))?;
+        // Cap the output against a decompression bomb (see the native variant).
         let mut out = Vec::new();
         decoder
+            .take(MAX_DECOMPRESSED_RECORD + 1)
             .read_to_end(&mut out)
             .map_err(|_| IndexError::Malformed("zstd frame failed to decode"))?;
+        if out.len() as u64 > MAX_DECOMPRESSED_RECORD {
+            return Err(IndexError::Malformed(
+                "decompressed record exceeds size cap",
+            ));
+        }
         Ok(out)
     }
 

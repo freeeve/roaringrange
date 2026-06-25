@@ -238,7 +238,14 @@ impl<F: RangeFetch> ImpactIndex<F> {
         for (ti, ((_, bm), &(rel, _card))) in postings.iter().zip(&entries).enumerate() {
             for (ci, &doc) in candidates.iter().enumerate() {
                 if bm.contains(doc) {
-                    let pos = self.impacts_off + rel + (bm.rank(doc) - 1);
+                    // `impacts_off`/`rel` are offsets from an untrusted sidecar; a
+                    // wrapping sum would panic (debug) or address the wrong byte
+                    // (release). Reject the overflow as malformed.
+                    let pos = self
+                        .impacts_off
+                        .checked_add(rel)
+                        .and_then(|p| p.checked_add(bm.rank(doc) - 1))
+                        .ok_or(IndexError::Malformed("RRSB impact offset overflow"))?;
                     ranges.push((pos, 1));
                     owner.push((ti, ci));
                 }

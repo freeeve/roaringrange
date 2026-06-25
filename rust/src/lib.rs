@@ -166,3 +166,5 @@ mod wasm;
 // dedicated integration test in tests/wasm_zstd.rs.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod build_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod fuzz_tests;

@@ -250,18 +250,25 @@ impl Iterator for BlockIter<'_> {
         }
         let shared = read_uvarint(self.block, &mut self.pos)? as usize;
         let suffix_len = read_uvarint(self.block, &mut self.pos)? as usize;
-        let suffix = self.block.get(self.pos..self.pos + suffix_len)?;
-        self.pos += suffix_len;
+        // `pos + suffix_len` can overflow on a corrupted varint; `checked_add` plus
+        // `get` stop cleanly instead of panicking or slicing out of bounds.
+        let end = self.pos.checked_add(suffix_len)?;
+        let suffix = self.block.get(self.pos..end)?;
+        self.pos = end;
         let head_off_d = read_uvarint(self.block, &mut self.pos)?;
         let head_size = read_uvarint(self.block, &mut self.pos)? as usize;
 
+        // `shared` is an untrusted varint, but only `shared.min(prev.len())` bytes
+        // are copied from `prev`. Cap the capacity hint there — a raw `shared` (up
+        // to u64) would request a multi-terabyte allocation and OOM the reader.
+        let shared = shared.min(self.prev.len());
         let mut term = Vec::with_capacity(shared + suffix_len);
-        term.extend_from_slice(&self.prev[..shared.min(self.prev.len())]);
+        term.extend_from_slice(&self.prev[..shared]);
         term.extend_from_slice(suffix);
         self.head_off = if self.first {
             head_off_d
         } else {
-            self.head_off + head_off_d
+            self.head_off.saturating_add(head_off_d)
         };
         self.first = false;
         self.prev = term.clone();

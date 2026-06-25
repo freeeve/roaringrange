@@ -133,7 +133,15 @@ pub(crate) async fn read_coalesced<F: RangeFetch>(
         if len == 0 {
             continue;
         }
-        let end = off + len as u64;
+        // `off`/`len` may be offsets parsed from an untrusted index block (e.g. a
+        // facet posting's container directory). A wrapping `off + len` would panic
+        // in debug and silently corrupt the span math in release, so reject the
+        // overflow as an out-of-range read rather than trusting it.
+        let end = off.checked_add(len as u64).ok_or(FetchError::OutOfRange {
+            offset: off,
+            len,
+            available: u64::MAX,
+        })?;
         match spans.last_mut() {
             Some(last) if off <= last.1.saturating_add(gap) => {
                 if end > last.1 {
@@ -145,24 +153,41 @@ pub(crate) async fn read_coalesced<F: RangeFetch>(
         span_of[i] = spans.len() - 1;
     }
 
-    let reads = spans.iter().map(|&(s, e)| fetch.read(s, (e - s) as usize));
+    // A span length can exceed `usize` on a 32-bit (wasm) target; `try_from`
+    // rejects it rather than truncating into a short read whose slice-back panics.
+    let oor = |off: u64, len: usize| FetchError::OutOfRange {
+        offset: off,
+        len,
+        available: u64::MAX,
+    };
+    let mut reads = Vec::with_capacity(spans.len());
+    for &(s, e) in &spans {
+        let span_len = usize::try_from(e - s).map_err(|_| oor(s, 0))?;
+        reads.push(fetch.read(s, span_len));
+    }
     let datas = join_all(reads).await;
     let mut bytes: Vec<Vec<u8>> = Vec::with_capacity(spans.len());
     for d in datas {
         bytes.push(d?);
     }
-    Ok(ranges
+    ranges
         .iter()
         .enumerate()
         .map(|(i, &(off, len))| {
             if len == 0 {
-                return Vec::new();
+                return Ok(Vec::new());
             }
             let (s, _) = spans[span_of[i]];
-            let rel = (off - s) as usize;
-            bytes[span_of[i]][rel..rel + len].to_vec()
+            // `off >= s` by span construction, but slice back via checked offsets
+            // and `get` so a corrupted directory degrades to an error, not a panic.
+            let rel = usize::try_from(off - s).map_err(|_| oor(off, len))?;
+            let end = rel.checked_add(len).ok_or_else(|| oor(off, len))?;
+            bytes[span_of[i]]
+                .get(rel..end)
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| oor(off, len))
         })
-        .collect())
+        .collect()
 }
 
 /// A file-backed [`RangeFetch`] for native tooling (builders, benches,
