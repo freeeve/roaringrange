@@ -41,13 +41,27 @@ const VERSION: u16 = 2;
 /// `LowerCaser` (`char::to_lowercase`). The builder and the reader call this same
 /// function, so a query tokenizes identically to the indexed text — the one
 /// correctness invariant of a term index. Stop-word and stemming filters slot in
-/// after this base step in a later phase.
+/// after this base step in a later phase. Equivalent to [`tokenize_with`] with case
+/// folding on — the default — so the public signature is unchanged.
 pub fn tokenize(text: &str) -> Vec<String> {
+    tokenize_with(text, true)
+}
+
+/// The base SimpleTokenizer with explicit case folding: a token is a maximal run of
+/// `char::is_alphanumeric`, lowercased via `char::to_lowercase` only when `case_fold`
+/// is true. With `case_fold` false the token text is kept verbatim (a case-sensitive
+/// index), so the builder and reader must agree on the flag; it is recorded in the
+/// header (`FLAG_CASE_SENSITIVE`) and rebuilt by [`Tokenizer::from_header`].
+pub fn tokenize_with(text: &str, case_fold: bool) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
     for c in text.chars() {
         if c.is_alphanumeric() {
-            cur.extend(c.to_lowercase());
+            if case_fold {
+                cur.extend(c.to_lowercase());
+            } else {
+                cur.push(c);
+            }
         } else if !cur.is_empty() {
             tokens.push(std::mem::take(&mut cur));
         }
@@ -63,6 +77,10 @@ pub fn tokenize(text: &str) -> Vec<String> {
 pub(crate) const FLAG_STEMMED: u16 = 1;
 /// Header `flags` bit: stop words were removed from the index, so queries drop them too.
 pub(crate) const FLAG_STOPWORDS: u16 = 2;
+/// Header `flags` bit: the index is **case-sensitive** — its terms were not lowercased,
+/// so queries must skip lowercasing too. Unset (the default) means case-folded, which
+/// keeps every default-built index byte-identical to before this flag existed.
+pub(crate) const FLAG_CASE_SENSITIVE: u16 = 4;
 
 /// One source-of-truth table of every Snowball stemmer `rust-stemmers` provides —
 /// `Variant = on-disk byte, "snowball name", "iso-639-1", StemmerAlgorithm` — which
@@ -184,28 +202,38 @@ pub struct Tokenizer {
     stemmer: Option<Stemmer>,
     stopwords: bool,
     language: Option<Language>,
+    case_fold: bool,
 }
 
 impl Tokenizer {
     /// The base SimpleTokenizer + LowerCaser with no stemming or stop-word removal
     /// (an unstemmed index, or a pre-stemming v1 file whose flags are zero).
     pub fn plain() -> Self {
-        Tokenizer::new(None, false)
+        Tokenizer::new(None, false, true)
     }
 
-    /// A tokenizer with the given optional stemmer language and stop-word removal.
-    pub fn new(language: Option<Language>, stopwords: bool) -> Self {
+    /// A tokenizer with the given optional stemmer language, stop-word removal, and
+    /// case folding (`case_fold == false` builds a case-sensitive index, keeping token
+    /// text verbatim).
+    pub fn new(language: Option<Language>, stopwords: bool, case_fold: bool) -> Self {
         Tokenizer {
             stemmer: language.map(|l| Stemmer::create(l.algorithm())),
             stopwords,
             language,
+            case_fold,
         }
     }
 
-    /// The `(language, stopwords)` pair this tokenizer was built with — lets build
-    /// tooling construct identical tokenizers (e.g. one per worker thread).
-    pub fn spec(&self) -> (Option<Language>, bool) {
-        (self.language, self.stopwords)
+    /// The `(language, stopwords, case_fold)` triple this tokenizer was built with —
+    /// lets build tooling construct identical tokenizers (e.g. one per worker thread).
+    pub fn spec(&self) -> (Option<Language>, bool, bool) {
+        (self.language, self.stopwords, self.case_fold)
+    }
+
+    /// Whether this tokenizer case-folds (lowercases) tokens. The reader's prefix
+    /// paths consult it so a case-sensitive index matches prefixes verbatim.
+    pub fn case_fold(&self) -> bool {
+        self.case_fold
     }
 
     /// Builds the tokenizer the header describes from its `flags` + `language` byte.
@@ -215,13 +243,18 @@ impl Tokenizer {
         } else {
             None
         };
-        Tokenizer::new(lang, flags & FLAG_STOPWORDS != 0)
+        Tokenizer::new(
+            lang,
+            flags & FLAG_STOPWORDS != 0,
+            flags & FLAG_CASE_SENSITIVE == 0,
+        )
     }
 
-    /// Tokenizes `text`: base tokens, then drop stop words (if enabled), then stem
-    /// each surviving token (if a stemmer is configured).
+    /// Tokenizes `text`: base tokens (lowercased iff this tokenizer case-folds), then
+    /// drop stop words (if enabled), then stem each surviving token (if a stemmer is
+    /// configured).
     pub fn tokenize(&self, text: &str) -> Vec<String> {
-        tokenize(text)
+        tokenize_with(text, self.case_fold)
             .into_iter()
             .filter(|t| !(self.stopwords && is_stop_word(t)))
             .map(|t| match &self.stemmer {
@@ -646,26 +679,39 @@ impl<F: RangeFetch> TermIndex<F> {
     /// Returns up to `limit` doc IDs matching **any** dictionary term that starts
     /// with `prefix` (the OR / union of every prefix-matching term's posting), most
     /// popular first (ascending doc ID == descending rank). The prefix is lowercased
-    /// the same way [`tokenize`] lowercases. An empty match set yields no results.
+    /// the same way [`tokenize`] lowercases — unless the index is case-sensitive, when
+    /// it is matched verbatim. An empty match set yields no results.
     pub async fn search_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<u32>, IndexError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let p: String = prefix.chars().flat_map(|c| c.to_lowercase()).collect();
+        let p = self.fold_prefix(prefix);
         let locs = self.prefix_locs(&p).await?;
         self.union_locs(locs, limit).await
     }
 
     /// Autocompletes `prefix`: up to `max_terms` dictionary terms that start with it,
     /// in lexicographic order. The prefix is lowercased the same way [`tokenize`]
-    /// lowercases. Range-fetches only the dict blocks spanning the prefix.
+    /// lowercases (unless the index is case-sensitive). Range-fetches only the dict
+    /// blocks spanning the prefix.
     pub async fn complete(
         &self,
         prefix: &str,
         max_terms: usize,
     ) -> Result<Vec<String>, IndexError> {
-        let p: String = prefix.chars().flat_map(|c| c.to_lowercase()).collect();
+        let p = self.fold_prefix(prefix);
         Ok(self.scan_prefix(&p, max_terms, true).await?.1)
+    }
+
+    /// Normalizes a query prefix the way the index's tokenizer normalized its terms:
+    /// lowercased for a case-folding index, verbatim for a case-sensitive one. The
+    /// prefix path skips stemming/stop-words by design (a prefix is already fuzzy).
+    fn fold_prefix(&self, prefix: &str) -> String {
+        if self.tokenizer.case_fold() {
+            prefix.chars().flat_map(|c| c.to_lowercase()).collect()
+        } else {
+            prefix.to_string()
+        }
     }
 
     /// Posting locations of every dictionary term starting with `p` (scans the dict
@@ -823,6 +869,7 @@ mod tests {
                 head_boundary,
                 language: None,
                 stopwords: false,
+                case_sensitive: false,
                 block_cap,
             },
         )
@@ -840,6 +887,58 @@ mod tests {
         assert_eq!(tokenize("GPT-4 and BERT"), vec!["gpt", "4", "and", "bert"]);
         assert!(tokenize("  --  ").is_empty());
         assert!(tokenize("").is_empty());
+    }
+
+    #[test]
+    fn tokenize_with_case_fold_off_keeps_case() {
+        // case_fold on (the default) lowercases; off keeps the token verbatim.
+        assert_eq!(
+            tokenize_with("Machine LEARNING", true),
+            vec!["machine", "learning"]
+        );
+        assert_eq!(
+            tokenize_with("Machine LEARNING", false),
+            vec!["Machine", "LEARNING"]
+        );
+        // Boundary rules (alnum runs) are identical regardless of folding.
+        assert_eq!(tokenize_with("GPT-4 BERT", false), vec!["GPT", "4", "BERT"]);
+    }
+
+    #[test]
+    fn case_sensitive_index_distinguishes_case() {
+        // A case-sensitive index keeps "Rust" and "rust" as distinct terms; queries
+        // are matched verbatim (the header's FLAG_CASE_SENSITIVE bit round-trips
+        // through Tokenizer::from_header so build and query agree).
+        let docs = [
+            (0u32, "Rust systems programming"),
+            (1, "rust never sleeps"),
+            (2, "RUST belt revival"),
+        ];
+        let mut buf = Vec::new();
+        write_term_index_with(
+            &mut buf,
+            &docs,
+            &TermIndexConfig {
+                head_boundary: 65_536,
+                language: None,
+                stopwords: false,
+                case_sensitive: true,
+                block_cap: 0,
+            },
+        )
+        .unwrap();
+        let ti = block_on(TermIndex::open(MemoryFetch::new(buf))).unwrap();
+        // The three casings are three distinct dictionary terms.
+        assert_eq!(block_on(ti.search("Rust", 10)).unwrap(), vec![0]);
+        assert_eq!(block_on(ti.search("rust", 10)).unwrap(), vec![1]);
+        assert_eq!(block_on(ti.search("RUST", 10)).unwrap(), vec![2]);
+        // Prefix matching is also verbatim: "Ru" hits only doc 0's "Rust".
+        assert_eq!(block_on(ti.search_prefix("Ru", 10)).unwrap(), vec![0]);
+
+        // The default (case-folding) index merges all three onto "rust".
+        let ci = build(&docs, 65_536);
+        assert_eq!(block_on(ci.search("Rust", 10)).unwrap(), vec![0, 1, 2]);
+        assert_eq!(block_on(ci.search("RUST", 10)).unwrap(), vec![0, 1, 2]);
     }
 
     #[test]
@@ -1068,6 +1167,7 @@ mod tests {
                 head_boundary: 65_536,
                 language: Some(Language::English),
                 stopwords: false,
+                case_sensitive: false,
                 block_cap: 0,
             },
         )
@@ -1092,6 +1192,7 @@ mod tests {
                 head_boundary: 65_536,
                 language: None,
                 stopwords: true,
+                case_sensitive: false,
                 block_cap: 0,
             },
         )

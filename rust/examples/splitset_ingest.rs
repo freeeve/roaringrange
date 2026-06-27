@@ -78,6 +78,7 @@ fn main() {
         tier_count: 0,
         sortcol: None,
         bloom_bits_per_key: 10,
+        case_sensitive: false,
     });
     let mut store = ObjectStore::default();
 

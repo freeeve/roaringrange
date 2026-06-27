@@ -28,11 +28,11 @@
 //! docs and bounding read fan-out; re-tiering the base is a full rebuild via
 //! [`crate::splitset_build::SplitSetBuilder`].
 
-use crate::build::{serialize_posting, write_index, DEFAULT_STRIDE};
+use crate::build::{serialize_posting, write_index_with, DEFAULT_STRIDE};
 use crate::index::{deserialize, read_u32, read_u64, IndexError};
-use crate::ngram::ngram_keys;
+use crate::ngram::ngram_keys_with;
 use crate::splitset::{
-    bloom_build, tlv_record, Policy, SplitSet, FLAG_BLOOM, FLAG_TOMBSTONES,
+    bloom_build, tlv_record, Policy, SplitSet, FLAG_BLOOM, FLAG_CASE_SENSITIVE, FLAG_TOMBSTONES,
     SPLIT_FLAG_ABSOLUTE_IDS, SPLIT_FLAG_HAS_TOMBSTONE, SUMMARY_TAG_BLOOM, SUMMARY_TAG_TOMBSTONE,
 };
 use crate::splitset_build::{write_splitset, SortColSpec, SplitSetConfig, SplitSpec};
@@ -63,6 +63,11 @@ pub struct WriterConfig {
     /// Bits per key for the per-split term Bloom filter on flushed/compacted splits (`0`
     /// disables; `~10` ≈ 1% false positives), matching the batch builder's option.
     pub bloom_bits_per_key: u32,
+    /// Case-sensitive n-gram keys. `false` (the default) lowercases (case-folds) keys, matching the
+    /// historical behavior; `true` builds case-sensitive v4 delta splits and sets the manifest's
+    /// case-sensitive flag. Must match the base split set (see [`SplitSetWriter::resume`], which
+    /// inherits it).
+    pub case_sensitive: bool,
 }
 
 /// The result of [`SplitSetWriter::flush`]: one immutable delta split and the new manifest.
@@ -99,6 +104,7 @@ pub struct SplitSetWriter {
     tier_count: u16,
     sortcol: Option<SortColSpec>,
     bloom_bits_per_key: u32,
+    case_normalization: bool,
     /// Carried split metadata: base splits `[0, base_count)` then deltas, re-emitted each cutover.
     base_count: usize,
     specs: Vec<SplitSpec>,
@@ -129,6 +135,7 @@ impl SplitSetWriter {
             tier_count: config.tier_count,
             sortcol: config.sortcol,
             bloom_bits_per_key: config.bloom_bits_per_key,
+            case_normalization: !config.case_sensitive,
             base_count: 0,
             specs: Vec::new(),
             next_global_id: 0,
@@ -213,6 +220,8 @@ impl SplitSetWriter {
                 descending: d.descending,
             }),
             bloom_bits_per_key,
+            // Inherit the base's case mode so delta splits key identically to it.
+            case_normalization: prev.flags() & FLAG_CASE_SENSITIVE == 0,
             base_count: prev.base_count() as usize,
             specs,
             next_global_id,
@@ -229,7 +238,7 @@ impl SplitSetWriter {
     /// Tokenizes `text` into n-gram keys and appends it to the memtable — the convenience over
     /// [`add_keys`](Self::add_keys). Returns the doc's global id.
     pub fn add_text(&mut self, text: &str) -> u32 {
-        let keys = ngram_keys(text, self.gram_size as usize);
+        let keys = ngram_keys_with(text, self.gram_size as usize, self.case_normalization);
         self.add_keys(&keys)
     }
 
@@ -293,7 +302,13 @@ impl SplitSetWriter {
             .map(|(k, bm)| (*k, serialize_posting(bm)))
             .collect();
         let mut bytes = Vec::new();
-        write_index(&mut bytes, self.gram_size, self.stride, entries)?;
+        write_index_with(
+            &mut bytes,
+            self.gram_size,
+            self.stride,
+            entries,
+            self.case_normalization,
+        )?;
 
         let name = format!("{}-d{:05}.rrs", self.name_prefix, self.flush_seq);
         self.flush_seq += 1;
@@ -397,7 +412,13 @@ impl SplitSetWriter {
             .map(|(k, bm)| (*k, serialize_posting(bm)))
             .collect();
         let mut bytes = Vec::new();
-        write_index(&mut bytes, self.gram_size, self.stride, entries)?;
+        write_index_with(
+            &mut bytes,
+            self.gram_size,
+            self.stride,
+            entries,
+            self.case_normalization,
+        )?;
 
         let name = format!("{}-c{:05}.rrs", self.name_prefix, self.compact_seq);
         self.compact_seq += 1;
@@ -457,6 +478,9 @@ impl SplitSetWriter {
         }
         if self.bloom_bits_per_key > 0 {
             flags |= FLAG_BLOOM;
+        }
+        if !self.case_normalization {
+            flags |= FLAG_CASE_SENSITIVE;
         }
         let config = SplitSetConfig {
             policy: self.policy,
@@ -592,6 +616,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 10, // exercise Blooms across base + delta + compacted splits
+            case_sensitive: false,
         });
         for i in 0..6 {
             b.add_text(&format!("abc base{i}")).unwrap();
@@ -655,6 +680,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 10,
+            case_sensitive: false,
         });
         b.add_text("abc base0").unwrap();
         let built = b.finish().unwrap();
@@ -701,6 +727,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 0,
+            case_sensitive: false,
         });
         b.add_text("abc b0").unwrap();
         b.add_text("abc b1").unwrap();
@@ -748,6 +775,7 @@ mod tests {
             tier_count: 0,
             sortcol: None,
             bloom_bits_per_key: 0,
+            case_sensitive: false,
         });
         assert!(w.flush().unwrap().is_none(), "nothing to flush yet");
         w.add_text("abc hello");

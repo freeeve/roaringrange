@@ -75,6 +75,67 @@ func termConformanceBuild(t *testing.T) *BuiltSplitSet {
 	return built
 }
 
+// termConformanceCaseSensitiveBuild mirrors the Rust term_conformance_cs_build fixture
+// EXACTLY: a mixed-case corpus with mixed-case facet category values, built case-sensitively
+// (no stemming/stop-words), so "Roaring"/"roaring", "Bitmap"/"bitmap", and the "A"/"a", "B"/"b"
+// categories stay distinct.
+func termConformanceCaseSensitiveBuild(t *testing.T) *BuiltSplitSet {
+	t.Helper()
+	docs := []struct {
+		text   string
+		facets map[string][]string
+	}{
+		{"Roaring Range Index", map[string][]string{"Kind": {"A"}}},
+		{"roaring range query", map[string][]string{"Kind": {"a"}}},
+		{"Bitmap BITMAP Index", map[string][]string{"Kind": {"B"}}},
+		{"bitmap index lookup", map[string][]string{"Kind": {"b"}}},
+	}
+	b := NewTermSplitSetBuilder(TermSplitBuildConfig{
+		Policy:        PolicyTiered,
+		ByteCap:       400,
+		NamePrefix:    "cscorpus",
+		Language:      TermLanguageNone,
+		Stopwords:     false,
+		CaseSensitive: true,
+	})
+	for _, d := range docs {
+		if _, err := b.AddFaceted(d.text, d.facets); err != nil {
+			t.Fatalf("add doc: %v", err)
+		}
+	}
+	built, err := b.Finish()
+	if err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	return built
+}
+
+// TestTermSplitCaseSensitiveMatchesSharedGolden asserts the Go case-sensitive term-bodied split
+// builder reproduces the Rust output byte-for-byte — the manifest (case-sensitive flag), every
+// case-sensitive RRTI split, and every case-sensitive RRSF facet sidecar.
+func TestTermSplitCaseSensitiveMatchesSharedGolden(t *testing.T) {
+	g := readGolden(t, "testdata/rrti_term_split_cs_golden.txt")
+	built := termConformanceCaseSensitiveBuild(t)
+
+	if got, want := built.Manifest, g["manifest"]; !equalBytes(got, want) {
+		t.Errorf("cs manifest drifted from the shared golden:\n got %x\nwant %x", got, want)
+	}
+	files := append(append([]NamedSplit{}, built.Splits...), built.Facets...)
+	for _, f := range files {
+		want, ok := g[f.Name]
+		if !ok {
+			t.Errorf("no golden for %s", f.Name)
+			continue
+		}
+		if !equalBytes(f.Bytes, want) {
+			t.Errorf("%s drifted from the shared cs golden:\n got %x\nwant %x", f.Name, f.Bytes, want)
+		}
+	}
+	if want := 1 + len(built.Splits) + len(built.Facets); len(g) != want {
+		t.Errorf("cs golden entry count: got %d want %d", len(g), want)
+	}
+}
+
 // TestTermSplitBuildMatchesSharedGolden asserts the Go term-bodied split builder
 // reproduces the Rust output byte-for-byte — manifest, every RRTI split, every
 // RRSF facet sidecar. The same file is asserted by the Rust side

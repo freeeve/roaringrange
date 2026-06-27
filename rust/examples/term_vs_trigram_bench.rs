@@ -118,6 +118,7 @@ fn build_trigram(docs: &[String], byte_cap: u64) -> (Vec<u8>, Files) {
         name_prefix: "trigram".to_string(),
         sortcol: None,
         bloom_bits_per_key: 0,
+        case_sensitive: false,
     });
     for d in docs {
         b.add_text(d).unwrap();
@@ -136,6 +137,7 @@ fn build_term(docs: &[String], byte_cap: u64) -> (Vec<u8>, Files) {
         sortcol: None,
         language: None,
         stopwords: false,
+        case_sensitive: false,
     });
     for d in docs {
         b.add_text(d).unwrap();

@@ -47,7 +47,7 @@ monolith can't: how to prune across them.
 |---|---|---|---|
 | magic | char[4] | 4 | `"RRSS"` |
 | version | u16 | 2 | `1` |
-| flags | u16 | 2 | `bit0`=Bloom summaries present, `bit1`=facet summaries, `bit2`=time summaries, `bit3`=tombstones; rest reserved (`0`) |
+| flags | u16 | 2 | `bit0`=Bloom summaries present, `bit1`=facet summaries, `bit2`=time summaries, `bit3`=tombstones, `bit4`=case-sensitive (n-gram/facet keys not lowercased — queries derive keys without folding, and the splits are case-sensitive `RRS`/`RRTI`/`RRSF`); rest reserved (`0`) |
 | policy | u8 | 1 | `0`=rank-tiered, `1`=stable-key (see [Policies](#policies)) |
 | bodyKind | u8 | 1 | how each split data file is encoded: `0`=trigram `RRS`, `1`=term `RRTI` (FST). `0` keeps pre-bodyKind manifests valid; a term-bodied set needs the `terms` reader feature |
 | tierCount | u16 | 2 | number of rank tiers (tiered policy); `0` for stable-key |

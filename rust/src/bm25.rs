@@ -609,6 +609,7 @@ mod tests {
         head_boundary: 65536,
         language: None,
         stopwords: false,
+        case_sensitive: false,
         block_cap: 0,
     };
 
@@ -750,6 +751,7 @@ mod tests {
             head_boundary,
             language: None,
             stopwords: false,
+            case_sensitive: false,
             block_cap: 0,
         };
         let mut tb = TermIndexBuilder::new(&cfg);

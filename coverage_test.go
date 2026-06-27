@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -67,11 +68,12 @@ func TestOpenRejectsBadMagic(t *testing.T) {
 	}
 }
 
-// TestOpenRejectsWrongVersion rejects any non-v3 header. A v2 file shares the
-// magic but has a 20-byte header and a 24-byte dictionary stride, so parsing it
-// as v3 would silently return garbage postings rather than an error.
+// TestOpenRejectsWrongVersion rejects any unsupported version. v3 (case-folding) and
+// v4 (case-sensitive) are the only accepted versions; a v2 file shares the magic but has
+// a 20-byte header and a 24-byte dictionary stride, so parsing it as v3 would silently
+// return garbage postings rather than an error.
 func TestOpenRejectsWrongVersion(t *testing.T) {
-	for _, v := range []uint16{0, 1, 2, 4} {
+	for _, v := range []uint16{0, 1, 2, 5, 99} {
 		buf := make([]byte, headerSize)
 		copy(buf[0:4], Magic)
 		binary.LittleEndian.PutUint16(buf[4:6], v)
@@ -118,16 +120,42 @@ func TestNgramKeysUnicode(t *testing.T) {
 	}
 }
 
-// FuzzNgramKeys ensures tokenization never panics on arbitrary input/gram sizes.
+// FuzzNgramKeys ensures tokenization never panics on arbitrary input/gram sizes, and that the
+// case-sensitive path (caseFold=false) is consistent with the default: it never panics, the
+// default NgramKeys equals NgramKeysWith(.., true), and folding an already-lowercase string
+// yields the same keys whether folding is on or off (the only difference is case).
 func FuzzNgramKeys(f *testing.F) {
 	f.Add("legends & lattes", 3)
 	f.Add("café société", 3)
+	f.Add("Roaring RANGE Index", 3)
 	f.Add("", 0)
 	f.Fuzz(func(t *testing.T, s string, n int) {
 		g := n % 10
 		if g < 0 {
 			g = -g
 		}
-		_ = NgramKeys(s, g)
+		def := NgramKeys(s, g)
+		if !equalU64(def, NgramKeysWith(s, g, true)) {
+			t.Fatalf("NgramKeys != NgramKeysWith(.., true) for %q g=%d", s, g)
+		}
+		_ = NgramKeysWith(s, g, false) // must not panic
+		// On already-lowercase input, case folding on/off must agree.
+		low := strings.ToLower(s)
+		if !equalU64(NgramKeysWith(low, g, true), NgramKeysWith(low, g, false)) {
+			t.Fatalf("case-fold on/off disagree on lowercased %q g=%d", low, g)
+		}
 	})
+}
+
+// equalU64 reports whether two uint64 slices are equal (order-sensitive).
+func equalU64(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

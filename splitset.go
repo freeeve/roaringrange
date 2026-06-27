@@ -44,6 +44,10 @@ const (
 	SplitSetFlagTime = 1 << 2
 	// SplitSetFlagTombstones marks per-split tombstone postings present (header flag).
 	SplitSetFlagTombstones = 1 << 3
+	// SplitSetFlagCaseSensitive marks a case-sensitive split set: n-gram and facet keys were
+	// not lowercased, so a query derives keys without folding. Unset (the default) keeps every
+	// manifest byte-identical. Mirrors the Rust splitset::FLAG_CASE_SENSITIVE.
+	SplitSetFlagCaseSensitive = 1 << 4
 
 	// SplitFlagHasTombstone marks a split that carries a tombstone posting (per-split flag).
 	SplitFlagHasTombstone = 1 << 0

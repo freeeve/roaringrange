@@ -17,19 +17,27 @@ Doc IDs are still assigned in **descending rank (popularity)**, so a posting's l
 buckets are the most-popular docs.
 
 ## Layout
-**Header — 16 B**
+**Header — 16 B (v3) / 18 B (v4)**
 | field | type | bytes | notes |
 |---|---|---|---|
 | magic | char[4] | 4 | `"RRSI"` |
-| version | u16 | 2 | `3` |
+| version | u16 | 2 | `3` (case-folding) or `4` (case-sensitive) |
 | gramSize | u16 | 2 | `3` |
 | ngrams | u32 | 4 | dictionary entry count |
 | stride | u32 | 4 | sparse-index stride (e.g. 512) |
+| flags | u16 | 2 | **v4 only**, at offset 16: `bit0` = case-sensitive; rest reserved (`0`) |
 
-**Sparse index** — `sparseCount = ceil(ngrams/stride)` entries × 8 B, at offset `16`:
+**v3 vs v4 (case normalization).** A default index lowercases each n-gram rune (`normalize`)
+and is **v3**, byte-identical to before this flag existed. Building with case normalization OFF
+keys on the original case and emits **v4**: the v3 fields plus a trailing 2-byte `flags` field at
+offset 16 (no v3 field shifts; the sparse index then starts at offset 18). The reader accepts both
+and derives `caseFold = !(flags & 1)`; queries must derive keys the same way
+(`NgramKeysWith(query, gramSize, caseFold)`). `headerSize` below is `16` for v3, `18` for v4.
+
+**Sparse index** — `sparseCount = ceil(ngrams/stride)` entries × 8 B, at offset `headerSize`:
 each entry is `key u64` = `dict[i*stride].key`. Downloaded once (tens of KB) and cached.
 
-**Dictionary** — `ngrams` × 20 B, **sorted by key asc**, at `dictStart = 16 + sparseCount*8`:
+**Dictionary** — `ngrams` × 20 B, **sorted by key asc**, at `dictStart = headerSize + sparseCount*8`:
 | field | type | bytes | notes |
 |---|---|---|---|
 | key | u64 | 8 | |
@@ -42,7 +50,8 @@ A portable bitmap is a sorted directory of containers keyed by `doc >> 16` (a 64
 with an offset table, so a reader can range-read individual buckets without the whole posting.
 
 ## Reader
-- **boot:** read header (16 B) + sparse index (`sparseCount*8` B); keep keys in memory.
+- **boot:** read header (`headerSize` B; for v4 also read the 2-byte `flags`) + sparse index
+  (`sparseCount*8` B); keep keys in memory.
 - **lookup(key):** `b` = largest `i` with `sparseKeys[i] <= key` (in-memory binary search) →
   read dict block `[dictStart + b*stride*20, + min(stride, ngrams-b*stride)*20)` →
   binary-search the block for `key` → `(offset, size)`.
@@ -53,14 +62,16 @@ with an offset table, so a reader can range-read individual buckets without the 
   ranged reads (`TailScan`), fetching only the buckets a page spans — never the whole posting.
 
 ## Query
-1. `keys = NgramKeys(query, gramSize)`; empty → no results.
+1. `keys = NgramKeysWith(query, gramSize, caseFold)` (v3 / non-flagged ⇒ `caseFold = true`); empty → no results.
 2. per key: `lookup` → fetch the eager prefix → deserialize roaring.
 3. AND the eager prefixes (smallest cardinality first); iterate ascending → first K doc IDs.
 4. if fewer than K, page the postings' higher buckets in rank order and continue (a strict AND
    reads only the containers each page spans; a facet filter is applied per bucket).
 
 ## n-gram key — reader must match the builder byte-for-byte (from roaringsearch `ngram.go`)
-`normalize(s)`: keep Unicode letters/digits, lowercase each rune. Per `gramSize`-rune window:
+`normalize(s, caseFold)`: keep Unicode letters/digits; lowercase each rune **only when
+`caseFold`** (a v3 index, or v4 with the case-sensitive bit clear — the default). A v4
+case-sensitive index keeps the original case. Per `gramSize`-rune window:
 - `n ≤ 2`: pack 32 bits/rune — `key = (key<<32) | rune`
 - `n` in 3..8, all ASCII (≤ 0x7F): pack 8 bits/rune — `key = (key<<8) | rune`
 - else: FNV-1a over each rune's 4 LE bytes (`r&0xFF, (r>>8)&0xFF, (r>>16)&0xFF, (r>>24)&0xFF`);

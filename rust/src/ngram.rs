@@ -19,13 +19,21 @@ const FNV_PRIME64: u64 = 1099511628211;
 /// must not require `"dst"` from `legend·s·t·ravis`. Mirrors roaringsearch's
 /// per-word query matching. Empty when `gram_size` is zero or no word reaches it.
 pub fn ngram_keys(query: &str, gram_size: usize) -> Vec<u64> {
+    ngram_keys_with(query, gram_size, true)
+}
+
+/// Like [`ngram_keys`] but with explicit case folding: when `case_fold` is false the
+/// kept letters/digits are NOT lowercased, so a case-sensitive trigram index keys on the
+/// original case. The builder and reader must agree; the choice is recorded in the `RRSI`
+/// header (a v4 `flags` field) so the reader derives the same `case_fold`.
+pub fn ngram_keys_with(query: &str, gram_size: usize, case_fold: bool) -> Vec<u64> {
     if gram_size == 0 {
         return Vec::new();
     }
     let mut keys = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for field in query.split_whitespace() {
-        let runes = normalize(field);
+        let runes = normalize(field, case_fold);
         if runes.len() < gram_size {
             continue;
         }
@@ -39,17 +47,18 @@ pub fn ngram_keys(query: &str, gram_size: usize) -> Vec<u64> {
     keys
 }
 
-/// Keeps Unicode letters/digits and lowercases each char.
+/// Keeps Unicode letters/digits and (when `case_fold`) lowercases each char.
 ///
-/// Mirrors Go's `unicode.IsLetter || unicode.IsDigit` filter and
+/// Mirrors Go's `unicode.IsLetter || unicode.IsDigit` filter and, when folding,
 /// `unicode.ToLower`. Go lowercases a single rune to a single rune, so we take
 /// the first char of Rust's (potentially multi-char) lowercase mapping, which
-/// matches for every case where Go's simple mapping is one rune.
-fn normalize(s: &str) -> Vec<char> {
+/// matches for every case where Go's simple mapping is one rune. With `case_fold`
+/// false the kept runes are passed through verbatim (a case-sensitive index).
+fn normalize(s: &str, case_fold: bool) -> Vec<char> {
     let mut out = Vec::with_capacity(s.len());
     for c in s.chars() {
         if is_letter_or_digit(c) {
-            out.push(to_lower_rune(c));
+            out.push(if case_fold { to_lower_rune(c) } else { c });
         }
     }
     out
@@ -193,11 +202,32 @@ mod tests {
         // Std's `is_alphabetic`/`is_numeric` would also keep letter-numbers (Nl,
         // e.g. Ⅰ U+2160) and other-numbers (No, e.g. ² U+00B2, ① U+2460); the
         // reader must drop them to tokenize identically to the builder.
-        assert!(normalize("Ⅰ②①").is_empty());
+        assert!(normalize("Ⅰ②①", true).is_empty());
         // Ⅰ dropped -> "ab" (too short); ² and ① dropped -> "abc".
         assert!(ngram_keys("Ⅰab", 3).is_empty());
         assert_eq!(ngram_keys("a²b①c", 3), vec![6382179]);
         // Letters (any L*) and decimal digits (Nd) are kept and lowercased.
-        assert_eq!(normalize("Ab9"), vec!['a', 'b', '9']);
+        assert_eq!(normalize("Ab9", true), vec!['a', 'b', '9']);
+    }
+
+    #[test]
+    fn case_fold_off_keeps_original_case() {
+        // The letter/digit filter is unchanged; only lowercasing is skipped.
+        assert_eq!(normalize("Ab9", false), vec!['A', 'b', '9']);
+        // "ABC" and "abc" key differently when case folding is off...
+        assert_ne!(
+            ngram_keys_with("ABC", 3, false),
+            ngram_keys_with("abc", 3, false)
+        );
+        // ...but identically when it is on (the default).
+        assert_eq!(
+            ngram_keys_with("ABC", 3, true),
+            ngram_keys_with("abc", 3, true)
+        );
+        // Case-sensitive "ABC" packs the raw ASCII bytes 'A','B','C'.
+        assert_eq!(
+            ngram_keys_with("ABC", 3, false),
+            vec![((b'A' as u64) << 16) | ((b'B' as u64) << 8) | (b'C' as u64)]
+        );
     }
 }

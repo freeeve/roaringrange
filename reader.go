@@ -20,7 +20,11 @@ type dictRec struct {
 type Index struct {
 	r io.ReaderAt
 	// GramSize is the n-gram window the index was built with.
-	GramSize   int
+	GramSize int
+	// CaseFold reports whether queries should lowercase their n-grams before keying
+	// (false for a v4 case-sensitive index). Callers deriving keys should use
+	// NgramKeysWith(query, GramSize, CaseFold) so they key exactly as the index was built.
+	CaseFold   bool
 	ngrams     int
 	stride     int
 	dictStart  int64
@@ -37,7 +41,21 @@ func Open(r io.ReaderAt) (*Index, error) {
 	if string(header[0:4]) != Magic {
 		return nil, ErrMagic
 	}
-	if v := binary.LittleEndian.Uint16(header[4:6]); v != Version {
+	// v3 (case-folding) is the default; v4 appends a 2-byte flags field at offset 16 and is
+	// emitted only for a case-sensitive index. One extra tiny read fetches the v4 flags (the
+	// 16-byte header read can't over-read a v3 file, whose bytes may end at offset 16).
+	hdrSize := headerSize
+	caseFold := true
+	switch v := binary.LittleEndian.Uint16(header[4:6]); v {
+	case Version:
+	case VersionV4:
+		hdrSize = headerSizeV4
+		flagsBuf := make([]byte, 2)
+		if _, err := r.ReadAt(flagsBuf, headerSize); err != nil {
+			return nil, err
+		}
+		caseFold = binary.LittleEndian.Uint16(flagsBuf)&rrsiFlagCaseSensitive == 0
+	default:
 		return nil, ErrVersion
 	}
 	gramSize := int(binary.LittleEndian.Uint16(header[6:8]))
@@ -50,7 +68,7 @@ func Open(r io.ReaderAt) (*Index, error) {
 	sparseCount := (ngrams + stride - 1) / stride
 	sparseBytes := make([]byte, sparseCount*8)
 	if sparseCount > 0 {
-		if _, err := r.ReadAt(sparseBytes, headerSize); err != nil {
+		if _, err := r.ReadAt(sparseBytes, int64(hdrSize)); err != nil {
 			return nil, err
 		}
 	}
@@ -62,9 +80,10 @@ func Open(r io.ReaderAt) (*Index, error) {
 	return &Index{
 		r:          r,
 		GramSize:   gramSize,
+		CaseFold:   caseFold,
 		ngrams:     ngrams,
 		stride:     stride,
-		dictStart:  int64(headerSize + sparseCount*8),
+		dictStart:  int64(hdrSize + sparseCount*8),
 		sparseKeys: sparseKeys,
 	}, nil
 }

@@ -16,13 +16,21 @@ import (
 // (and the Rust reader's port); the cross-library test in ./conformance is the
 // guard that enforces it.
 func NgramKeys(query string, gramSize int) []uint64 {
+	return NgramKeysWith(query, gramSize, true)
+}
+
+// NgramKeysWith is NgramKeys with an explicit case-fold flag. When caseFold is false
+// the kept letters/digits are not lowercased, so a case-sensitive trigram index keys on
+// the original case. The builder and reader must agree; the choice is recorded in the RRSI
+// header (a v4 flags field) so the reader derives the same caseFold. See FORMAT.md.
+func NgramKeysWith(query string, gramSize int, caseFold bool) []uint64 {
 	if gramSize <= 0 {
 		return nil
 	}
 	var keys []uint64
 	seen := make(map[uint64]struct{})
 	for _, field := range strings.Fields(query) {
-		runes := normalize(field)
+		runes := normalize(field, caseFold)
 		if len(runes) < gramSize {
 			continue
 		}
@@ -38,12 +46,16 @@ func NgramKeys(query string, gramSize int) []uint64 {
 	return keys
 }
 
-// normalize keeps Unicode letters/digits and lowercases each rune.
-func normalize(s string) []rune {
+// normalize keeps Unicode letters/digits and (when caseFold) lowercases each rune.
+func normalize(s string, caseFold bool) []rune {
 	out := make([]rune, 0, len(s))
 	for _, r := range s {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			out = append(out, unicode.ToLower(r))
+			if caseFold {
+				out = append(out, unicode.ToLower(r))
+			} else {
+				out = append(out, r)
+			}
 		}
 	}
 	return out

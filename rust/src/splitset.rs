@@ -18,7 +18,9 @@
 use crate::facet::{facet_key, FacetIndex};
 use crate::fetch::RangeFetch;
 use crate::index::{deserialize, read_u16, read_u32, read_u64, Index, IndexError};
+#[cfg(test)]
 use crate::ngram::ngram_keys;
+use crate::ngram::ngram_keys_with;
 use crate::sortcols::SortCols;
 #[cfg(feature = "terms")]
 use crate::terms::TermIndex;
@@ -43,6 +45,10 @@ pub const FLAG_FACET: u16 = 1 << 1;
 pub const FLAG_TIME: u16 = 1 << 2;
 /// Header flag bit: per-split tombstone postings are present (delta-over-base supersession).
 pub const FLAG_TOMBSTONES: u16 = 1 << 3;
+/// Header flag bit: the split set is **case-sensitive** — n-gram keys and facet keys were not
+/// lowercased, so a query derives keys without folding. Unset (the default) keeps every existing
+/// manifest byte-identical. Mirrors the per-split `RRS` v4 / `RRSF` / `RRTI` case-sensitive flags.
+pub const FLAG_CASE_SENSITIVE: u16 = 1 << 4;
 
 /// Per-split flag bit: this split carries a tombstone posting in its summary region.
 pub const SPLIT_FLAG_HAS_TOMBSTONE: u16 = 1 << 0;
@@ -328,6 +334,10 @@ pub struct SplitSet {
     /// How each split's data file is encoded ([`BodyKind`]). Decides how
     /// [`open_split`] opens a split.
     body_kind: BodyKind,
+    /// Whether queries lowercase (case-fold) their n-gram/facet keys before pruning. Derived
+    /// from the header's [`FLAG_CASE_SENSITIVE`] bit so the reader keys exactly as the splits
+    /// were built (`false` for a case-sensitive split set).
+    case_fold: bool,
     sortcol: Option<SortColDescriptor>,
     splits: Vec<Split>,
     /// Concatenated per-split summary regions; sliced per split by `(summary_off, summary_len)`.
@@ -487,6 +497,7 @@ impl SplitSet {
             byte_cap,
             gram_size,
             body_kind,
+            case_fold: flags & FLAG_CASE_SENSITIVE == 0,
             sortcol,
             splits,
             summary_blob,
@@ -604,7 +615,7 @@ impl SplitSet {
         }
         // Derive the query's n-gram keys once (for Bloom pruning); empty when the manifest
         // didn't record a gram size or the query is too short, which disables pruning safely.
-        let keys = ngram_keys(query, self.gram_size as usize);
+        let keys = ngram_keys_with(query, self.gram_size as usize, self.case_fold);
         if !self.delta_splits().is_empty() {
             return self.search_with_delta(resolver, query, &keys, limit).await;
         }
@@ -632,7 +643,7 @@ impl SplitSet {
         if filter.is_empty() {
             return self.search(resolver, query, limit).await;
         }
-        let keys = ngram_keys(query, self.gram_size as usize);
+        let keys = ngram_keys_with(query, self.gram_size as usize, self.case_fold);
         // The filtered category keys grouped by field — a split is pruned if, for any field, none
         // of its selected categories are present.
         let mut by_field: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
@@ -640,7 +651,7 @@ impl SplitSet {
             by_field
                 .entry(field.as_str())
                 .or_default()
-                .push(facet_key(field, cat));
+                .push(facet_key(field, cat, self.case_fold));
         }
         let fields: Vec<Vec<u64>> = by_field.into_values().collect();
 
@@ -1482,6 +1493,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 0,
+            case_sensitive: false,
         });
         let n = 60u32;
         for i in 0..n {
@@ -1533,6 +1545,7 @@ mod tests {
             sortcol: None,
             language: None,
             stopwords: false,
+            case_sensitive: false,
         });
         let n = 60u32;
         for i in 0..n {
@@ -1592,6 +1605,7 @@ mod tests {
                 descending: true,
             }),
             bloom_bits_per_key: 0,
+            case_sensitive: false,
         });
         // All six match "abc"; distinct tokens grow the vocabulary so the cap splits them.
         for i in 0..6u32 {
@@ -1641,6 +1655,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 0,
+            case_sensitive: false,
         });
         b.add_text("abcdefghij").unwrap();
         assert!(b.finish().is_err());
@@ -1660,6 +1675,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 0,
+            case_sensitive: false,
         });
         assert_eq!(b.add_text("abc").unwrap(), 0);
         assert_eq!(b.add_text("xy").unwrap(), 1); // too short -> no trigram, id 1 consumed
@@ -1740,6 +1756,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 0,
+            case_sensitive: false,
         });
         let mut vocab = std::collections::BTreeSet::new();
         for i in 0..200u32 {
@@ -1807,6 +1824,7 @@ mod tests {
                 name_prefix: "corpus".to_string(),
                 sortcol: None,
                 bloom_bits_per_key: bloom,
+                case_sensitive: false,
             });
             for i in 0..60u32 {
                 b.add_text(&format!("abc tok{i:04}")).unwrap();
@@ -1916,6 +1934,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 0,
+            case_sensitive: false,
         });
         for i in 0..30u32 {
             b.add_text(&format!("abc tok{i:04}")).unwrap();
@@ -1968,6 +1987,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 8,
+            case_sensitive: false,
         });
         let f = |lang: &str| vec![("lang".to_string(), lang.to_string())];
         b.add_faceted("abc en0", &f("en")).unwrap();
@@ -2037,6 +2057,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 8,
+            case_sensitive: false,
         });
         let f = |lang: &str| vec![("lang".to_string(), lang.to_string())];
         b.add_faceted("abc en0", &f("en")).unwrap();
@@ -2122,6 +2143,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 8,
+            case_sensitive: false,
         });
         let f = |lang: &str| vec![("lang".to_string(), lang.to_string())];
         b.add_faceted("abc en0", &f("en")).unwrap();
@@ -2185,6 +2207,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             bloom_bits_per_key: 10,
+            case_sensitive: false,
         };
 
         let mut whole = SplitSetBuilder::new(cfg());

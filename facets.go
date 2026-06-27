@@ -26,6 +26,10 @@ const (
 	facetCatEntry = 36
 	// facetSep separates field and category when hashing a category key.
 	facetSep = 0x1f
+	// facetFlagCaseSensitive is the RRSF reserved-field (offset 6) bit marking a sidecar
+	// whose facet keys are case-sensitive (field/category not lowercased). Unset (the
+	// default) keeps every sidecar byte-identical. Mirrors the Rust RRSF_FLAG_CASE_SENSITIVE.
+	facetFlagCaseSensitive = 1
 )
 
 // FacetCategory is one category value within a field and the doc-ID posting of
@@ -43,12 +47,28 @@ type FacetField struct {
 }
 
 // FacetKey derives the category key as FNV-1a 64-bit over lower(field), a 0x1f
-// separator, and lower(category). See FACETS.md.
+// separator, and lower(category). See FACETS.md. Equivalent to FacetKeyWith with
+// case folding on (the default).
 func FacetKey(field, category string) uint64 {
+	return FacetKeyWith(field, category, true)
+}
+
+// FacetKeyWith is FacetKey with an explicit case-fold flag. When caseFold is false the
+// field/category are hashed verbatim (a case-sensitive index keeps "Smith" and "smith"
+// distinct). Build and pruning sides must pass the same mode. Mirrors the Rust facet_key.
+func FacetKeyWith(field, category string, caseFold bool) uint64 {
 	h := fnv.New64a()
-	io.WriteString(h, strings.ToLower(field))
+	if caseFold {
+		io.WriteString(h, strings.ToLower(field))
+	} else {
+		io.WriteString(h, field)
+	}
 	h.Write([]byte{facetSep})
-	io.WriteString(h, strings.ToLower(category))
+	if caseFold {
+		io.WriteString(h, strings.ToLower(category))
+	} else {
+		io.WriteString(h, category)
+	}
 	return h.Sum64()
 }
 
@@ -76,6 +96,15 @@ type fieldOut struct {
 // [65536, ∞)) portable RoaringBitmaps, mirroring the text index. Categories are
 // grouped by field and sorted by key within a field. See FACETS.md.
 func WriteFacets(dst io.Writer, fields []FacetField) error {
+	return WriteFacetsWith(dst, fields, true)
+}
+
+// WriteFacetsWith is WriteFacets with an explicit caseNormalization flag. true (the default)
+// lowercases field/category for the facet-key hash and writes a byte-identical v1 sidecar;
+// false keys on the raw bytes (a case-sensitive index) and sets the reserved-field flag so a
+// split-set's facet pruning recomputes keys identically. Category display names are stored
+// verbatim either way. Mirrors the Rust write_facets_with.
+func WriteFacetsWith(dst io.Writer, fields []FacetField, caseNormalization bool) error {
 	var blob []byte
 	addStr := func(s string) (uint32, uint16) {
 		off := uint32(len(blob))
@@ -95,7 +124,7 @@ func WriteFacets(dst io.Writer, fields []FacetField) error {
 			}
 			cnOff, cnLen := addStr(c.Name)
 			fo.cats = append(fo.cats, catOut{
-				key:     FacetKey(f.Name, c.Name),
+				key:     FacetKeyWith(f.Name, c.Name, caseNormalization),
 				card:    uint32(c.Bitmap.GetCardinality()),
 				nameOff: cnOff,
 				nameLen: cnLen,
@@ -114,6 +143,9 @@ func WriteFacets(dst io.Writer, fields []FacetField) error {
 	header := make([]byte, facetHeaderSize)
 	copy(header[0:4], MagicFacet)
 	binary.LittleEndian.PutUint16(header[4:6], VersionFacet)
+	if !caseNormalization {
+		binary.LittleEndian.PutUint16(header[6:8], facetFlagCaseSensitive) // reserved @6
+	}
 	binary.LittleEndian.PutUint32(header[8:12], uint32(len(fos)))
 	binary.LittleEndian.PutUint32(header[12:16], uint32(totalCats))
 	binary.LittleEndian.PutUint32(header[16:20], uint32(len(blob)))

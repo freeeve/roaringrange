@@ -29,7 +29,7 @@ All integers little-endian. Postings are standard **portable** RoaringBitmaps
 |---|---|---|---|
 | magic | char[4] | 4 | `"RRSF"` |
 | version | u16 | 2 | `1` |
-| reserved | u16 | 2 | `0` |
+| reserved | u16 | 2 | `bit0` = case-sensitive facet keys (field/category not lowercased); rest `0` |
 | fields | u32 | 4 | facet field count |
 | cats | u32 | 4 | total category count across all fields |
 | strBytes | u32 | 4 | length of the string blob |
@@ -70,8 +70,10 @@ docs still has a ≤ ~8 KB head, so filtering the visible top-K is cheap.
 ## key — `hash(field, category)`
 
 FNV-1a 64-bit over the bytes of `lower(field)`, then `0x1f`, then `lower(category)`
-(`lower` = Unicode lowercase). Offset `14695981039346656037`, prime
-`1099511628211`. Forward-compatible with the Phase-2 sparse-index-by-key; the
+(`lower` = Unicode lowercase). When the header's case-sensitive bit (`reserved bit0`) is set
+the field/category bytes are hashed **verbatim** (no `lower`), so `"Smith"` and `"smith"` get
+distinct keys; a split set's facet-presence pruning recomputes keys the same way. Offset
+`14695981039346656037`, prime `1099511628211`. Forward-compatible with the Phase-2 sparse-index-by-key; the
 Phase-1 sidecar reader resolves a selection by **name** (it holds the whole category
 table in memory), so the key is informational there.
 

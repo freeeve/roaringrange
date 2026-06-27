@@ -33,6 +33,10 @@ const (
 	rrtiVersion       = 2
 	termFlagStemmed   = 1
 	termFlagStopwords = 2
+	// termFlagCaseSensitive marks an index whose terms were NOT lowercased, so queries
+	// must skip lowercasing too. Unset (the default) keeps every index byte-identical.
+	// Mirrors the Rust terms::FLAG_CASE_SENSITIVE.
+	termFlagCaseSensitive = 4
 	// defaultDictBlockCap is the dict block byte cap when the caller passes 0
 	// (== the Rust DEFAULT_DICT_BLOCK_CAP).
 	defaultDictBlockCap = 4096
@@ -95,13 +99,26 @@ func appendLowerRune(dst []rune, r rune) []rune {
 
 // TermTokenize is the base RRTI tokenizer (no stemming / stop words): maximal
 // runs of Rust-alphanumeric runes, lowercased with the full per-rune mapping.
-// Mirrors the Rust terms::tokenize.
+// Mirrors the Rust terms::tokenize. Equivalent to TermTokenizeWith with case
+// folding on (the default).
 func TermTokenize(text string) []string {
+	return TermTokenizeWith(text, true)
+}
+
+// TermTokenizeWith is the base tokenizer with an explicit case-fold flag. When
+// caseFold is false the token runes are kept verbatim (a case-sensitive index);
+// the boundary rule (maximal Rust-alphanumeric runs) is unchanged. Mirrors the
+// Rust terms::tokenize_with.
+func TermTokenizeWith(text string, caseFold bool) []string {
 	var tokens []string
 	var cur []rune
 	for _, r := range text {
 		if isRustAlphanumeric(r) {
-			cur = appendLowerRune(cur, r)
+			if caseFold {
+				cur = appendLowerRune(cur, r)
+			} else {
+				cur = append(cur, r)
+			}
 		} else if len(cur) > 0 {
 			tokens = append(tokens, string(cur))
 			cur = cur[:0]
@@ -120,20 +137,29 @@ func TermTokenize(text string) []string {
 type TermTokenizer struct {
 	stem      *stemmers.Stemmer
 	stopwords bool
+	caseFold  bool
 }
 
-// NewTermTokenizer builds the chain for the given language / stop-word setting.
+// NewTermTokenizer builds the chain for the given language / stop-word setting, with
+// case folding on (the default). Mirrors the Rust Tokenizer::new(.., true).
 func NewTermTokenizer(lang TermLanguage, stopwords bool) *TermTokenizer {
+	return NewTermTokenizerWith(lang, stopwords, true)
+}
+
+// NewTermTokenizerWith builds the chain with an explicit case-fold flag. caseFold of
+// false keeps token case verbatim (a case-sensitive index), recorded in the header so
+// queries reconstruct an identical tokenizer.
+func NewTermTokenizerWith(lang TermLanguage, stopwords, caseFold bool) *TermTokenizer {
 	var st *stemmers.Stemmer
 	if lang == TermLanguageEnglish {
 		st = stemmers.New(stemmers.English)
 	}
-	return &TermTokenizer{stem: st, stopwords: stopwords}
+	return &TermTokenizer{stem: st, stopwords: stopwords, caseFold: caseFold}
 }
 
 // Tokenize applies the full chain to text.
 func (t *TermTokenizer) Tokenize(text string) []string {
-	base := TermTokenize(text)
+	base := TermTokenizeWith(text, t.caseFold)
 	out := base[:0]
 	for _, tok := range base {
 		if t.stopwords && isTermStopWord(tok) {
@@ -259,6 +285,14 @@ func (w *dictBlockWriter) finish() []dictBlock {
 // multiple of 65536); language/stopwords are recorded in the header so the
 // reader tokenizes queries identically; blockCap of 0 takes the default.
 func WriteTermIndex(dst io.Writer, postings map[string]*roaring.Bitmap, headBoundary uint32, lang TermLanguage, stopwords bool, blockCap int) error {
+	return WriteTermIndexWith(dst, postings, headBoundary, lang, stopwords, true, blockCap)
+}
+
+// WriteTermIndexWith is WriteTermIndex with an explicit caseNormalization flag. true (the
+// default) lowercases nothing differently and writes a byte-identical header; false records
+// the case-sensitive flag (termFlagCaseSensitive) so the reader skips query-side folding. The
+// caller must have tokenized postings with the matching case mode.
+func WriteTermIndexWith(dst io.Writer, postings map[string]*roaring.Bitmap, headBoundary uint32, lang TermLanguage, stopwords, caseNormalization bool, blockCap int) error {
 	terms := make([]string, 0, len(postings))
 	for t := range postings {
 		terms = append(terms, t)
@@ -315,6 +349,9 @@ func WriteTermIndex(dst io.Writer, postings map[string]*roaring.Bitmap, headBoun
 	}
 	if stopwords {
 		flags |= termFlagStopwords
+	}
+	if !caseNormalization {
+		flags |= termFlagCaseSensitive
 	}
 	capUsed := blockCap
 	if capUsed == 0 {

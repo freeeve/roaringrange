@@ -44,6 +44,7 @@ fn rrhc_bundle_boots_a_split_set() {
         name_prefix: "corpus".to_string(),
         sortcol: None,
         bloom_bits_per_key: 10,
+        case_sensitive: false,
     });
     for i in 0..30u32 {
         b.add_text(&format!("abc tok{i:04}")).unwrap();

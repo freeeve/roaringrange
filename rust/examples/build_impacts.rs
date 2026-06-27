@@ -150,7 +150,7 @@ type ChunkMap = BTreeMap<Vec<u8>, Vec<(u32, u8)>>;
 /// worker and merges in batch order, so per-term doc lists ascend by construction.
 fn spill_chunk(
     store: &RecordStore<FileFetch>,
-    spec: (Option<roaringrange::Language>, bool),
+    spec: (Option<roaringrange::Language>, bool, bool),
     lo: u32,
     hi: u32,
 ) -> (ChunkMap, Vec<u32>) {
@@ -173,7 +173,7 @@ fn spill_chunk(
         let tokenized: Vec<(u32, Vec<DocTf>)> = batches
             .into_par_iter()
             .map_init(
-                || Tokenizer::new(spec.0, spec.1),
+                || Tokenizer::new(spec.0, spec.1, spec.2),
                 |tok, (base, recs)| {
                     let per_doc = recs
                         .into_iter()
@@ -491,6 +491,7 @@ fn selftest() {
         head_boundary: 65536,
         language: None,
         stopwords: false,
+        case_sensitive: false,
         block_cap: 0,
     };
     let mut tb = TermIndexBuilder::new(&cfg);

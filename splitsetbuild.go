@@ -42,6 +42,12 @@ type SplitBuildConfig struct {
 	NamePrefix      string       // split filenames: ‹prefix›-s00000.rrs, ...
 	SortCol         *SortColSpec // stable-key rank source, or nil
 	BloomBitsPerKey uint32       // per-split term Bloom bits/key (0 disables)
+	// CaseSensitive builds a case-sensitive split set: n-gram and facet keys are NOT
+	// lowercased (v4 RRS splits, case-sensitive RRSF keys, the manifest's case-sensitive
+	// flag). The zero value (false) is the default case-folding behavior, byte-identical to
+	// before. (This is the inverse of the Rust SplitBuildConfig.case_normalization field; Go
+	// uses the zero-value-safe inverse so existing configs are unaffected.)
+	CaseSensitive bool
 }
 
 // capFor is the byte cap for the split at seal index tier: the flat ByteCap when
@@ -114,7 +120,7 @@ func NewSplitSetBuilder(cfg SplitBuildConfig) *SplitSetBuilder {
 // AddText tokenizes text into n-gram keys and appends it as one document, returning
 // its global doc id.
 func (b *SplitSetBuilder) AddText(text string) (uint32, error) {
-	return b.addInner(NgramKeys(text, int(b.cfg.GramSize)), nil)
+	return b.addInner(NgramKeysWith(text, int(b.cfg.GramSize), !b.cfg.CaseSensitive), nil)
 }
 
 // AddKeys appends one document by its (deduplicated) n-gram keys, returning its
@@ -128,7 +134,7 @@ func (b *SplitSetBuilder) AddKeys(keys []uint64) (uint32, error) {
 // sealed split then gets its own RRSF facet sidecar plus a facet-presence summary, so a
 // facet-filtered query can skip a split lacking a selected category. Returns the global id.
 func (b *SplitSetBuilder) AddFaceted(text string, facets map[string][]string) (uint32, error) {
-	return b.addInner(NgramKeys(text, int(b.cfg.GramSize)), facets)
+	return b.addInner(NgramKeysWith(text, int(b.cfg.GramSize), !b.cfg.CaseSensitive), facets)
 }
 
 // addInner is the shared add path: the seal decision (text estimate only — facets live in a
@@ -211,7 +217,7 @@ func (b *SplitSetBuilder) seal() error {
 		entries = append(entries, indexEntry{key: k, posting: posting})
 	}
 	var buf bytes.Buffer
-	if err := writeIndex(&buf, b.cfg.GramSize, b.stride, entries); err != nil {
+	if err := writeIndexWith(&buf, b.cfg.GramSize, b.stride, entries, !b.cfg.CaseSensitive); err != nil {
 		return err
 	}
 
@@ -232,9 +238,9 @@ func (b *SplitSetBuilder) seal() error {
 	// Per-split facet sidecar (RRSF) + facet-presence summary (tag 2), when the split holds facets.
 	// Order matches Rust: the Bloom record (tag 1) first, then the facet-presence record (tag 2).
 	if len(b.openFacets) > 0 {
-		summary = append(summary, tlvRecord(summaryTagFacet, facetPresence(b.openFacets))...)
+		summary = append(summary, tlvRecord(summaryTagFacet, facetPresence(b.openFacets, !b.cfg.CaseSensitive))...)
 		var fbuf bytes.Buffer
-		if err := WriteFacets(&fbuf, openFacetFields(b.openFacets)); err != nil {
+		if err := WriteFacetsWith(&fbuf, openFacetFields(b.openFacets), !b.cfg.CaseSensitive); err != nil {
 			return err
 		}
 		b.facetBlobs = append(b.facetBlobs, NamedSplit{
@@ -267,11 +273,11 @@ func (b *SplitSetBuilder) seal() error {
 // facetPresence builds the facet-presence summary payload: [count u32 LE][key u64 LE]*, the
 // sorted, deduplicated FacetKeys of the categories present in the open split. Mirrors the Rust
 // facet_presence.
-func facetPresence(facets map[string]map[string]*roaring.Bitmap) []byte {
+func facetPresence(facets map[string]map[string]*roaring.Bitmap, caseFold bool) []byte {
 	var keys []uint64
 	for field, cats := range facets {
 		for cat := range cats {
-			keys = append(keys, FacetKey(field, cat))
+			keys = append(keys, FacetKeyWith(field, cat, caseFold))
 		}
 	}
 	slices.Sort(keys)
@@ -339,6 +345,9 @@ func (b *SplitSetBuilder) Finish() (*BuiltSplitSet, error) {
 	}
 	if b.hasFacets {
 		flags |= SplitSetFlagFacet
+	}
+	if b.cfg.CaseSensitive {
+		flags |= SplitSetFlagCaseSensitive
 	}
 	config := SplitSetConfig{
 		Policy:    b.cfg.Policy,

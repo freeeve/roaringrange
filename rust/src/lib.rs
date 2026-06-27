@@ -104,7 +104,7 @@ pub use fetch::FileFetch;
 pub use fetch::{FetchError, MemoryFetch, RangeFetch};
 pub use index::{Index, IndexError, ResolvedFilter, SearchCursor};
 pub use lookup::Lookup;
-pub use ngram::ngram_keys;
+pub use ngram::{ngram_keys, ngram_keys_with};
 pub use records::RecordStore;
 pub use secondary::{SecondaryCursor, SecondaryIndex};
 pub use sortcols::{ColInfo, SortCols, Value, ValueType};
@@ -127,7 +127,7 @@ pub use bm25::{search_bm25, search_bm25_min_match, ImpactIndex, ScoredDoc};
 #[cfg(all(feature = "terms", not(target_arch = "wasm32")))]
 pub use bm25::{write_impacts, ImpactsAccumulator};
 #[cfg(feature = "terms")]
-pub use terms::{tokenize, Language, TermIndex, Tokenizer};
+pub use terms::{tokenize, tokenize_with, Language, TermIndex, Tokenizer};
 #[cfg(all(feature = "terms", not(target_arch = "wasm32")))]
 pub use terms_build::{
     write_term_index, write_term_index_with, TermIndexBuilder, TermIndexConfig,

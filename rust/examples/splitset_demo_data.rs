@@ -68,6 +68,7 @@ fn main() {
         name_prefix: "demo".to_string(),
         sortcol: None,
         bloom_bits_per_key: 10,
+        case_sensitive: false,
     });
 
     for i in 0..n {

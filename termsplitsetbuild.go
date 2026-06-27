@@ -35,6 +35,12 @@ type TermSplitBuildConfig struct {
 	SortCol      *SortColSpec // stable-key rank source, or nil
 	Language     TermLanguage // Snowball stemmer; TermLanguageNone = unstemmed
 	Stopwords    bool         // remove common stop words (and from queries)
+	// CaseSensitive builds a case-sensitive term split set: terms and facet keys are NOT
+	// lowercased (each split's RRTI carries the case-sensitive flag, the RRSF keys are
+	// case-sensitive, and the manifest sets its case-sensitive flag). The zero value (false)
+	// is the default case-folding behavior, byte-identical to before. Inverse of the Rust
+	// TermSplitBuildConfig.case_normalization (Go uses the zero-value-safe inverse).
+	CaseSensitive bool
 }
 
 // TermSplitSetBuilder accumulates documents and seals them into byte-capped RRTI
@@ -64,7 +70,7 @@ func NewTermSplitSetBuilder(cfg TermSplitBuildConfig) *TermSplitSetBuilder {
 	return &TermSplitSetBuilder{
 		cfg:          cfg,
 		headBoundary: hb,
-		tok:          NewTermTokenizer(cfg.Language, cfg.Stopwords),
+		tok:          NewTermTokenizerWith(cfg.Language, cfg.Stopwords, !cfg.CaseSensitive),
 		open:         make(map[string]*roaring.Bitmap),
 		openFacets:   make(map[string]map[string]*roaring.Bitmap),
 	}
@@ -149,7 +155,7 @@ func (b *TermSplitSetBuilder) seal() error {
 		return nil
 	}
 	var buf bytes.Buffer
-	if err := WriteTermIndex(&buf, b.open, b.headBoundary, b.cfg.Language, b.cfg.Stopwords, 0); err != nil {
+	if err := WriteTermIndexWith(&buf, b.open, b.headBoundary, b.cfg.Language, b.cfg.Stopwords, !b.cfg.CaseSensitive, 0); err != nil {
 		return err
 	}
 
@@ -167,9 +173,9 @@ func (b *TermSplitSetBuilder) seal() error {
 	// for term bodies, matching Rust.
 	var summary []byte
 	if len(b.openFacets) > 0 {
-		summary = tlvRecord(summaryTagFacet, facetPresence(b.openFacets))
+		summary = tlvRecord(summaryTagFacet, facetPresence(b.openFacets, !b.cfg.CaseSensitive))
 		var fbuf bytes.Buffer
-		if err := WriteFacets(&fbuf, openFacetFields(b.openFacets)); err != nil {
+		if err := WriteFacetsWith(&fbuf, openFacetFields(b.openFacets), !b.cfg.CaseSensitive); err != nil {
 			return err
 		}
 		b.facetBlobs = append(b.facetBlobs, NamedSplit{
@@ -225,6 +231,9 @@ func (b *TermSplitSetBuilder) Finish() (*BuiltSplitSet, error) {
 	var flags uint16
 	if b.hasFacets {
 		flags |= SplitSetFlagFacet
+	}
+	if b.cfg.CaseSensitive {
+		flags |= SplitSetFlagCaseSensitive
 	}
 	config := SplitSetConfig{
 		Policy:    b.cfg.Policy,

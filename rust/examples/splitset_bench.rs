@@ -127,6 +127,7 @@ fn build(
         name_prefix: "bench".to_string(),
         sortcol: None,
         bloom_bits_per_key,
+        case_sensitive: false,
     });
     for d in docs {
         b.add_text(d).unwrap();

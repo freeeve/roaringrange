@@ -16,6 +16,14 @@ const (
 	// headerSize is the fixed RRS header size in bytes (v3): magic[4] + version[2] +
 	// gramSize[2] + ngrams[4] + stride[4]. v2's trailing headBoundary[4] is gone.
 	headerSize = 16
+	// VersionV4 is the RRS format version emitted only for a case-sensitive index: identical
+	// to v3 plus a trailing flags u16 at offset 16. Default (case-folding) builds stay v3.
+	VersionV4 = 4
+	// headerSizeV4 is the v4 header size (v3 header + a 2-byte flags field at offset 16).
+	headerSizeV4 = 18
+	// rrsiFlagCaseSensitive is the v4 flags bit 0: n-gram keys were not lowercased, so a query
+	// skips lowercasing too. Mirrors the Rust index::RRSI_FLAG_CASE_SENSITIVE.
+	rrsiFlagCaseSensitive = 1
 	// dictEntry is the size of one v3 RRS dictionary entry in bytes:
 	// key(8) + offset(8) + size(4).
 	dictEntry = 20
@@ -138,17 +146,36 @@ func splitBitmapHB(bm *roaring.Bitmap, headBoundary uint32) (head, tail []byte, 
 // writeIndex emits the v3 RRS header, sparse index, dictionary, and postings (one bitmap per
 // term) for the given key-sorted entries — the build-side mirror of the Rust build::write_index.
 func writeIndex(dst io.Writer, gramSize uint16, stride int, entries []indexEntry) error {
+	return writeIndexWith(dst, gramSize, stride, entries, true)
+}
+
+// writeIndexWith is writeIndex with an explicit caseNormalization flag. true (the default)
+// emits a v3 header byte-identical to before; false emits a v4 header with a trailing flags
+// field marking the index case-sensitive. The caller must key entries with the matching case
+// mode (NgramKeysWith). Mirrors the Rust build::write_index_with.
+func writeIndexWith(dst io.Writer, gramSize uint16, stride int, entries []indexEntry, caseNormalization bool) error {
 	n := len(entries)
 	sparseCount := (n + stride - 1) / stride
-	dictStart := headerSize + sparseCount*8
+	hdrSize := headerSize
+	if !caseNormalization {
+		hdrSize = headerSizeV4
+	}
+	dictStart := hdrSize + sparseCount*8
 	postingsStart := dictStart + n*dictEntry
 
-	header := make([]byte, headerSize)
+	header := make([]byte, hdrSize)
 	copy(header[0:4], Magic)
-	binary.LittleEndian.PutUint16(header[4:6], Version)
+	version := Version
+	if !caseNormalization {
+		version = VersionV4
+	}
+	binary.LittleEndian.PutUint16(header[4:6], uint16(version))
 	binary.LittleEndian.PutUint16(header[6:8], gramSize)
 	binary.LittleEndian.PutUint32(header[8:12], uint32(n))
 	binary.LittleEndian.PutUint32(header[12:16], uint32(stride))
+	if !caseNormalization {
+		binary.LittleEndian.PutUint16(header[16:18], rrsiFlagCaseSensitive)
+	}
 	if _, err := dst.Write(header); err != nil {
 		return err
 	}

@@ -26,6 +26,13 @@ type IndexEntry struct {
 // the caller need not pre-sort), and a stride of zero or less becomes DefaultStride. Each
 // posting must be one portable RoaringBitmap (see roaring.Bitmap.ToBytes). See FORMAT.md.
 func WriteIndex(dst io.Writer, gramSize uint16, stride int, entries []IndexEntry) error {
+	return WriteIndexWith(dst, gramSize, stride, entries, true)
+}
+
+// WriteIndexWith is WriteIndex with an explicit caseNormalization flag. true (the default)
+// emits a v3 index byte-identical to before; false emits a case-sensitive v4 index (the caller
+// must have keyed entries with NgramKeysWith(.., false)). Mirrors the Rust build::write_index_with.
+func WriteIndexWith(dst io.Writer, gramSize uint16, stride int, entries []IndexEntry, caseNormalization bool) error {
 	if stride <= 0 {
 		stride = DefaultStride
 	}
@@ -34,7 +41,7 @@ func WriteIndex(dst io.Writer, gramSize uint16, stride int, entries []IndexEntry
 		priv[i] = indexEntry{key: e.Key, posting: e.Posting}
 	}
 	sort.Slice(priv, func(i, j int) bool { return priv[i].key < priv[j].key })
-	return writeIndex(dst, gramSize, stride, priv)
+	return writeIndexWith(dst, gramSize, stride, priv, caseNormalization)
 }
 
 // TrigramMonolithBuilder accumulates trigram postings over a whole corpus into a single v3
@@ -46,13 +53,22 @@ func WriteIndex(dst io.Writer, gramSize uint16, stride int, entries []IndexEntry
 type TrigramMonolithBuilder struct {
 	gramSize uint16
 	stride   int
+	caseFold bool
 	open     map[uint64]*roaring.Bitmap
 	nextID   uint32
 }
 
 // NewTrigramMonolithBuilder opens a monolith builder for the given trigram size and sparse
-// stride. A gramSize of zero defaults to 3; a stride of zero or less to DefaultStride.
+// stride, with case folding on (the default). A gramSize of zero defaults to 3; a stride of
+// zero or less to DefaultStride.
 func NewTrigramMonolithBuilder(gramSize uint16, stride int) *TrigramMonolithBuilder {
+	return NewTrigramMonolithBuilderWith(gramSize, stride, false)
+}
+
+// NewTrigramMonolithBuilderWith opens a monolith builder; when caseSensitive is true the
+// trigram keys are not lowercased and Write emits a case-sensitive v4 index. caseSensitive
+// false reproduces the default (case-folding) behavior byte-for-byte.
+func NewTrigramMonolithBuilderWith(gramSize uint16, stride int, caseSensitive bool) *TrigramMonolithBuilder {
 	if gramSize == 0 {
 		gramSize = 3
 	}
@@ -62,6 +78,7 @@ func NewTrigramMonolithBuilder(gramSize uint16, stride int) *TrigramMonolithBuil
 	return &TrigramMonolithBuilder{
 		gramSize: gramSize,
 		stride:   stride,
+		caseFold: !caseSensitive,
 		open:     make(map[uint64]*roaring.Bitmap),
 	}
 }
@@ -69,7 +86,7 @@ func NewTrigramMonolithBuilder(gramSize uint16, stride int) *TrigramMonolithBuil
 // AddText tokenizes text into gramSize-gram trigram keys and indexes them under the next doc
 // ID, returning that ID. Mirrors SplitSetBuilder.AddText.
 func (b *TrigramMonolithBuilder) AddText(text string) uint32 {
-	return b.AddKeys(NgramKeys(text, int(b.gramSize)))
+	return b.AddKeys(NgramKeysWith(text, int(b.gramSize), b.caseFold))
 }
 
 // AddKeys indexes the given trigram keys under the next doc ID and returns that ID. An empty
@@ -102,5 +119,5 @@ func (b *TrigramMonolithBuilder) Write(dst io.Writer) error {
 		}
 		entries = append(entries, IndexEntry{Key: k, Posting: posting})
 	}
-	return WriteIndex(dst, b.gramSize, b.stride, entries)
+	return WriteIndexWith(dst, b.gramSize, b.stride, entries, b.caseFold)
 }

@@ -103,6 +103,7 @@ fn main() {
         sortcol: None,
         language,
         stopwords: false,
+        case_sensitive: false,
     });
 
     // Chunk size trades parallelism against the rayon fan-out's transient memory (one batch of

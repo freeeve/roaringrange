@@ -24,24 +24,39 @@ const HEADER_SIZE: usize = 24;
 const FNV_OFFSET64: u64 = 14695981039346656037;
 const FNV_PRIME64: u64 = 1099511628211;
 
-/// Derives the facet category key: FNV-1a 64-bit over `lower(field)`, a `0x1f` separator byte,
-/// then `lower(category)`. Mirrors Go `FacetKey` (see `FACETS.md`). Used by the build side
-/// (`RRSF` category table) and by the split-set reader's facet-presence pruning, so it lives
-/// here in the wasm-safe reader rather than the native builder.
-pub(crate) fn facet_key(field: &str, category: &str) -> u64 {
-    let mut h = FNV_OFFSET64;
-    for b in field.to_lowercase().bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(FNV_PRIME64);
+/// Derives the facet category key: FNV-1a 64-bit over `field`, a `0x1f` separator byte, then
+/// `category`. When `case_fold` (the default) each part is lowercased first (`lower(field)` /
+/// `lower(category)`), reproducing the historical key; with `case_fold` false the raw bytes are
+/// hashed so a case-sensitive index keeps `"Smith"` and `"smith"` on distinct keys. Mirrors Go
+/// `FacetKey` (see `FACETS.md`). Used by the build side (`RRSF` category table) and by the
+/// split-set reader's facet-presence pruning, so it lives here in the wasm-safe reader rather
+/// than the native builder; both pass the index's case mode so the keys agree.
+pub(crate) fn facet_key(field: &str, category: &str, case_fold: bool) -> u64 {
+    fn mix(mut h: u64, s: &str, case_fold: bool) -> u64 {
+        if case_fold {
+            for b in s.to_lowercase().bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(FNV_PRIME64);
+            }
+        } else {
+            for &b in s.as_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(FNV_PRIME64);
+            }
+        }
+        h
     }
+    let mut h = mix(FNV_OFFSET64, field, case_fold);
     h ^= 0x1f;
     h = h.wrapping_mul(FNV_PRIME64);
-    for b in category.to_lowercase().bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(FNV_PRIME64);
-    }
-    h
+    mix(h, category, case_fold)
 }
+
+/// `RRSF` header bit (in the `reserved` u16 at offset 6): the sidecar's facet keys are
+/// case-sensitive — field/category were not lowercased, so a split-set recomputes pruning keys
+/// without folding. Unset (the default) keeps every existing sidecar byte-identical. Mirrors
+/// the manifest's case-sensitive flag and `index::RRSI_FLAG_CASE_SENSITIVE`.
+pub(crate) const RRSF_FLAG_CASE_SENSITIVE: u16 = 1;
 /// Field-table entry size: nameOff(4) + nameLen(2) + pad(2) + catStart(4) + catCount(4).
 const FIELD_ENTRY: usize = 16;
 /// Category-table entry size: key(8) + headOff(8) + headSize(4) + tailSize(4) +

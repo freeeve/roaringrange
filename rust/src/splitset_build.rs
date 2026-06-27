@@ -10,14 +10,14 @@
 //! splits produce.
 
 use crate::build::{
-    serialize_posting, split_posting, write_facets, write_index, FacetCategory, FacetField,
-    DEFAULT_HEAD_BOUNDARY, DEFAULT_STRIDE,
+    serialize_posting, split_posting, write_facets_with, write_index_with, FacetCategory,
+    FacetField, DEFAULT_HEAD_BOUNDARY, DEFAULT_STRIDE,
 };
 use crate::facet::facet_key;
-use crate::ngram::ngram_keys;
+use crate::ngram::ngram_keys_with;
 use crate::splitset::{
-    bloom_build, tlv_record, BodyKind, Policy, FLAG_BLOOM, FLAG_FACET, SORTCOL_FLAG_DESCENDING,
-    SUMMARY_TAG_BLOOM, SUMMARY_TAG_FACET,
+    bloom_build, tlv_record, BodyKind, Policy, FLAG_BLOOM, FLAG_CASE_SENSITIVE, FLAG_FACET,
+    SORTCOL_FLAG_DESCENDING, SUMMARY_TAG_BLOOM, SUMMARY_TAG_FACET,
 };
 #[cfg(feature = "terms")]
 use crate::terms::{Language, Tokenizer};
@@ -291,6 +291,7 @@ pub(crate) fn conformance_build() -> BuiltSplitSet {
         name_prefix: "corpus".to_string(),
         sortcol: None,
         bloom_bits_per_key: 8,
+        case_sensitive: false,
     });
     for (text, facets) in docs {
         let pairs: Vec<(String, String)> = facets
@@ -323,6 +324,7 @@ pub(crate) fn geo_conformance_build() -> BuiltSplitSet {
         name_prefix: "geo".to_string(),
         sortcol: None,
         bloom_bits_per_key: 8,
+        case_sensitive: false,
     });
     for i in 0..24 {
         let text = format!(
@@ -338,11 +340,14 @@ pub(crate) fn geo_conformance_build() -> BuiltSplitSet {
 
 /// Builds the facet-presence summary payload: `[count u32 LE][key u64 LE]*`, the sorted,
 /// deduplicated `facet_key`s of the categories present in `facets`.
-fn facet_presence(facets: &BTreeMap<String, BTreeMap<String, RoaringBitmap>>) -> Vec<u8> {
+fn facet_presence(
+    facets: &BTreeMap<String, BTreeMap<String, RoaringBitmap>>,
+    case_fold: bool,
+) -> Vec<u8> {
     let mut keys: Vec<u64> = Vec::new();
     for (field, cats) in facets {
         for cat in cats.keys() {
-            keys.push(facet_key(field, cat));
+            keys.push(facet_key(field, cat, case_fold));
         }
     }
     keys.sort_unstable();
@@ -431,6 +436,11 @@ pub struct SplitBuildConfig {
     /// ~1% false-positive rate. The filters live in the manifest's summary blob, so larger
     /// values grow the manifest.
     pub bloom_bits_per_key: u32,
+    /// Build a **case-sensitive** split set: n-gram and facet keys are not lowercased at index
+    /// or query time (v4 `RRS` splits, case-sensitive `RRSF` keys, and the manifest's
+    /// case-sensitive flag). The default (`false`) case-folds, reproducing the historical
+    /// byte-identical behavior.
+    pub case_sensitive: bool,
 }
 
 /// A list of emitted files as `(filename, bytes)` — split `RRS` blobs or facet `RRSF` sidecars.
@@ -470,6 +480,7 @@ pub struct SplitSetBuilder {
     name_prefix: String,
     sortcol: Option<SortColSpec>,
     bloom_bits_per_key: u32,
+    case_normalization: bool,
     /// The open split's postings, keyed by n-gram, holding local 0-based doc IDs.
     open: BTreeMap<u64, RoaringBitmap>,
     /// Number of docs (incl. keyword-less ones) in the open split — its local-id count.
@@ -540,6 +551,7 @@ impl SplitSetBuilder {
             name_prefix: config.name_prefix,
             sortcol: config.sortcol,
             bloom_bits_per_key: config.bloom_bits_per_key,
+            case_normalization: !config.case_sensitive,
             open: BTreeMap::new(),
             open_count: 0,
             global_base: 0,
@@ -556,7 +568,7 @@ impl SplitSetBuilder {
     /// Tokenizes `text` into n-gram keys and appends it as one document — the convenience
     /// over [`add_keys`](Self::add_keys). Returns the doc's global id.
     pub fn add_text(&mut self, text: &str) -> io::Result<u32> {
-        let keys = ngram_keys(text, self.gram_size as usize);
+        let keys = ngram_keys_with(text, self.gram_size as usize, self.case_normalization);
         self.add_inner(&keys, &[])
     }
 
@@ -565,7 +577,7 @@ impl SplitSetBuilder {
     /// and the manifest carries a per-split facet-presence summary so a facet-filtered query
     /// can skip a split that holds none of a selected field's categories. Returns the global id.
     pub fn add_faceted(&mut self, text: &str, facets: &[(String, String)]) -> io::Result<u32> {
-        let keys = ngram_keys(text, self.gram_size as usize);
+        let keys = ngram_keys_with(text, self.gram_size as usize, self.case_normalization);
         self.add_inner(&keys, facets)
     }
 
@@ -641,7 +653,13 @@ impl SplitSetBuilder {
             .map(|(k, bm)| (*k, serialize_posting(bm)))
             .collect();
         let mut bytes = Vec::new();
-        write_index(&mut bytes, self.gram_size, self.stride, entries)?;
+        write_index_with(
+            &mut bytes,
+            self.gram_size,
+            self.stride,
+            entries,
+            self.case_normalization,
+        )?;
 
         let idx = self.specs.len();
         let name = format!("{}-s{idx:05}.rrs", self.name_prefix);
@@ -665,13 +683,14 @@ impl SplitSetBuilder {
         if !open_facets.is_empty() {
             summary.extend_from_slice(&tlv_record(
                 SUMMARY_TAG_FACET,
-                &facet_presence(&open_facets),
+                &facet_presence(&open_facets, self.case_normalization),
             ));
             let facet_name = format!("{}-s{idx:05}.rrf", self.name_prefix);
             let mut facet_bytes = Vec::new();
-            write_facets(
+            write_facets_with(
                 &mut facet_bytes,
                 facet_fields(open_facets, self.head_boundary),
+                self.case_normalization,
             )?;
             self.facet_blobs.push((facet_name, facet_bytes));
         }
@@ -739,6 +758,9 @@ impl SplitSetBuilder {
         if self.has_facets {
             flags |= FLAG_FACET;
         }
+        if !self.case_normalization {
+            flags |= FLAG_CASE_SENSITIVE;
+        }
         let config = SplitSetConfig {
             policy: self.policy,
             tier_count,
@@ -786,6 +808,10 @@ pub struct TermSplitBuildConfig {
     pub language: Option<Language>,
     /// Remove common stop words from the index (and, symmetrically, from queries).
     pub stopwords: bool,
+    /// Build a **case-sensitive** split set: terms are not lowercased at index or query time
+    /// (each split's `RRTI`/`RRSF` records the choice). The default (`false`) case-folds,
+    /// reproducing the historical byte-identical behavior.
+    pub case_sensitive: bool,
 }
 
 /// Bytes charged per new term: the posting block base (`[tail_size u32][head roaring base]`) plus
@@ -823,6 +849,7 @@ pub struct TermSplitSetBuilder {
     sortcol: Option<SortColSpec>,
     language: Option<Language>,
     stopwords: bool,
+    case_normalization: bool,
     /// The resident tokenizer (fixed at construction); query-side tokenization must match it.
     tokenizer: Tokenizer,
     /// The open split's postings, keyed by term, holding local 0-based doc IDs.
@@ -864,7 +891,8 @@ impl TermSplitSetBuilder {
             sortcol: config.sortcol,
             language: config.language,
             stopwords: config.stopwords,
-            tokenizer: Tokenizer::new(config.language, config.stopwords),
+            case_normalization: !config.case_sensitive,
+            tokenizer: Tokenizer::new(config.language, config.stopwords, !config.case_sensitive),
             open: BTreeMap::new(),
             open_count: 0,
             global_base: 0,
@@ -954,6 +982,7 @@ impl TermSplitSetBuilder {
             self.head_boundary,
             self.language,
             self.stopwords,
+            self.case_normalization,
             0, // default dictionary block cap
         )?;
 
@@ -969,13 +998,14 @@ impl TermSplitSetBuilder {
         if !open_facets.is_empty() {
             summary.extend_from_slice(&tlv_record(
                 SUMMARY_TAG_FACET,
-                &facet_presence(&open_facets),
+                &facet_presence(&open_facets, self.case_normalization),
             ));
             let facet_name = format!("{}-s{idx:05}.rrf", self.name_prefix);
             let mut facet_bytes = Vec::new();
-            write_facets(
+            write_facets_with(
                 &mut facet_bytes,
                 facet_fields(open_facets, self.head_boundary),
+                self.case_normalization,
             )?;
             self.facet_blobs.push((facet_name, facet_bytes));
         }
@@ -1034,6 +1064,9 @@ impl TermSplitSetBuilder {
         let mut flags = 0u16;
         if self.has_facets {
             flags |= FLAG_FACET;
+        }
+        if !self.case_normalization {
+            flags |= FLAG_CASE_SENSITIVE;
         }
         let config = SplitSetConfig {
             policy: self.policy,
@@ -1116,6 +1149,42 @@ pub(crate) fn term_conformance_build() -> BuiltSplitSet {
         sortcol: None,
         language: Some(Language::English),
         stopwords: true,
+        case_sensitive: false,
+    });
+    for (text, facets) in docs {
+        let pairs: Vec<(String, String)> = facets
+            .iter()
+            .map(|(f, c)| (f.to_string(), c.to_string()))
+            .collect();
+        b.add_faceted(text, &pairs).unwrap();
+    }
+    b.finish().unwrap()
+}
+
+/// The **case-sensitive** term-split fixture (task 054): a mixed-case corpus with mixed-case
+/// facet category values, built with `case_sensitive: true` (and no stemming/stop-words,
+/// to isolate case). "Roaring"/"roaring", "Bitmap"/"bitmap", and the "A"/"a", "B"/"b" categories
+/// stay distinct, so each split's `RRTI` carries the case-sensitive flag, the `RRSF` keys are
+/// case-sensitive, and the manifest sets its case-sensitive flag. Shared with Go's
+/// `termConformanceCaseSensitiveBuild` via `go/testdata/rrti_term_split_cs_golden.txt`.
+#[cfg(all(test, feature = "terms"))]
+pub(crate) fn term_conformance_cs_build() -> BuiltSplitSet {
+    let docs: [(&str, &[(&str, &str)]); 4] = [
+        ("Roaring Range Index", &[("Kind", "A")]),
+        ("roaring range query", &[("Kind", "a")]),
+        ("Bitmap BITMAP Index", &[("Kind", "B")]),
+        ("bitmap index lookup", &[("Kind", "b")]),
+    ];
+    let mut b = TermSplitSetBuilder::new(TermSplitBuildConfig {
+        byte_cap_max: 0,
+        policy: Policy::Tiered,
+        byte_cap: 400, // small enough to seal several tiers, large enough for a single doc
+        head_boundary: 0,
+        name_prefix: "cscorpus".to_string(),
+        sortcol: None,
+        language: None,
+        stopwords: false,
+        case_sensitive: true,
     });
     for (text, facets) in docs {
         let pairs: Vec<(String, String)> = facets
@@ -1278,6 +1347,63 @@ mod term_conformance {
         );
         std::fs::write(path, super::golden_text(&built)).expect("write shared term golden");
     }
+
+    use super::term_conformance_cs_build;
+
+    fn cs_golden() -> HashMap<String, Vec<u8>> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/rrti_term_split_cs_golden.txt"
+        );
+        let text = std::fs::read_to_string(path).expect("read shared term cs golden");
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let (name, hex) = l.split_once(' ').expect("`name <hex>` line");
+                let bytes = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                    .collect::<Vec<u8>>();
+                (name.to_string(), bytes)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn term_split_cs_build_matches_shared_golden() {
+        let g = cs_golden();
+        let built = term_conformance_cs_build();
+        assert_eq!(
+            &built.manifest,
+            g.get("manifest").expect("cs manifest golden present"),
+            "case-sensitive term RRSS manifest drifted from the shared golden"
+        );
+        for (name, bytes) in built.splits.iter().chain(built.facets.iter()) {
+            assert_eq!(
+                bytes,
+                g.get(name)
+                    .unwrap_or_else(|| panic!("no cs golden for {name}")),
+                "{name} bytes drifted from the shared cs golden"
+            );
+        }
+        assert_eq!(
+            g.len(),
+            1 + built.splits.len() + built.facets.len(),
+            "cs term golden entry count drifted"
+        );
+    }
+
+    /// Regenerate with `cargo test --features "splits terms" regen_term_split_cs_golden -- --ignored`.
+    #[test]
+    #[ignore]
+    fn regen_term_split_cs_golden() {
+        let built = term_conformance_cs_build();
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/rrti_term_split_cs_golden.txt"
+        );
+        std::fs::write(path, super::golden_text(&built)).expect("write shared term cs golden");
+    }
 }
 
 /// Geometric-cap conformance: the doubling seal boundaries shared with Go.
@@ -1326,6 +1452,7 @@ mod geo_conformance {
                 name_prefix: "geo".to_string(),
                 sortcol: None,
                 bloom_bits_per_key: 8,
+                case_sensitive: false,
             });
             for i in 0..24 {
                 let text = format!(

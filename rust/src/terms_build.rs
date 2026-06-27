@@ -7,7 +7,7 @@
 //! only the dictionary (an FST keyed by whole term) is new.
 
 use crate::build::split_posting;
-use crate::terms::{Language, Tokenizer, FLAG_STEMMED, FLAG_STOPWORDS};
+use crate::terms::{Language, Tokenizer, FLAG_CASE_SENSITIVE, FLAG_STEMMED, FLAG_STOPWORDS};
 use crate::terms_dict::{pack_loc, BlockWriter, DEFAULT_DICT_BLOCK_CAP, SIZE_BITS};
 use fst::MapBuilder;
 use roaring::RoaringBitmap;
@@ -31,6 +31,11 @@ pub struct TermIndexConfig {
     pub language: Option<Language>,
     /// Remove common stop words from the index (and, symmetrically, from queries).
     pub stopwords: bool,
+    /// Build a **case-sensitive** index: terms are not lowercased at index or query time
+    /// (recorded in the header so the reader skips query-side folding too). The default
+    /// (`false`) case-folds, reproducing the historical behavior and keeping the output
+    /// byte-identical.
+    pub case_sensitive: bool,
     /// Dictionary block byte cap — the dictionary is partitioned into front-coded
     /// blocks sized for one cheap ranged GET. `0` selects the default
     /// (~[`DEFAULT_DICT_BLOCK_CAP`] bytes / a few hundred terms per block).
@@ -54,6 +59,7 @@ pub fn write_term_index<W: Write>(
             head_boundary,
             language: None,
             stopwords: false,
+            case_sensitive: false,
             block_cap: 0,
         },
     )
@@ -87,6 +93,7 @@ pub struct TermIndexBuilder {
     head_boundary: u32,
     language: Option<Language>,
     stopwords: bool,
+    case_normalization: bool,
     block_cap: usize,
 }
 
@@ -95,10 +102,11 @@ impl TermIndexBuilder {
     pub fn new(config: &TermIndexConfig) -> Self {
         TermIndexBuilder {
             postings: BTreeMap::new(),
-            tokenizer: Tokenizer::new(config.language, config.stopwords),
+            tokenizer: Tokenizer::new(config.language, config.stopwords, !config.case_sensitive),
             head_boundary: config.head_boundary,
             language: config.language,
             stopwords: config.stopwords,
+            case_normalization: !config.case_sensitive,
             block_cap: config.block_cap,
         }
     }
@@ -131,6 +139,7 @@ impl TermIndexBuilder {
             self.head_boundary,
             self.language,
             self.stopwords,
+            self.case_normalization,
             self.block_cap,
         )
     }
@@ -145,9 +154,9 @@ impl TermIndexBuilder {
 /// ([`crate::terms_dict`]) that the reader range-fetches one at a time; a small **router FST**
 /// maps each block's last term to its byte range, so only O(#blocks) — not O(vocab) — is
 /// resident. The postings region is byte-identical to v1. Doc IDs must be the shared rank-order
-/// IDs; `head_boundary` is the head/tail split; the tokenizer settings (`language`/`stopwords`)
-/// are recorded in the header so the reader tokenizes queries identically; `block_cap` is the
-/// dict block byte cap (`0` selects [`DEFAULT_DICT_BLOCK_CAP`]). Shared by
+/// IDs; `head_boundary` is the head/tail split; the tokenizer settings (`language`/`stopwords`/
+/// `case_normalization`) are recorded in the header so the reader tokenizes queries identically;
+/// `block_cap` is the dict block byte cap (`0` selects [`DEFAULT_DICT_BLOCK_CAP`]). Shared by
 /// [`TermIndexBuilder::finish`] and the split-set term builder.
 pub(crate) fn write_term_index_from_postings<W: Write>(
     w: W,
@@ -155,11 +164,18 @@ pub(crate) fn write_term_index_from_postings<W: Write>(
     head_boundary: u32,
     language: Option<Language>,
     stopwords: bool,
+    case_normalization: bool,
     block_cap: usize,
 ) -> io::Result<()> {
     let mut region: Vec<u8> = Vec::new();
-    let mut sw =
-        TermIndexStreamWriter::new(&mut region, head_boundary, language, stopwords, block_cap);
+    let mut sw = TermIndexStreamWriter::new(
+        &mut region,
+        head_boundary,
+        language,
+        stopwords,
+        case_normalization,
+        block_cap,
+    );
     for (term, bm) in postings {
         let (head, tail) = split_posting(&bm, head_boundary);
         sw.push(&term, &head, &tail)?;
@@ -190,6 +206,7 @@ pub struct TermIndexStreamWriter<W: Write> {
     head_boundary: u32,
     language: Option<Language>,
     stopwords: bool,
+    case_normalization: bool,
     block_cap: usize,
 }
 
@@ -201,6 +218,7 @@ impl<W: Write> TermIndexStreamWriter<W> {
         head_boundary: u32,
         language: Option<Language>,
         stopwords: bool,
+        case_normalization: bool,
         block_cap: usize,
     ) -> Self {
         TermIndexStreamWriter {
@@ -211,6 +229,7 @@ impl<W: Write> TermIndexStreamWriter<W> {
             head_boundary,
             language,
             stopwords,
+            case_normalization,
             block_cap,
         }
     }
@@ -296,14 +315,20 @@ impl<W: Write> TermIndexStreamWriter<W> {
             .into_inner()
             .map_err(|e| io::Error::other(format!("router fst finish: {e}")))?;
 
-        // Header (40 B): `flags` records the tokenizer (stemmed / stop-words); the
-        // first reserved byte (offset 36) carries the stemmer language so the reader
-        // rebuilds it. `routerLen`/`dictLen` locate the dict region and postings.
+        // Header (40 B): `flags` records the tokenizer (stemmed / stop-words /
+        // case-sensitive); the first reserved byte (offset 36) carries the stemmer
+        // language so the reader rebuilds it. `routerLen`/`dictLen` locate the dict
+        // region and postings.
         let flags = (if self.language.is_some() {
             FLAG_STEMMED
         } else {
             0
-        }) | (if self.stopwords { FLAG_STOPWORDS } else { 0 });
+        }) | (if self.stopwords { FLAG_STOPWORDS } else { 0 })
+            | (if self.case_normalization {
+                0
+            } else {
+                FLAG_CASE_SENSITIVE
+            });
         let block_cap_used = if self.block_cap == 0 {
             DEFAULT_DICT_BLOCK_CAP
         } else {

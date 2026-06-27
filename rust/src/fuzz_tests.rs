@@ -611,6 +611,7 @@ fn fuzz_rrss_split_search_no_panic() {
         name_prefix: "corpus".into(),
         sortcol: None,
         bloom_bits_per_key: 8,
+        case_sensitive: false,
     });
     for (text, facets) in docs {
         let pairs: Vec<(String, String)> = facets

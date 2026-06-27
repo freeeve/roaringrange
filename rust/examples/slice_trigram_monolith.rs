@@ -343,6 +343,7 @@ fn selftest() {
         name_prefix: "tg".to_string(),
         sortcol: None,
         bloom_bits_per_key: 0,
+        case_sensitive: false,
     });
     for d in &docs {
         b.add_text(d).unwrap();

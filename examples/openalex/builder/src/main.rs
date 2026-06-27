@@ -753,6 +753,7 @@ fn build_split_set(
             name_prefix: prefix.clone(),
             sortcol: None,
             bloom_bits_per_key: bloom_bits,
+            case_sensitive: false,
         })),
         SplitBody::Term => SplitBuilder::Term(TermSplitSetBuilder::new(TermSplitBuildConfig {
             policy: Policy::Tiered,
@@ -763,6 +764,7 @@ fn build_split_set(
             sortcol: None,
             language: stem.then_some(Language::English),
             stopwords,
+            case_sensitive: false,
         })),
     };
     let mut rec_w = RecordWriter::new(

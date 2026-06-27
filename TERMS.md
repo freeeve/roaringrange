@@ -33,7 +33,7 @@ All integers little-endian. Postings are standard **portable** RoaringBitmaps
 |---|---|---|---|
 | magic | char[4] | 4 | `"RRTI"` |
 | version | u16 | 2 | `2` |
-| flags | u16 | 2 | `bit0` = stemmed, `bit1` = stop-words removed; rest reserved (`0`) |
+| flags | u16 | 2 | `bit0` = stemmed, `bit1` = stop-words removed, `bit2` = case-sensitive (terms not lowercased, so queries skip lowercasing too); rest reserved (`0`) |
 | termCount | u32 | 4 | distinct terms in the dictionary |
 | headBoundary | u32 | 4 | doc-ID head/tail split — multiple of 65536, default 65536 |
 | routerLen | u64 | 8 | byte length of the router FST |

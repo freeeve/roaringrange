@@ -539,12 +539,13 @@ struct TermBuilder {
 #[pymethods]
 impl TermBuilder {
     #[new]
-    #[pyo3(signature = (head_boundary = None, language = None, stopwords = false, block_cap = None))]
+    #[pyo3(signature = (head_boundary = None, language = None, stopwords = false, block_cap = None, case_sensitive = false))]
     fn new(
         head_boundary: Option<u32>,
         language: Option<String>,
         stopwords: bool,
         block_cap: Option<usize>,
+        case_sensitive: bool,
     ) -> PyResult<Self> {
         let language = match language.as_deref() {
             None => None,
@@ -559,6 +560,7 @@ impl TermBuilder {
             language,
             stopwords,
             block_cap: block_cap.unwrap_or(0),
+            case_sensitive,
         };
         Ok(TermBuilder {
             inner: Some(TermIndexBuilder::new(&config)),
@@ -676,7 +678,7 @@ impl SplitSetBuilder {
     /// for the stable-key rank. `bloom_bits_per_key` sizes the per-split term Bloom filters
     /// (`0` disables; `~10` ≈ 1% false positives) — the biggest fan-out reducer for term queries.
     #[new]
-    #[pyo3(signature = (policy="tiered", byte_cap=33_554_432, gram_size=3, head_boundary=0, stride=0, name_prefix="split", sortcol=None, bloom_bits_per_key=10, byte_cap_max=0))]
+    #[pyo3(signature = (policy="tiered", byte_cap=33_554_432, gram_size=3, head_boundary=0, stride=0, name_prefix="split", sortcol=None, bloom_bits_per_key=10, byte_cap_max=0, case_sensitive=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         policy: &str,
@@ -688,6 +690,7 @@ impl SplitSetBuilder {
         sortcol: Option<(String, u16, bool)>,
         bloom_bits_per_key: u32,
         byte_cap_max: u64,
+        case_sensitive: bool,
     ) -> PyResult<Self> {
         let config = SplitBuildConfig {
             policy: parse_policy(policy)?,
@@ -699,6 +702,7 @@ impl SplitSetBuilder {
             name_prefix: name_prefix.to_string(),
             sortcol: sortcol_spec(sortcol),
             bloom_bits_per_key,
+            case_sensitive,
         };
         Ok(SplitSetBuilder {
             inner: Some(CoreSplitSetBuilder::new(config)),
@@ -789,7 +793,7 @@ struct TermSplitSetBuilder {
 #[pymethods]
 impl TermSplitSetBuilder {
     #[new]
-    #[pyo3(signature = (policy="tiered", byte_cap=33_554_432, head_boundary=0, name_prefix="split", sortcol=None, language=None, stopwords=false, byte_cap_max=0))]
+    #[pyo3(signature = (policy="tiered", byte_cap=33_554_432, head_boundary=0, name_prefix="split", sortcol=None, language=None, stopwords=false, byte_cap_max=0, case_sensitive=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         policy: &str,
@@ -800,6 +804,7 @@ impl TermSplitSetBuilder {
         language: Option<String>,
         stopwords: bool,
         byte_cap_max: u64,
+        case_sensitive: bool,
     ) -> PyResult<Self> {
         let language = match language.as_deref() {
             None => None,
@@ -818,6 +823,7 @@ impl TermSplitSetBuilder {
             sortcol: sortcol_spec(sortcol),
             language,
             stopwords,
+            case_sensitive,
         };
         Ok(TermSplitSetBuilder {
             inner: Some(CoreTermSplitSetBuilder::new(config)),
@@ -932,6 +938,7 @@ impl SplitSetWriter {
             tier_count,
             sortcol: sortcol_spec(sortcol),
             bloom_bits_per_key,
+            case_sensitive: false,
         };
         Ok(SplitSetWriter {
             inner: CoreSplitSetWriter::new(config),

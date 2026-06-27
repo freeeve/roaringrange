@@ -116,7 +116,7 @@ fn slice(
     ))
     .map_err(|e| io::Error::other(format!("open mono: {e:?}")))?;
     let head_boundary = idx.head_boundary();
-    let (language, stopwords) = idx.tokenizer().spec();
+    let (language, stopwords, case_normalization) = idx.tokenizer().spec();
     let block_locs = idx.dict_block_locs();
     let term_count = idx.len() as u64;
     drop(idx);
@@ -144,7 +144,14 @@ fn slice(
             let region_path = out_dir.join(format!("{prefix}-s{i:05}.region.tmp"));
             let w = BufWriter::with_capacity(8 << 20, File::create(&region_path)?);
             Ok(SplitSink {
-                writer: TermIndexStreamWriter::new(w, head_boundary, language, stopwords, 0),
+                writer: TermIndexStreamWriter::new(
+                    w,
+                    head_boundary,
+                    language,
+                    stopwords,
+                    case_normalization,
+                    0,
+                ),
                 region_path,
             })
         })
@@ -292,6 +299,7 @@ fn selftest() {
         sortcol: None,
         language: None,
         stopwords: false,
+        case_sensitive: false,
     });
     for d in &docs {
         b.add_text(d).unwrap();
@@ -311,6 +319,7 @@ fn selftest() {
         head_boundary: 65536,
         language: None,
         stopwords: false,
+        case_sensitive: false,
         block_cap: 0,
     };
     let mut tb = TermIndexBuilder::new(&cfg);

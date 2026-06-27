@@ -123,6 +123,7 @@ fn main() {
         name_prefix: prefix.clone(),
         sortcol: None,
         bloom_bits_per_key: bloom_bits,
+        case_sensitive: false,
     });
 
     // Chunk size trades parallelism against the rayon fan-out's transient memory (one batch of

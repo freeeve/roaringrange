@@ -27,6 +27,16 @@ pub(crate) const HEADER_SIZE: usize = 16;
 /// RRS format version written into the header. v3 collapsed the head/tail postings into one
 /// bitmap per term and shrank the dict entry 24 → 20 B (see `FORMAT.md`).
 pub(crate) const FORMAT_VERSION: u16 = 3;
+/// RRS v4 header size: the v3 16-byte header with a 2-byte `flags` field appended at offset
+/// 16 (no v3 field shifts; the sparse index then starts at 18). Kept in sync with the reader.
+pub(crate) const HEADER_SIZE_V4: usize = 18;
+/// RRS format version 4: byte-identical to v3 except for the trailing `flags` u16. Emitted
+/// only for a **case-sensitive** index; default (case-folding) builds stay v3, so every
+/// existing artifact and golden vector is unaffected.
+pub(crate) const FORMAT_VERSION_V4: u16 = 4;
+/// RRS v4 `flags` bit 0: the index is case-sensitive — its n-gram keys were not lowercased,
+/// so a query must skip lowercasing too (mirrored by `index::RRSI_FLAG_CASE_SENSITIVE`).
+pub(crate) const RRSI_FLAG_CASE_SENSITIVE: u16 = 1;
 
 use crate::facet::facet_key;
 
@@ -91,10 +101,26 @@ fn write_sparse_index<W: Write, T>(
 }
 
 pub fn write_index<W: Write>(
+    w: W,
+    gram_size: u16,
+    stride: u32,
+    entries: Vec<(u64, Vec<u8>)>,
+) -> io::Result<()> {
+    write_index_with(w, gram_size, stride, entries, true)
+}
+
+/// Like [`write_index`] but with an explicit `case_normalization` flag. `true` (the
+/// default) lowercases n-gram keys at build time and emits a v3 header byte-identical to
+/// before; `false` builds a **case-sensitive** index, keying on the original case and
+/// emitting a v4 header whose trailing `flags` field records the choice so the reader skips
+/// query-side folding. The caller is responsible for keying `entries` with the matching
+/// [`crate::ngram::ngram_keys_with`] case mode.
+pub fn write_index_with<W: Write>(
     mut w: W,
     gram_size: u16,
     stride: u32,
     mut entries: Vec<(u64, Vec<u8>)>,
+    case_normalization: bool,
 ) -> io::Result<()> {
     entries.sort_by_key(|e| e.0);
     let stride = if stride == 0 { DEFAULT_STRIDE } else { stride };
@@ -104,15 +130,31 @@ pub fn write_index<W: Write>(
     } else {
         (ngrams as usize).div_ceil(stride as usize)
     };
-    let dict_start = HEADER_SIZE + sparse_count * 8;
+    let header_size = if case_normalization {
+        HEADER_SIZE
+    } else {
+        HEADER_SIZE_V4
+    };
+    let dict_start = header_size + sparse_count * 8;
     let postings_start = dict_start + entries.len() * 20;
 
-    // Header (v3): magic, version, gram, ngrams, stride. No head_boundary.
+    // Header: magic, version, gram, ngrams, stride. A case-folding index is v3 (byte-identical
+    // to before this flag); a case-sensitive one is v4 with a trailing 2-byte `flags` field.
     w.write_all(b"RRSI")?;
-    w.write_all(&FORMAT_VERSION.to_le_bytes())?;
+    w.write_all(
+        &(if case_normalization {
+            FORMAT_VERSION
+        } else {
+            FORMAT_VERSION_V4
+        })
+        .to_le_bytes(),
+    )?;
     w.write_all(&gram_size.to_le_bytes())?;
     w.write_all(&ngrams.to_le_bytes())?;
     w.write_all(&stride.to_le_bytes())?;
+    if !case_normalization {
+        w.write_all(&RRSI_FLAG_CASE_SENSITIVE.to_le_bytes())?;
+    }
 
     // Sparse index: every stride-th key.
     write_sparse_index(&mut w, &entries, sparse_count, stride as usize, |e| e.0)?;
@@ -157,8 +199,21 @@ pub struct FacetField {
 /// Writes the `RRSF` facet sidecar for `fields` to `w`. The string blob is built
 /// in field/category insertion order (matching Go `WriteFacets`); each field's
 /// categories are sorted by [`facet_key`] for the category table and postings.
-/// See `FACETS.md`.
-pub fn write_facets<W: Write>(mut w: W, fields: Vec<FacetField>) -> io::Result<()> {
+/// See `FACETS.md`. Equivalent to [`write_facets_with`] with case folding on (the default).
+pub fn write_facets<W: Write>(w: W, fields: Vec<FacetField>) -> io::Result<()> {
+    write_facets_with(w, fields, true)
+}
+
+/// Like [`write_facets`] but with an explicit `case_normalization` flag. `true` (the default)
+/// lowercases field/category names for the `facet_key` hash and writes a byte-identical v1
+/// sidecar; `false` keys on the raw bytes (a case-sensitive index) and records the choice in the
+/// header's `reserved` field ([`crate::facet::RRSF_FLAG_CASE_SENSITIVE`]) so a split-set's facet
+/// pruning recomputes keys the same way. Category display names are stored verbatim either way.
+pub fn write_facets_with<W: Write>(
+    mut w: W,
+    fields: Vec<FacetField>,
+    case_normalization: bool,
+) -> io::Result<()> {
     struct COut {
         key: u64,
         card: u32,
@@ -190,7 +245,7 @@ pub fn write_facets<W: Write>(mut w: W, fields: Vec<FacetField>) -> io::Result<(
         for c in f.cats {
             let (cno, cnl) = push(&mut blob, &c.name);
             cs.push(COut {
-                key: facet_key(&f.name, &c.name),
+                key: facet_key(&f.name, &c.name, case_normalization),
                 card: c.card,
                 name_off: cno,
                 name_len: cnl,
@@ -211,10 +266,16 @@ pub fn write_facets<W: Write>(mut w: W, fields: Vec<FacetField>) -> io::Result<(
     let str_blob_off = 24 + fos.len() * 16 + total_cats as usize * 36;
     let postings_start = str_blob_off + blob.len();
 
-    // Header (24 B).
+    // Header (24 B). `reserved` (offset 6) carries the case-sensitive flag; 0 (case-folding,
+    // the default) keeps every existing sidecar byte-identical.
+    let reserved: u16 = if case_normalization {
+        0
+    } else {
+        crate::facet::RRSF_FLAG_CASE_SENSITIVE
+    };
     w.write_all(b"RRSF")?;
     w.write_all(&1u16.to_le_bytes())?; // version
-    w.write_all(&0u16.to_le_bytes())?; // reserved
+    w.write_all(&reserved.to_le_bytes())?; // reserved @6 (bit0 = case-sensitive)
     w.write_all(&(fos.len() as u32).to_le_bytes())?;
     w.write_all(&total_cats.to_le_bytes())?;
     w.write_all(&(blob.len() as u32).to_le_bytes())?;

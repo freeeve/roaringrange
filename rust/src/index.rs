@@ -12,7 +12,7 @@
 //! constructed up front and awaited together via [`futures::future::join_all`].
 
 use crate::fetch::{FetchError, RangeFetch};
-use crate::ngram::ngram_keys;
+use crate::ngram::ngram_keys_with;
 use futures::future::join_all;
 use roaring::RoaringBitmap;
 use std::error::Error;
@@ -25,8 +25,17 @@ const MAGIC: &[u8; 4] = b"RRSI";
 const HEADER_SIZE: usize = 16;
 /// Dictionary entry size in bytes (v3): key(8) + offset(8) + size(4).
 const DICT_ENTRY: usize = 20;
-/// The accepted on-disk format version.
+/// The accepted on-disk format version. v3 (case-folding) is the default; v4 is identical
+/// but appends a 2-byte `flags` field and is emitted only for a case-sensitive index.
 const FORMAT_VERSION: u16 = 3;
+/// `RRS` v4 header size: the v3 header plus a trailing `flags` u16 at offset 16. Kept in
+/// sync with `build::HEADER_SIZE_V4`.
+const HEADER_SIZE_V4: usize = 18;
+/// `RRS` format version 4 — see [`FORMAT_VERSION`].
+const FORMAT_VERSION_V4: u16 = 4;
+/// `RRS` v4 `flags` bit 0: the index is case-sensitive (n-gram keys were not lowercased),
+/// so queries must skip lowercasing too. Mirrors `build::RRSI_FLAG_CASE_SENSITIVE`.
+const RRSI_FLAG_CASE_SENSITIVE: u16 = 1;
 /// The eager-prefix bucket count: the cursor fetches the first `EAGER_BUCKETS` container buckets
 /// (docs `[0, EAGER_BUCKETS·65536)`) of a term's posting up front for the instant first page +
 /// facet counts, then `TailScan` pages the buckets at or above it. `1` (bucket 0 = the top 64K
@@ -131,6 +140,9 @@ pub struct Index<F: RangeFetch> {
     dict_start: u64,
     /// In-memory sparse index: `sparse_keys[i] == dict[i*stride].key`.
     sparse_keys: Vec<u64>,
+    /// Whether query n-grams are lowercased before keying (false for a v4 case-sensitive
+    /// index). Mirrors how the index was built so a query keys identically.
+    case_fold: bool,
 }
 
 impl<F: RangeFetch> Index<F> {
@@ -145,21 +157,29 @@ impl<F: RangeFetch> Index<F> {
             return Err(IndexError::BadMagic(m));
         }
         let version = read_u16(&header, 4);
-        if version != FORMAT_VERSION {
-            return Err(IndexError::BadVersion(version));
-        }
+        // v4 appends a 2-byte `flags` field at offset 16; one extra tiny read fetches it (the
+        // header read can't over-read a v3 file, whose backing bytes may end at offset 16).
+        let (header_size, case_fold) = match version {
+            FORMAT_VERSION => (HEADER_SIZE, true),
+            FORMAT_VERSION_V4 => {
+                let flags_bytes = fetch.read(HEADER_SIZE as u64, 2).await?;
+                let flags = read_u16(&flags_bytes, 0);
+                (HEADER_SIZE_V4, flags & RRSI_FLAG_CASE_SENSITIVE == 0)
+            }
+            _ => return Err(IndexError::BadVersion(version)),
+        };
         let gram_size = read_u16(&header, 6);
         let ngrams = read_u32(&header, 8);
         let stride = read_u32(&header, 12);
 
         let (sparse_count, sparse_len) = sparse_layout(ngrams, stride)?;
-        let sparse_bytes = fetch.read(HEADER_SIZE as u64, sparse_len).await?;
+        let sparse_bytes = fetch.read(header_size as u64, sparse_len).await?;
         let mut sparse_keys = Vec::with_capacity(sparse_count);
         for i in 0..sparse_count {
             sparse_keys.push(read_u64(&sparse_bytes, i * 8));
         }
 
-        let dict_start = HEADER_SIZE as u64 + (sparse_count as u64) * 8;
+        let dict_start = header_size as u64 + (sparse_count as u64) * 8;
         Ok(Index {
             fetch,
             gram_size,
@@ -167,6 +187,7 @@ impl<F: RangeFetch> Index<F> {
             stride,
             dict_start,
             sparse_keys,
+            case_fold,
         })
     }
 
@@ -186,15 +207,24 @@ impl<F: RangeFetch> Index<F> {
             return Err(IndexError::BadMagic(m));
         }
         let version = read_u16(boot, 4);
-        if version != FORMAT_VERSION {
-            return Err(IndexError::BadVersion(version));
-        }
+        // v4 appends a 2-byte `flags` field at offset 16 (the boot region carries it).
+        let (header_size, case_fold) = match version {
+            FORMAT_VERSION => (HEADER_SIZE, true),
+            FORMAT_VERSION_V4 => {
+                if boot.len() < HEADER_SIZE_V4 {
+                    return Err(IndexError::Malformed("short RRS v4 boot region"));
+                }
+                let flags = read_u16(boot, HEADER_SIZE);
+                (HEADER_SIZE_V4, flags & RRSI_FLAG_CASE_SENSITIVE == 0)
+            }
+            _ => return Err(IndexError::BadVersion(version)),
+        };
         let gram_size = read_u16(boot, 6);
         let ngrams = read_u32(boot, 8);
         let stride = read_u32(boot, 12);
 
         let (sparse_count, sparse_len) = sparse_layout(ngrams, stride)?;
-        let dict_start = HEADER_SIZE
+        let dict_start = header_size
             .checked_add(sparse_len)
             .ok_or(IndexError::Malformed("RRS boot region length overflows"))?;
         if boot.len() < dict_start {
@@ -204,7 +234,7 @@ impl<F: RangeFetch> Index<F> {
         }
         let mut sparse_keys = Vec::with_capacity(sparse_count);
         for i in 0..sparse_count {
-            sparse_keys.push(read_u64(boot, HEADER_SIZE + i * 8));
+            sparse_keys.push(read_u64(boot, header_size + i * 8));
         }
         Ok(Index {
             fetch,
@@ -213,6 +243,7 @@ impl<F: RangeFetch> Index<F> {
             stride,
             dict_start: dict_start as u64,
             sparse_keys,
+            case_fold,
         })
     }
 
@@ -338,7 +369,7 @@ impl<F: RangeFetch> Index<F> {
     /// reads anyway, so a fall-through to client-side search re-uses them via the
     /// range cache.
     pub async fn query_cost(&self, query: &str) -> Result<u64, IndexError> {
-        let keys = ngram_keys(query, self.gram_size as usize);
+        let keys = ngram_keys_with(query, self.gram_size as usize, self.case_fold);
         if keys.is_empty() {
             return Ok(0);
         }
@@ -374,7 +405,7 @@ impl<F: RangeFetch> Index<F> {
     /// Not valid for fuzzy (`max_missing > 0`) matching, where the min is no
     /// longer a bound.
     pub async fn count_estimate(&self, query: &str) -> Result<(u64, bool), IndexError> {
-        let keys = ngram_keys(query, self.gram_size as usize);
+        let keys = ngram_keys_with(query, self.gram_size as usize, self.case_fold);
         if keys.is_empty() {
             return Ok((0, true));
         }
@@ -456,7 +487,7 @@ impl<F: RangeFetch> Index<F> {
     /// only if needed — tails) so a query costs a near-constant number of
     /// round-trip waves regardless of trigram count.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<u32>, IndexError> {
-        let keys = ngram_keys(query, self.gram_size as usize);
+        let keys = ngram_keys_with(query, self.gram_size as usize, self.case_fold);
         if keys.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
@@ -516,7 +547,7 @@ impl<F: RangeFetch> Index<F> {
     /// multi-MB) posting fetches. Candidates come back in ascending doc-ID order;
     /// an absent trigram (the strict AND is then empty) returns an empty vector.
     pub async fn search_candidates(&self, query: &str, k: usize) -> Result<Vec<u32>, IndexError> {
-        let keys = ngram_keys(query, self.gram_size as usize);
+        let keys = ngram_keys_with(query, self.gram_size as usize, self.case_fold);
         if keys.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
@@ -586,7 +617,7 @@ impl<F: RangeFetch> Index<F> {
         if filter.as_ref().is_some_and(|f| f.has_empty_arm()) {
             return Ok(Cursor::empty(self.fetch.clone()));
         }
-        let keys = ngram_keys(query, self.gram_size as usize);
+        let keys = ngram_keys_with(query, self.gram_size as usize, self.case_fold);
         let min_match = keys.len().saturating_sub(max_missing).max(1);
         // Resolve only the n-grams present in the dictionary; absent ones simply
         // contribute nothing, which is what tolerating missing n-grams means.
@@ -1175,13 +1206,16 @@ pub fn rrs_boot_len(header: &[u8]) -> Result<usize, IndexError> {
         return Err(IndexError::BadMagic(m));
     }
     let version = read_u16(header, 4);
-    if version != FORMAT_VERSION {
-        return Err(IndexError::BadVersion(version));
-    }
+    // v4 (case-sensitive) has an 18-byte header; v3 keeps 16. Both boot the same way.
+    let header_size = match version {
+        FORMAT_VERSION => HEADER_SIZE,
+        FORMAT_VERSION_V4 => HEADER_SIZE_V4,
+        _ => return Err(IndexError::BadVersion(version)),
+    };
     let ngrams = read_u32(header, 8);
     let stride = read_u32(header, 12);
     let (_, sparse_len) = sparse_layout(ngrams, stride)?;
-    HEADER_SIZE
+    header_size
         .checked_add(sparse_len)
         .ok_or(IndexError::Malformed("RRS boot region length overflows"))
 }
@@ -1275,6 +1309,63 @@ mod tests {
         assert_eq!(sparse_count(512, 512), 1);
         assert_eq!(sparse_count(513, 512), 2);
         assert_eq!(sparse_count(5, 2), 3);
+    }
+
+    #[test]
+    fn rrs_v4_case_sensitive_roundtrip() {
+        use crate::build::{serialize_posting, write_index, write_index_with};
+        use crate::ngram::ngram_keys_with;
+        use crate::MemoryFetch;
+        use futures::executor::block_on;
+        use roaring::RoaringBitmap;
+        use std::collections::BTreeMap;
+
+        // Builds an RRS over `docs` keyed with the given case mode; `case_fold == false`
+        // emits a v4 (case-sensitive) header, matching how the keys were derived.
+        fn build(docs: &[(u32, &str)], gram: usize, case_fold: bool) -> Vec<u8> {
+            let mut map: BTreeMap<u64, RoaringBitmap> = BTreeMap::new();
+            for &(id, text) in docs {
+                for k in ngram_keys_with(text, gram, case_fold) {
+                    map.entry(k).or_default().insert(id);
+                }
+            }
+            let entries: Vec<(u64, Vec<u8>)> = map
+                .iter()
+                .map(|(k, b)| (*k, serialize_posting(b)))
+                .collect();
+            let mut out = Vec::new();
+            write_index_with(&mut out, gram as u16, 2, entries, case_fold).unwrap();
+            out
+        }
+
+        let docs = [(0u32, "Hello world"), (1u32, "hello there")];
+
+        // Case-sensitive (v4): "Hello" and "hello" key on distinct trigrams.
+        let cs = build(&docs, 3, false);
+        assert_eq!(read_u16(&cs, 4), FORMAT_VERSION_V4);
+        let idx = block_on(Index::open(MemoryFetch::new(cs))).unwrap();
+        assert_eq!(block_on(idx.search("Hello", 10)).unwrap(), vec![0]);
+        assert_eq!(block_on(idx.search("hello", 10)).unwrap(), vec![1]);
+
+        // Default (v3, case-folding): any casing matches both docs.
+        let ci = build(&docs, 3, true);
+        assert_eq!(read_u16(&ci, 4), FORMAT_VERSION);
+        let idx2 = block_on(Index::open(MemoryFetch::new(ci))).unwrap();
+        let mut got = block_on(idx2.search("HELLO", 10)).unwrap();
+        got.sort();
+        assert_eq!(got, vec![0, 1]);
+
+        // The default writer is byte-identical to write_index_with(.., true) — v3 stays frozen.
+        let keys = ngram_keys_with("abcd", 3, true);
+        let mut bm = RoaringBitmap::new();
+        bm.insert(7);
+        let entries: Vec<(u64, Vec<u8>)> =
+            keys.iter().map(|k| (*k, serialize_posting(&bm))).collect();
+        let mut a = Vec::new();
+        write_index(&mut a, 3, 2, entries.clone()).unwrap();
+        let mut b = Vec::new();
+        write_index_with(&mut b, 3, 2, entries, true).unwrap();
+        assert_eq!(a, b);
     }
 
     /// Paging the cursor in small steps must reconstruct exactly the ordered result
