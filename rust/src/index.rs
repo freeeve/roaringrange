@@ -362,6 +362,28 @@ impl<F: RangeFetch> Index<F> {
         }
     }
 
+    /// Resolves several keys to their dict records in one **deduped** wave of block
+    /// reads — keys sharing a block read it once (via [`read_dict_blocks`]) instead
+    /// of issuing a duplicate concurrent Range per key. Aligned with `keys`; `None`
+    /// for an absent key (empty dict, key preceding the dictionary, or not found in
+    /// its block).
+    async fn lookup_many(&self, keys: &[u64]) -> Result<Vec<Option<DictRec>>, IndexError> {
+        // Keys with no block resolve to None with no fetch; the rest go through the
+        // deduped block reader.
+        let present: Vec<(usize, DictBlock)> = keys
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &k)| self.dict_block_for(k).map(|b| (i, b)))
+            .collect();
+        let blocks: Vec<DictBlock> = present.iter().map(|&(_, b)| b).collect();
+        let datas = self.read_dict_blocks(&blocks).await?;
+        let mut out = vec![None; keys.len()];
+        for ((i, block), data) in present.iter().zip(&datas) {
+            out[*i] = Self::parse_block(data, block.entries, keys[*i]);
+        }
+        Ok(out)
+    }
+
     /// Estimated client-side bytes a search for `query` would fetch — the summed
     /// posting sizes of its n-gram keys, resolved with **dictionary reads only**
     /// (KBs, none of the postings themselves). The dictionary records every
@@ -376,10 +398,9 @@ impl<F: RangeFetch> Index<F> {
         if keys.is_empty() {
             return Ok(0);
         }
-        let lookups = join_all(keys.iter().map(|&k| self.lookup(k))).await;
         let mut total = 0u64;
-        for rec in lookups {
-            match rec? {
+        for rec in self.lookup_many(&keys).await? {
+            match rec {
                 Some(rec) => total += rec.size as u64,
                 None => return Ok(0),
             }
@@ -412,13 +433,23 @@ impl<F: RangeFetch> Index<F> {
         if keys.is_empty() {
             return Ok((0, true));
         }
-        let counts = join_all(keys.iter().map(|&k| self.term_count(k))).await;
+        // Resolve every key's dict record in one deduped block wave, then fetch the
+        // per-posting cardinalities (descriptive headers) concurrently.
+        let mut recs = Vec::with_capacity(keys.len());
+        for rec in self.lookup_many(&keys).await? {
+            match rec {
+                None => return Ok((0, true)),
+                Some(r) => recs.push(r),
+            }
+        }
+        let counts =
+            join_all(recs.iter().map(|r| {
+                crate::posting::posting_cardinality(&self.fetch, r.offset, r.size as usize)
+            }))
+            .await;
         let mut min = u64::MAX;
         for c in counts {
-            match c? {
-                None => return Ok((0, true)),
-                Some(n) => min = min.min(n),
-            }
+            min = min.min(c?);
         }
         Ok((min, keys.len() == 1))
     }
@@ -521,23 +552,42 @@ impl<F: RangeFetch> Index<F> {
             return Ok(out);
         }
 
-        // WAVE 3 (only if the eager prefix under-fills the limit): intersect the whole postings
-        // with container-level ranged reads — the rarest posting in full, then only the
-        // containers of the rest that overlap surviving candidates — so a rare phrase of common
-        // trigrams costs KB, not every full posting. Append docs at/above the eager prefix.
+        // WAVE 3 (only if the eager prefix under-fills the limit): intersect the postings with
+        // container-level ranged reads, but only over buckets past the eager prefix — WAVE 2
+        // already fetched (and intersected) docs `< EAGER_DOC_BOUND`, so re-reading those head
+        // container bodies here is pure duplicate egress. A seekable [`TailScan`] started at
+        // `EAGER_BUCKETS` reads only the tail buckets; a non-seekable posting falls back to the
+        // whole-posting strict AND, dropping the already-covered prefix.
         let ranges: Vec<(u64, usize)> = recs
             .iter()
             .map(|rec| (rec.offset, rec.size as usize))
             .collect();
-        let full_and = crate::posting::tail_intersect_and(&self.fetch, &ranges).await?;
-        for doc in full_and.iter() {
-            if doc < EAGER_DOC_BOUND {
-                continue; // already covered by the eager prefix above
+        match crate::posting::TailScan::open(&self.fetch, &ranges, None, &[], &[], EAGER_BUCKETS)
+            .await?
+        {
+            Some(mut scan) => {
+                while out.len() < limit && !scan.exhausted() {
+                    let win = scan.next_window(&self.fetch, None, TAIL_KEY_BATCH).await?;
+                    for doc in win.iter() {
+                        if out.len() >= limit {
+                            break;
+                        }
+                        out.push(doc);
+                    }
+                }
             }
-            if out.len() >= limit {
-                break;
+            None => {
+                let full_and = crate::posting::tail_intersect_and(&self.fetch, &ranges).await?;
+                for doc in full_and.iter() {
+                    if doc < EAGER_DOC_BOUND {
+                        continue; // already covered by the eager prefix above
+                    }
+                    if out.len() >= limit {
+                        break;
+                    }
+                    out.push(doc);
+                }
             }
-            out.push(doc);
         }
         Ok(out)
     }
@@ -569,10 +619,15 @@ impl<F: RangeFetch> Index<F> {
         // Seed from the k rarest postings (smallest serialized size).
         recs.sort_by_key(|r| r.size as u64);
         recs.truncate(k.min(recs.len()));
+        // Fetch the selected postings in one concurrent wave (they are independent).
+        let reads = join_all(
+            recs.iter()
+                .map(|rec| self.fetch.read(rec.offset, rec.size as usize)),
+        )
+        .await;
         let mut postings = Vec::with_capacity(recs.len());
-        for rec in &recs {
-            let bytes = self.fetch.read(rec.offset, rec.size as usize).await?;
-            postings.push(deserialize(&bytes)?);
+        for bytes in reads {
+            postings.push(deserialize(&bytes?)?);
         }
         Ok(Self::intersect(postings)
             .unwrap_or_default()
@@ -779,15 +834,20 @@ impl<F: RangeFetch> ResolvedFilter<F> {
     /// candidate list with [`membership_bitmap`](Self::membership_bitmap) instead,
     /// which subtracts the excludes from the candidates directly.
     pub async fn full_bitmap(&self) -> Result<RoaringBitmap, IndexError> {
-        let mut b = self.head_bitmap().await?;
-        b |= self.tail_bitmap().await?;
+        // The include head/tail and (when present) exclude head/tail are mutually
+        // independent reads; run them as one wave instead of up to four sequential
+        // round trips on the vector-filter path.
+        let (head, tail) = futures::future::join(self.head_bitmap(), self.tail_bitmap()).await;
+        let mut b = head?;
+        b |= tail?;
         if !self.excludes.is_empty() {
-            b -= self
-                .exclude_union(|c| (c.head_off, c.head_size as usize))
-                .await?;
-            b -= self
-                .exclude_union(|c| (c.tail_off, c.tail_size as usize))
-                .await?;
+            let (xh, xt) = futures::future::join(
+                self.exclude_union(|c| (c.head_off, c.head_size as usize)),
+                self.exclude_union(|c| (c.tail_off, c.tail_size as usize)),
+            )
+            .await;
+            b -= xh?;
+            b -= xt?;
         }
         Ok(b)
     }

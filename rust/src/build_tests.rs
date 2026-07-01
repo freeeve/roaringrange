@@ -1331,3 +1331,125 @@ fn rrhc_golden_matches() {
     write_hotcache(&mut out, &members, 16).unwrap();
     assert_build_golden("rrhc", &out);
 }
+
+/// A [`RangeFetch`](crate::RangeFetch) wrapper that records total reads and peak
+/// read concurrency. Each read suspends once before serving, so futures polled as
+/// one wave (`join_all`) overlap and drive `max_inflight` up to the wave width,
+/// while reads awaited one-at-a-time never exceed 1 — letting a test tell a
+/// batched wave from a sequential loop (a plain read counter cannot). Counters are
+/// `Arc`-shared so a cheap `clone()` (also what `search_cursor` needs) yields a
+/// probe handle that observes the fetcher moved into an `Index`/`Cursor`.
+#[derive(Clone)]
+struct InstrumentedFetch {
+    inner: MemoryFetch,
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    inflight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    max_inflight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl InstrumentedFetch {
+    fn new(bytes: Vec<u8>) -> Self {
+        InstrumentedFetch {
+            inner: MemoryFetch::new(bytes),
+            reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            inflight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_inflight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn max_inflight(&self) -> usize {
+        self.max_inflight.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Zeroes the read count and peak-concurrency high-water mark so a measurement
+    /// excludes reads from an earlier phase (e.g. the boot/open reads).
+    fn reset(&self) {
+        self.reads.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.max_inflight
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Yields control exactly once (Pending then Ready), so concurrently-polled read
+/// futures interleave rather than each running to completion before the next.
+#[derive(Default)]
+struct YieldOnce(bool);
+impl std::future::Future for YieldOnce {
+    type Output = ();
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            std::task::Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+}
+
+impl crate::fetch::RangeFetch for InstrumentedFetch {
+    async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, crate::fetch::FetchError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.reads.fetch_add(1, SeqCst);
+        let now = self.inflight.fetch_add(1, SeqCst) + 1;
+        self.max_inflight.fetch_max(now, SeqCst);
+        YieldOnce::default().await;
+        let r = self.inner.read(offset, len).await;
+        self.inflight.fetch_sub(1, SeqCst);
+        r
+    }
+}
+
+/// `query_cost`/`count_estimate` must resolve all of a query's keys through a
+/// single deduped dict-block read when the keys share a block, not one read per
+/// key (task 061 item 2). With a stride wide enough to hold every key in one
+/// block, a 2-key query costs exactly one dict read.
+#[test]
+fn query_cost_dedups_shared_dict_block() {
+    let abc = ngram_keys("abc", 3)[0];
+    let bcd = ngram_keys("bcd", 3)[0];
+    // stride 8 > 2 entries -> both keys land in the single dict block.
+    let fetch = InstrumentedFetch::new(build_rrs(
+        3,
+        8,
+        &[(abc, bm(&[1, 2, 3])), (bcd, bm(&[2, 3, 4]))],
+    ));
+    let probe = fetch.clone();
+    let idx = block_on(Index::open(fetch)).unwrap();
+    probe.reset(); // exclude the boot (header + sparse) reads
+    let cost = block_on(idx.query_cost("abcd")).unwrap();
+    assert!(cost > 0);
+    assert_eq!(
+        probe.reads(),
+        1,
+        "query_cost should read the shared dict block once, not once per key"
+    );
+}
+
+/// `search_candidates` fetches its seed postings in one concurrent wave, not one
+/// after another (task 061 item 3). Two trigrams sharing docs -> two postings
+/// fetched together; peak concurrency reaches 2.
+#[test]
+fn search_candidates_fetches_postings_concurrently() {
+    let abc = ngram_keys("abc", 3)[0];
+    let bcd = ngram_keys("bcd", 3)[0];
+    let fetch = InstrumentedFetch::new(build_rrs(
+        3,
+        8,
+        &[(abc, bm(&[1, 2, 3, 9])), (bcd, bm(&[2, 3, 4, 9]))],
+    ));
+    let probe = fetch.clone();
+    let idx = block_on(Index::open(fetch)).unwrap();
+    probe.reset(); // exclude boot + dict-block reads; measure the posting wave
+    let cands = block_on(idx.search_candidates("abcd", 10)).unwrap();
+    assert_eq!(cands, vec![2, 3, 9]);
+    assert!(
+        probe.max_inflight() >= 2,
+        "the seed postings should be fetched as one concurrent wave (peak inflight {})",
+        probe.max_inflight()
+    );
+}

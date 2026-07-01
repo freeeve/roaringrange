@@ -330,15 +330,39 @@ async fn open_tail_dirs<F: RangeFetch>(
     fetch: &F,
     tails: &[(u64, usize)],
 ) -> Result<Option<Vec<TailDir>>, IndexError> {
+    // Wave 1: every posting's header prefix concurrently — the reads are
+    // independent, so a strict AND (or a facet filter) with many tails pays one
+    // round trip rather than one per posting.
+    let prefixes = join_all(
+        tails
+            .iter()
+            .map(|&(off, len)| fetch.read(off, len.min(HEADER_PREFIX))),
+    )
+    .await;
+    let mut headers: Vec<Vec<u8>> = Vec::with_capacity(tails.len());
+    for p in prefixes {
+        headers.push(p?);
+    }
+    // A posting with more containers than the prefix captured needs one exact
+    // re-read; batch those (rare) into a single second wave.
+    let mut refetch: Vec<(usize, usize)> = Vec::new(); // (index, exact header len)
+    for (i, header) in headers.iter().enumerate() {
+        match needed_header_len(header) {
+            Some(hl) if hl <= header.len() => {}
+            Some(hl) => refetch.push((i, hl)),
+            None => return Ok(None), // not the seekable layout — fall back to a full load
+        }
+    }
+    if !refetch.is_empty() {
+        let reads = join_all(refetch.iter().map(|&(i, hl)| fetch.read(tails[i].0, hl))).await;
+        for (&(i, _), r) in refetch.iter().zip(reads) {
+            headers[i] = r?;
+        }
+    }
+    // Parse every directory (no fetches).
     let mut out = Vec::with_capacity(tails.len());
-    for &(off, len) in tails {
-        let prefix = fetch.read(off, len.min(HEADER_PREFIX)).await?;
-        let header = match needed_header_len(&prefix) {
-            Some(hl) if hl <= prefix.len() => prefix,
-            Some(hl) => fetch.read(off, hl).await?,
-            None => return Ok(None),
-        };
-        match parse_dir(&header, len) {
+    for (&(off, len), header) in tails.iter().zip(&headers) {
+        match parse_dir(header, len) {
             Some(dir) => out.push(TailDir { off, dir }),
             None => return Ok(None),
         }
@@ -906,5 +930,96 @@ mod tests {
         assert!(block_on(tail_intersect_and(&fetch, &[]))
             .unwrap()
             .is_empty());
+    }
+
+    /// Yields once (Pending then Ready) so concurrently-polled read futures
+    /// interleave under a single-threaded executor rather than each running to
+    /// completion before the next is polled.
+    #[derive(Default)]
+    struct YieldOnce(bool);
+    impl std::future::Future for YieldOnce {
+        type Output = ();
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            if self.0 {
+                std::task::Poll::Ready(())
+            } else {
+                self.0 = true;
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        }
+    }
+
+    /// Wraps a [`MemoryFetch`] and records peak concurrent reads, so a test can
+    /// prove a fetch wave overlaps rather than running sequentially.
+    struct InflightFetch {
+        inner: MemoryFetch,
+        inflight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        max_inflight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl InflightFetch {
+        fn new(bytes: Vec<u8>) -> Self {
+            InflightFetch {
+                inner: MemoryFetch::new(bytes),
+                inflight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                max_inflight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+        fn max_inflight(&self) -> usize {
+            self.max_inflight.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    impl crate::fetch::RangeFetch for InflightFetch {
+        async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, crate::fetch::FetchError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.inflight.fetch_add(1, SeqCst) + 1;
+            self.max_inflight.fetch_max(now, SeqCst);
+            YieldOnce::default().await;
+            let r = self.inner.read(offset, len).await;
+            self.inflight.fetch_sub(1, SeqCst);
+            r
+        }
+    }
+
+    /// `open_tail_dirs` must read every posting's header prefix in one concurrent
+    /// wave (task 061 item 1), not one round trip per posting. With three tails
+    /// the peak in-flight read count must exceed one.
+    #[test]
+    fn open_tail_dirs_reads_headers_concurrently() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+        let mut c = RoaringBitmap::new();
+        for d in [70000u32, 130000, 200005, 5_000_000] {
+            a.insert(d);
+            b.insert(d);
+            c.insert(d);
+        }
+        for d in 300000..306000u32 {
+            a.insert(d);
+            b.insert(d);
+            c.insert(d);
+        }
+        let (sa, sb, sc) = (ser(&a), ser(&b), ser(&c));
+        let mut buf = Vec::new();
+        let oa = buf.len() as u64;
+        buf.extend_from_slice(&sa);
+        let ob = buf.len() as u64;
+        buf.extend_from_slice(&sb);
+        let oc = buf.len() as u64;
+        buf.extend_from_slice(&sc);
+        let fetch = InflightFetch::new(buf);
+        let tails = vec![(oa, sa.len()), (ob, sb.len()), (oc, sc.len())];
+        let dirs = block_on(open_tail_dirs(&fetch, &tails))
+            .unwrap()
+            .expect("seekable layout");
+        assert_eq!(dirs.len(), 3);
+        assert!(
+            fetch.max_inflight() >= 2,
+            "header prefixes must be read concurrently, peak was {}",
+            fetch.max_inflight()
+        );
     }
 }
