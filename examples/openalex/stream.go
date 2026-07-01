@@ -264,11 +264,24 @@ func writeRecordsOrdered(tmpRec string, metas []recMeta, binP, idxP string) erro
 		cum += uint64(m.ln)
 		writeOff(cum)
 	}
-	bw.Flush()
-	iw.Flush()
-	bin.Close()
-	recIdx.Close()
-	return nil
+	// Flush (sticky bufio surfaces any dropped writeOff/record write) and close
+	// both files so a disk-full mid-write fails rather than yielding a truncated
+	// store at exit 0.
+	if err := bw.Flush(); err != nil {
+		bin.Close()
+		recIdx.Close()
+		return err
+	}
+	if err := iw.Flush(); err != nil {
+		bin.Close()
+		recIdx.Close()
+		return err
+	}
+	if err := bin.Close(); err != nil {
+		recIdx.Close()
+		return err
+	}
+	return recIdx.Close()
 }
 
 // streamLines scans every line of every gzipped input file, invoking fn. fn
@@ -298,6 +311,13 @@ func streamLines(files []string, fn func(line []byte) bool) error {
 				f.Close()
 				return nil
 			}
+		}
+		// A scan error truncates this file mid-stream; abort so a partial pass can't
+		// silently produce an incomplete index (this is the full-corpus build path).
+		if err := sc.Err(); err != nil {
+			gz.Close()
+			f.Close()
+			return fmt.Errorf("scan %s: %w", path, err)
 		}
 		gz.Close()
 		f.Close()
@@ -427,7 +447,10 @@ func (fa *facetAccum) write(path string) error {
 	if err := bw.Flush(); err != nil {
 		return err
 	}
-	fi, _ := os.Stat(path)
-	log.Printf("wrote facets %s (%d bytes)", path, fi.Size())
+	if fi, err := os.Stat(path); err == nil {
+		log.Printf("wrote facets %s (%d bytes)", path, fi.Size())
+	} else {
+		log.Printf("wrote facets %s", path)
+	}
 	return nil
 }

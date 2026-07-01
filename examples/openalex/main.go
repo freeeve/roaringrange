@@ -184,6 +184,12 @@ func loadWorks(files []string, limit int) []item {
 				return items
 			}
 		}
+		// A scan error (a line over the 16 MB buffer, or a mid-file gzip failure)
+		// silently truncates this file's works; surface it loudly rather than
+		// producing a quietly incomplete index.
+		if err := sc.Err(); err != nil {
+			log.Printf("WARNING: %s: scan aborted, file truncated in index: %v", path, err)
+		}
 		gz.Close()
 		f.Close()
 	}
@@ -308,10 +314,26 @@ func buildIndexAndStore(items []item, ftsr, rrs, binP, idxP string) error {
 		off += uint64(len(it.rec))
 		writeOff(off)
 	}
-	bw.Flush()
-	iw.Flush()
-	bin.Close()
-	recIdx.Close()
+	// Flush the buffered writers (a bufio.Writer is sticky, so this surfaces any
+	// dropped writeOff/record write too) and close both files, so a disk-full
+	// mid-write fails the build rather than leaving a truncated store at exit 0.
+	if err := bw.Flush(); err != nil {
+		bin.Close()
+		recIdx.Close()
+		return err
+	}
+	if err := iw.Flush(); err != nil {
+		bin.Close()
+		recIdx.Close()
+		return err
+	}
+	if err := bin.Close(); err != nil {
+		recIdx.Close()
+		return err
+	}
+	if err := recIdx.Close(); err != nil {
+		return err
+	}
 	log.Printf("built index + record store (%d docs)", len(items))
 
 	if err := idx.SaveToFile(ftsr); err != nil {
@@ -334,8 +356,11 @@ func buildIndexAndStore(items []item, ftsr, rrs, binP, idxP string) error {
 	src.Close()
 	dst.Close()
 	os.Remove(ftsr)
-	fi, _ := os.Stat(rrs)
-	log.Printf("wrote RRS %s (%d bytes)", rrs, fi.Size())
+	if fi, err := os.Stat(rrs); err == nil {
+		log.Printf("wrote RRS %s (%d bytes)", rrs, fi.Size())
+	} else {
+		log.Printf("wrote RRS %s", rrs)
+	}
 	return nil
 }
 

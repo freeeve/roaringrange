@@ -2,6 +2,7 @@ package roaringrange
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 )
 
@@ -48,6 +49,7 @@ type RecordWriter struct {
 	bin     io.Writer
 	idx     io.Writer
 	off     uint64 // cumulative end offset into bin (== bytes written so far)
+	count   uint32 // record total declared in the header
 	written uint32 // number of records written so far
 }
 
@@ -66,7 +68,7 @@ func NewRecordWriter(bin, idx io.Writer, count uint32) (*RecordWriter, error) {
 	if _, err := idx.Write(zero[:]); err != nil {
 		return nil, err
 	}
-	return &RecordWriter{bin: bin, idx: idx}, nil
+	return &RecordWriter{bin: bin, idx: idx, count: count}, nil
 }
 
 // Write appends one record's bytes to the blob and its cumulative end offset to
@@ -89,6 +91,21 @@ func (w *RecordWriter) Write(rec []byte) error {
 // Written returns the number of records written so far.
 func (w *RecordWriter) Written() uint32 { return w.written }
 
+// Finish verifies the writer produced exactly the record count declared in the
+// header. The header commits to count up front and the offset table is sized for
+// count+1 entries, so an under- or over-count leaves the store internally
+// inconsistent — a reader Get of a high id would read past the written offsets.
+// Call it after the last Write; it writes nothing (the output stays byte-identical
+// for a correct writer) and only reports the mismatch. Streaming callers that
+// cannot know the total in advance should size the writer to the count they will
+// actually emit.
+func (w *RecordWriter) Finish() error {
+	if w.written != w.count {
+		return fmt.Errorf("%w: wrote %d records, header declared %d", ErrTruncated, w.written, w.count)
+	}
+	return nil
+}
+
 // WriteRecords writes a record store from an in-memory slice of records, in
 // doc-ID order — a convenience over RecordWriter for callers that already hold
 // every record. See RECORDS.md.
@@ -102,7 +119,7 @@ func WriteRecords(bin, idx io.Writer, records [][]byte) error {
 			return err
 		}
 	}
-	return nil
+	return w.Finish()
 }
 
 // recordDecompressor inflates a version-2 zstd frame (tag 1) against the shared

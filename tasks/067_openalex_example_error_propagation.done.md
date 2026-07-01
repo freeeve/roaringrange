@@ -13,3 +13,24 @@
 
 - Simulated failures (tiny scanner buffer, write-error-injecting io.Writer, ENOSPC-ish mock) each abort the build non-zero with a clear message.
 - RecordWriter undercount returns an error at Finish/Close; exact-count path byte-identical to current output.
+
+## Outcome (DONE)
+
+- `examples/openalex/stream.go` (the full-corpus build path): `streamLines` checks
+  `sc.Err()` and returns a wrapped error (aborts, so a truncated pass can't produce
+  a silently incomplete index); `writeRecordsOrdered` checks both `Flush`es and both
+  `Close`s (a bufio.Writer is sticky, so this also surfaces the dropped `writeOff`
+  writes) and guards the facets `os.Stat`.
+- `examples/openalex/main.go` (in-memory build): `loadWorks` logs a prominent
+  per-file warning on `sc.Err()` (matches the existing skip-and-log resilience);
+  `buildIndexAndStore` checks the flushes/closes and guards the RRS `os.Stat`.
+- Core `records.go` (item 4): `RecordWriter` gained a `count` field and a `Finish()`
+  that errors when `written != count`; `WriteRecords` calls it. Writes nothing, so
+  output stays byte-identical for a correct writer. Tests:
+  `TestRecordWriterFinishRejectsCountMismatch` (under- and over-count) plus a
+  `Finish()` assertion in the existing streaming round-trip test.
+
+Behavior choice: the streaming (production) path aborts on a scan error; the
+in-memory path logs loudly and continues (consistent with its existing per-file
+skip-and-log). Both make the previously-silent truncation visible. No byte-output
+changes; core tests + conformance byte-identical; example module builds/vets clean.

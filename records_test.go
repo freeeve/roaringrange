@@ -132,6 +132,47 @@ func TestRecordWriterStreaming(t *testing.T) {
 	if !bytes.Equal(idxS.Bytes(), idxB.Bytes()) {
 		t.Error("streaming idx differs from WriteRecords idx")
 	}
+	// Finish accepts an exact count.
+	if err := w.Finish(); err != nil {
+		t.Errorf("Finish on an exact count: %v", err)
+	}
+}
+
+// TestRecordWriterFinishRejectsCountMismatch confirms an under- or over-count is
+// caught at Finish rather than leaving a store whose header disagrees with its
+// offset table.
+func TestRecordWriterFinishRejectsCountMismatch(t *testing.T) {
+	recs := sampleRecords()
+
+	// Undercount: declare one more record than we write.
+	var bin, idx bytes.Buffer
+	w, err := NewRecordWriter(&bin, &idx, uint32(len(recs)+1))
+	if err != nil {
+		t.Fatalf("NewRecordWriter: %v", err)
+	}
+	for _, r := range recs {
+		if err := w.Write(r); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	if err := w.Finish(); err == nil {
+		t.Error("Finish accepted an undercount; want error")
+	}
+
+	// Overcount: declare fewer records than we write.
+	var bin2, idx2 bytes.Buffer
+	w2, err := NewRecordWriter(&bin2, &idx2, uint32(len(recs)-1))
+	if err != nil {
+		t.Fatalf("NewRecordWriter: %v", err)
+	}
+	for _, r := range recs {
+		if err := w2.Write(r); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	if err := w2.Finish(); err == nil {
+		t.Error("Finish accepted an overcount; want error")
+	}
 }
 
 // TestOpenRecordStoreBadMagic rejects a blob whose index lacks the RRSR magic.
