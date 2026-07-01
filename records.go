@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
+	"sort"
 )
 
 const (
@@ -201,6 +203,143 @@ func (s *RecordStore) Get(id uint32) (data []byte, ok bool, err error) {
 		}
 	}
 	return s.decode(buf)
+}
+
+// recordCoalesceGap is the largest gap (bytes) GetMany bridges between two nearby
+// ranged reads: over-reading at most this much beats another round trip. Matches
+// the Rust reader's 16 KiB coalescer.
+const recordCoalesceGap int64 = 16 << 10
+
+// byteRange is a ranged read request tagged with the caller's result index, so a
+// coalesced batch can slice its merged reads back out in the original order.
+type byteRange struct {
+	idx  int
+	off  int64
+	size int
+}
+
+// readCoalesced reads the given ranges from r, merging ranges whose gap is
+// <= gap bytes into a single ReadAt and copying the results back out aligned with
+// each range's idx. Every merged span is bounded before allocating, so a crafted
+// offset pair degrades to an error rather than a multi-GB make(). Ranges need not
+// be sorted. Mirrors the Rust read_coalesced.
+func readCoalesced(r io.ReaderAt, ranges []byteRange, gap int64) ([][]byte, error) {
+	out := make([][]byte, len(ranges))
+	if len(ranges) == 0 {
+		return out, nil
+	}
+	order := make([]int, len(ranges))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool { return ranges[order[a]].off < ranges[order[b]].off })
+	for i := 0; i < len(order); {
+		first := ranges[order[i]]
+		spanStart := first.off
+		spanEnd := first.off + int64(first.size)
+		j := i + 1
+		for j < len(order) {
+			rr := ranges[order[j]]
+			if rr.off > spanEnd+gap {
+				break
+			}
+			if e := rr.off + int64(rr.size); e > spanEnd {
+				spanEnd = e
+			}
+			j++
+		}
+		spanLen := spanEnd - spanStart
+		if spanLen < 0 || spanLen > maxReadBytes {
+			return nil, ErrTruncated
+		}
+		buf := make([]byte, spanLen)
+		if spanLen > 0 {
+			if _, err := r.ReadAt(buf, spanStart); err != nil {
+				return nil, err
+			}
+		}
+		for k := i; k < j; k++ {
+			rr := ranges[order[k]]
+			rel := int(rr.off - spanStart)
+			seg := make([]byte, rr.size)
+			copy(seg, buf[rel:rel+rr.size])
+			out[rr.idx] = seg
+		}
+		i = j
+	}
+	return out, nil
+}
+
+// GetMany returns the decoded record bytes for each in-range id, keyed by id. Doc
+// IDs are rank-ordered by construction, so a top-k page's ids are frequently
+// near-contiguous: GetMany reads the offset-table entries in coalesced waves and
+// then the record blobs in coalesced waves (bridging gaps <= recordCoalesceGap),
+// so ~20 near-contiguous records cost a handful of ranged reads rather than ~2 per
+// id. Out-of-range ids are omitted; a zero-length record maps to empty bytes.
+// Results are identical to calling Get on each id.
+func (s *RecordStore) GetMany(ids []uint32) (map[uint32][]byte, error) {
+	out := make(map[uint32][]byte, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	// Dedup + sort the in-range ids ascending (== rank order); out-of-range omitted.
+	seen := make(map[uint32]struct{}, len(ids))
+	sorted := make([]uint32, 0, len(ids))
+	for _, id := range ids {
+		if id >= s.count {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		sorted = append(sorted, id)
+	}
+	if len(sorted) == 0 {
+		return out, nil
+	}
+	slices.Sort(sorted)
+
+	// Wave 1: the 16-byte offset pair per id, coalesced over the offset table
+	// (consecutive ids' pairs overlap, so a run of them is one read).
+	pairRanges := make([]byteRange, len(sorted))
+	for i, id := range sorted {
+		pairRanges[i] = byteRange{idx: i, off: int64(recordHeaderSize) + int64(id)*8, size: 16}
+	}
+	pairs, err := readCoalesced(s.idx, pairRanges, recordCoalesceGap)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wave 2: each record's blob, coalesced (adjacent blobs within the gap merge).
+	blobRanges := make([]byteRange, len(sorted))
+	for i := range sorted {
+		start := binary.LittleEndian.Uint64(pairs[i][0:8])
+		end := binary.LittleEndian.Uint64(pairs[i][8:16])
+		if end < start {
+			return nil, ErrTruncated
+		}
+		// The offset pair is untrusted: bound the record span before allocating.
+		span := end - start
+		if span > maxRecordBytes {
+			return nil, ErrTruncated
+		}
+		blobRanges[i] = byteRange{idx: i, off: int64(start), size: int(span)}
+	}
+	blobs, err := readCoalesced(s.bin, blobRanges, recordCoalesceGap)
+	if err != nil {
+		return nil, err
+	}
+	for i, id := range sorted {
+		data, ok, err := s.decode(blobs[i])
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out[id] = data
+		}
+	}
+	return out, nil
 }
 
 // decode unwraps a version-2 [tag][payload] frame; a version-1 store (and the

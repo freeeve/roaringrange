@@ -106,6 +106,54 @@ func Open(r io.ReaderAt) (*Index, error) {
 	}, nil
 }
 
+// dictBlockFor returns the sparse-index block that could contain key, or -1 when
+// key precedes the dictionary (so it is absent). One in-memory binary search, no
+// read.
+func (s *Index) dictBlockFor(key uint64) int {
+	return sort.Search(len(s.sparseKeys), func(i int) bool { return s.sparseKeys[i] > key }) - 1
+}
+
+// readDictBlock reads sparse block b with one ranged read and returns its bytes and
+// entry count. blockLen and the block size derive from untrusted header fields; a
+// corrupt sparse/stride pairing can drive a non-positive or multi-GB length, so a
+// valid index (blockLen >= 1, bounded size) is required rather than allocating on
+// whatever the header claims.
+func (s *Index) readDictBlock(b int) (blockBytes []byte, blockLen int, err error) {
+	base := b * s.stride
+	blockLen = s.stride
+	if base+blockLen > s.ngrams {
+		blockLen = s.ngrams - base
+	}
+	blockSize := uint64(blockLen) * dictEntry
+	if blockLen <= 0 || blockSize > maxReadBytes {
+		return nil, 0, ErrTruncated
+	}
+	blockBytes = make([]byte, blockSize)
+	if _, err := s.r.ReadAt(blockBytes, s.dictStart+int64(base*dictEntry)); err != nil {
+		return nil, 0, err
+	}
+	return blockBytes, blockLen, nil
+}
+
+// findInBlock binary-searches a dict block's blockLen entries for key.
+func findInBlock(blockBytes []byte, blockLen int, key uint64) (dictRec, bool) {
+	i := sort.Search(blockLen, func(i int) bool {
+		return binary.LittleEndian.Uint64(blockBytes[i*dictEntry:]) >= key
+	})
+	if i >= blockLen {
+		return dictRec{}, false
+	}
+	off := i * dictEntry
+	if binary.LittleEndian.Uint64(blockBytes[off:]) != key {
+		return dictRec{}, false
+	}
+	return dictRec{
+		key:    key,
+		offset: binary.LittleEndian.Uint64(blockBytes[off+8:]),
+		size:   binary.LittleEndian.Uint32(blockBytes[off+16:]),
+	}, true
+}
+
 // lookup resolves a key to its dictionary record using one in-memory sparse
 // binary search followed by a single ranged read of the relevant dict block,
 // then a binary search within that block. ok is false if the key is absent.
@@ -113,42 +161,51 @@ func (s *Index) lookup(key uint64) (rec dictRec, ok bool, err error) {
 	if s.ngrams == 0 {
 		return dictRec{}, false, nil
 	}
-	b := sort.Search(len(s.sparseKeys), func(i int) bool { return s.sparseKeys[i] > key }) - 1
+	b := s.dictBlockFor(key)
 	if b < 0 {
 		return dictRec{}, false, nil
 	}
-	base := b * s.stride
-	blockLen := s.stride
-	if base+blockLen > s.ngrams {
-		blockLen = s.ngrams - base
-	}
-	// blockLen and the block size are derived from untrusted header fields; a
-	// corrupt sparse/stride pairing can drive a non-positive or multi-GB length.
-	// A valid index always yields blockLen >= 1, so treat anything else as
-	// malformed rather than allocating on it.
-	blockSize := uint64(blockLen) * dictEntry
-	if blockLen <= 0 || blockSize > maxReadBytes {
-		return dictRec{}, false, ErrTruncated
-	}
-	blockBytes := make([]byte, blockSize)
-	if _, err := s.r.ReadAt(blockBytes, s.dictStart+int64(base*dictEntry)); err != nil {
+	blockBytes, blockLen, err := s.readDictBlock(b)
+	if err != nil {
 		return dictRec{}, false, err
 	}
-	i := sort.Search(blockLen, func(i int) bool {
-		return binary.LittleEndian.Uint64(blockBytes[i*dictEntry:]) >= key
-	})
-	if i >= blockLen {
-		return dictRec{}, false, nil
+	rec, ok = findInBlock(blockBytes, blockLen, key)
+	return rec, ok, nil
+}
+
+// lookupMany resolves keys to their dictionary records with one ranged read per
+// distinct sparse block, deduping keys that share a block (a strict-AND of n
+// trigram keys that fall in the same block then costs one dict read, not n).
+// Mirrors the Rust read_dict_blocks dedup. Absent keys are omitted from the map.
+func (s *Index) lookupMany(keys []uint64) (map[uint64]dictRec, error) {
+	out := make(map[uint64]dictRec, len(keys))
+	if s.ngrams == 0 || len(keys) == 0 {
+		return out, nil
 	}
-	off := i * dictEntry
-	if binary.LittleEndian.Uint64(blockBytes[off:]) != key {
-		return dictRec{}, false, nil
+	// Group distinct keys by their sparse block so each block is read once.
+	seen := make(map[uint64]struct{}, len(keys))
+	byBlock := make(map[int][]uint64)
+	for _, k := range keys {
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		if b := s.dictBlockFor(k); b >= 0 {
+			byBlock[b] = append(byBlock[b], k)
+		}
 	}
-	return dictRec{
-		key:    key,
-		offset: binary.LittleEndian.Uint64(blockBytes[off+8:]),
-		size:   binary.LittleEndian.Uint32(blockBytes[off+16:]),
-	}, true, nil
+	for b, ks := range byBlock {
+		blockBytes, blockLen, err := s.readDictBlock(b)
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range ks {
+			if rec, ok := findInBlock(blockBytes, blockLen, k); ok {
+				out[k] = rec
+			}
+		}
+	}
+	return out, nil
 }
 
 // Posting returns the full posting bytes for key via one ranged dictionary read
@@ -167,6 +224,31 @@ func (s *Index) Posting(key uint64) (data []byte, ok bool, err error) {
 		return nil, false, err
 	}
 	return buf, true, nil
+}
+
+// Postings returns the posting bytes for each present key, keyed by key. The dict
+// blocks are read once per distinct sparse block (deduping keys that share a
+// block), then one ranged read per present posting -- so an n-key query costs
+// (distinct dict blocks + present postings) reads, not up to 2n. Absent keys are
+// omitted from the map.
+func (s *Index) Postings(keys []uint64) (map[uint64][]byte, error) {
+	recs, err := s.lookupMany(keys)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uint64][]byte, len(recs))
+	for k, rec := range recs {
+		// rec.size is an untrusted u32 (up to ~4 GiB); bound the posting allocation.
+		if uint64(rec.size) > maxReadBytes {
+			return nil, ErrTruncated
+		}
+		buf := make([]byte, rec.size)
+		if _, err := s.r.ReadAt(buf, int64(rec.offset)); err != nil {
+			return nil, err
+		}
+		out[k] = buf
+	}
+	return out, nil
 }
 
 // NgramCount returns the number of n-grams in the dictionary.
