@@ -19,3 +19,26 @@
 
 - A Go mutation-fuzz harness over the reader parse paths (mirror the Rust harness added in 45fa50f): mutated headers/dict records/offset pairs must produce errors, never panics or multi-GB allocations. Wire into `go test` (fuzz corpus checked in).
 - Existing goldens and conformance tests still pass byte-identical.
+
+## Outcome (DONE)
+
+Reader-side only; no format or output-byte changes (writers untouched, conformance
+byte-identical).
+
+- `reader.go`: added `maxReadBytes` (1 GiB) cap. `Open` computes the sparse-index
+  layout in uint64 (no overflow / no negative length on 32-bit) and rejects a
+  layout past the cap; `lookup` rejects a non-positive or over-cap dict block;
+  `Posting` bounds the untrusted u32 `rec.size`. The findings' `end < start` /
+  stride==0 guards were already present.
+- `records.go`: added `maxRecordBytes` (64 MiB) + `maxDecompressedRecord` (64 MiB);
+  `Get` bounds the offset-pair span before `make`.
+- `records_zstd.go`: `OpenRecordStoreWithDict` sets `WithDecoderMaxMemory` so a
+  zstd bomb errors instead of inflating unbounded (mirrors the Rust 64 MiB cap).
+- `reader_fuzz_test.go` (new): targeted hostile-header regressions (sparse-index,
+  dict-block, posting-size, record-span -- each proven to reject rather than
+  allocate), deterministic single-mutation sweeps over valid RRS/RRSR fixtures
+  asserting no panic, and native `FuzzRRSReader` / `FuzzRRSRecordStore` targets.
+  Native fuzzing ran clean (349K RRS execs, 3.8M RRSR execs, no crashers).
+
+Note: `RecordWriter` count-enforcement (finding A5 / the writer footgun) is tracked
+separately in task 067 item 4; not part of this reader-hardening pass.
