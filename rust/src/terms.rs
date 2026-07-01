@@ -45,6 +45,17 @@ const MAX_RESIDENT_ROUTER: u64 = 512 << 20;
 /// with a router FST; the original monolithic-FST v1 is no longer read).
 const VERSION: u16 = 2;
 
+/// Upper bound on the number of prefix-matching dictionary terms a single
+/// [`TermIndex::search_prefix`] unions. A 1–2 char prefix over a 100M+-term
+/// vocabulary would otherwise fan out an effectively unbounded set of concurrent
+/// head fetches (one per term) in the browser; the union of this many rank-ordered
+/// heads fills any realistic `limit`. A prefix matching more terms is reported
+/// truncated so a UI can flag the result as a bounded approximation.
+const MAX_PREFIX_TERMS: usize = 2048;
+/// Number of dictionary blocks fetched per concurrent wave while scanning a prefix
+/// range, rather than one blocking round trip per candidate block.
+const PREFIX_BLOCK_WAVE: usize = 8;
+
 /// Splits `text` into lowercased terms, mirroring Tantivy's `SimpleTokenizer`
 /// (a token is a maximal run of `char::is_alphanumeric`) followed by its
 /// `LowerCaser` (`char::to_lowercase`). The builder and the reader call this same
@@ -598,9 +609,12 @@ impl<F: RangeFetch> TermIndex<F> {
             fulls.push(full);
         }
         fulls.sort_by_key(|b| b.len());
-        let mut acc = fulls[0].clone();
-        for b in &fulls[1..] {
-            acc &= b;
+        // Take ownership of the smallest full posting (multi-MB for a common term)
+        // as the accumulator rather than cloning it — the vec is not reused after.
+        let mut iter = fulls.into_iter();
+        let mut acc = iter.next().unwrap();
+        for b in iter {
+            acc &= &b;
             if acc.is_empty() {
                 break;
             }
@@ -748,12 +762,27 @@ impl<F: RangeFetch> TermIndex<F> {
     /// the same way [`tokenize`] lowercases — unless the index is case-sensitive, when
     /// it is matched verbatim. An empty match set yields no results.
     pub async fn search_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<u32>, IndexError> {
+        Ok(self.search_prefix_capped(prefix, limit).await?.0)
+    }
+
+    /// Like [`search_prefix`](Self::search_prefix) but also reports whether the
+    /// prefix matched more than [`MAX_PREFIX_TERMS`] dictionary terms. When
+    /// `truncated` is `true` only the first `MAX_PREFIX_TERMS` (lexicographically)
+    /// were unioned, so the doc-ID set is a bounded approximation of the full prefix
+    /// union — a UI can surface this as "showing partial matches". A non-truncated
+    /// prefix returns the exact union, identical to before the cap was added.
+    pub async fn search_prefix_capped(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<(Vec<u32>, bool), IndexError> {
         if limit == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
         let p = self.fold_prefix(prefix);
-        let locs = self.prefix_locs(&p).await?;
-        self.union_locs(locs, limit).await
+        let (locs, truncated) = self.prefix_locs(&p).await?;
+        let docs = self.union_locs(locs, limit).await?;
+        Ok((docs, truncated))
     }
 
     /// Autocompletes `prefix`: up to `max_terms` dictionary terms that start with it,
@@ -780,10 +809,16 @@ impl<F: RangeFetch> TermIndex<F> {
         }
     }
 
-    /// Posting locations of every dictionary term starting with `p` (scans the dict
-    /// blocks spanning the prefix).
-    async fn prefix_locs(&self, p: &str) -> Result<Vec<(u64, usize)>, IndexError> {
-        Ok(self.scan_prefix(p, usize::MAX, false).await?.0)
+    /// Posting locations of the dictionary terms starting with `p` (scans the dict
+    /// blocks spanning the prefix), capped at [`MAX_PREFIX_TERMS`]. Returns
+    /// `(locs, truncated)`; `truncated` is `true` when the prefix matched more than
+    /// the cap, so the caller can flag a bounded result. Scans one past the cap to
+    /// distinguish "exactly the cap" from "more than the cap".
+    async fn prefix_locs(&self, p: &str) -> Result<(Vec<(u64, usize)>, bool), IndexError> {
+        let mut locs = self.scan_prefix(p, MAX_PREFIX_TERMS + 1, false).await?.0;
+        let truncated = locs.len() > MAX_PREFIX_TERMS;
+        locs.truncate(MAX_PREFIX_TERMS);
+        Ok((locs, truncated))
     }
 
     /// Scans the dictionary forward from the first block that could contain `p`,
@@ -811,27 +846,34 @@ impl<F: RangeFetch> TermIndex<F> {
                 ranges.push((self.dict_start + off, len));
             }
         }
-        for (off, len) in ranges {
-            let bytes = self.fetch.read(off, len).await?;
-            let mut passed = false;
-            for (t, head_off, head_size) in iter_block(&bytes) {
-                if t.as_slice() < pb {
-                    continue; // before the prefix (only possible in the first block)
+        // Fetch candidate blocks in concurrent waves rather than one blocking round
+        // trip each: a short prefix spans many blocks, and the sorted early-stop
+        // (a term past the prefix) or the `max` cap ends the scan after at most one
+        // over-fetched wave.
+        'outer: for wave in ranges.chunks(PREFIX_BLOCK_WAVE) {
+            let fetched = join_all(wave.iter().map(|&(off, len)| self.fetch.read(off, len))).await;
+            for bytes in fetched {
+                let bytes = bytes?;
+                let mut passed = false;
+                for (t, head_off, head_size) in iter_block(&bytes) {
+                    if t.as_slice() < pb {
+                        continue; // before the prefix (only possible in the first block)
+                    }
+                    if !t.starts_with(pb) {
+                        passed = true; // sorted: the prefix range has ended
+                        break;
+                    }
+                    locs.push((head_off, head_size));
+                    if want_terms {
+                        terms.push(String::from_utf8_lossy(&t).into_owned());
+                    }
+                    if locs.len() >= max {
+                        return Ok((locs, terms));
+                    }
                 }
-                if !t.starts_with(pb) {
-                    passed = true; // sorted: the prefix range has ended
-                    break;
+                if passed {
+                    break 'outer;
                 }
-                locs.push((head_off, head_size));
-                if want_terms {
-                    terms.push(String::from_utf8_lossy(&t).into_owned());
-                }
-                if locs.len() >= max {
-                    return Ok((locs, terms));
-                }
-            }
-            if passed {
-                break;
             }
         }
         Ok((locs, terms))
@@ -942,6 +984,20 @@ mod tests {
         )
         .unwrap();
         block_on(TermIndex::open(MemoryFetch::new(buf))).unwrap()
+    }
+
+    /// A [`RangeFetch`] that counts reads through a shared cell, so a test can assert
+    /// a query's fetch fan-out is bounded. `reads` is cloned out before the fetch is
+    /// moved into the index.
+    struct CountingFetch {
+        inner: MemoryFetch,
+        reads: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+    impl crate::fetch::RangeFetch for CountingFetch {
+        async fn read(&self, off: u64, len: usize) -> Result<Vec<u8>, crate::fetch::FetchError> {
+            self.reads.set(self.reads.get() + 1);
+            self.inner.read(off, len).await
+        }
     }
 
     #[test]
@@ -1186,6 +1242,80 @@ mod tests {
         );
         // limit 2 is satisfied by the rank heads alone — no tail fetch needed.
         assert_eq!(block_on(ti.search_prefix("alp", 2)).unwrap(), vec![0, 1]);
+    }
+
+    /// Task 063 item 1: a prefix matching more than `MAX_PREFIX_TERMS` terms caps the
+    /// union (bounding the concurrent head fan-out) and reports truncation, rather
+    /// than fanning out one head fetch per matching term over the whole vocabulary.
+    #[test]
+    fn search_prefix_caps_fanout_and_reports_truncation() {
+        // A vocabulary just over the cap, every term sharing the prefix "aa", each in
+        // its own doc (doc id == rank). A tiny block cap forces many dict blocks.
+        let n = MAX_PREFIX_TERMS + 40;
+        let texts: Vec<String> = (0..n as u32).map(|i| format!("aa{i:06}")).collect();
+        let docs: Vec<(u32, &str)> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i as u32, s.as_str()))
+            .collect();
+        let mut buf = Vec::new();
+        write_term_index_with(
+            &mut buf,
+            &docs,
+            &TermIndexConfig {
+                head_boundary: 65_536,
+                language: None,
+                stem: false,
+                stopwords: false,
+                case_sensitive: false,
+                block_cap: 32,
+            },
+        )
+        .unwrap();
+        let reads = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let idx = block_on(TermIndex::open(CountingFetch {
+            inner: MemoryFetch::new(buf),
+            reads: reads.clone(),
+        }))
+        .unwrap();
+        assert_eq!(idx.len() as usize, n, "every term is distinct");
+
+        // prefix_locs caps the matched terms and flags truncation.
+        let (locs, truncated) = block_on(idx.prefix_locs("aa")).unwrap();
+        assert!(truncated, "more terms than the cap matched");
+        assert_eq!(locs.len(), MAX_PREFIX_TERMS, "matched terms are capped");
+
+        // The head fan-out is one fetch per capped loc — bounded by the cap, not the
+        // full vocabulary (which is larger).
+        reads.set(0);
+        let docs_out = block_on(idx.union_locs(locs, 10)).unwrap();
+        assert!(
+            reads.get() <= MAX_PREFIX_TERMS,
+            "head fan-out {} exceeded the cap",
+            reads.get()
+        );
+        // Ascending == rank: the ten most popular docs from the capped (lex-first) union.
+        assert_eq!(docs_out, (0..10).collect::<Vec<u32>>());
+
+        // End to end, search_prefix_capped surfaces the same truncation flag.
+        let (ids, trunc) = block_on(idx.search_prefix_capped("aa", 10)).unwrap();
+        assert!(trunc);
+        assert_eq!(ids, (0..10).collect::<Vec<u32>>());
+    }
+
+    /// A prefix within the cap returns the exact union and reports `truncated == false`.
+    #[test]
+    fn search_prefix_within_cap_is_exact_and_untruncated() {
+        let docs = [
+            (0u32, "learn"),
+            (1, "learning"),
+            (2, "lethal"),
+            (3, "unrelated"),
+        ];
+        let ti = build(&docs, 65_536);
+        let (ids, truncated) = block_on(ti.search_prefix_capped("le", 10)).unwrap();
+        assert!(!truncated);
+        assert_eq!(ids, vec![0, 1, 2]);
     }
 
     #[test]

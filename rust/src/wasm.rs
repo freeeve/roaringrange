@@ -1755,6 +1755,34 @@ impl RrtHits {
     }
 }
 
+/// Result of [`RrtIndex::searchPrefixCapped`]: the matching doc IDs and whether the
+/// prefix matched more dictionary terms than the union cap. When `truncated` is
+/// `true`, `ids` is a bounded approximation (the first cap terms lexicographically),
+/// so a UI can surface "showing partial matches".
+#[cfg(feature = "terms")]
+#[wasm_bindgen]
+pub struct PrefixSearch {
+    ids: Vec<u32>,
+    truncated: bool,
+}
+
+#[cfg(feature = "terms")]
+#[wasm_bindgen]
+impl PrefixSearch {
+    /// The matching doc IDs as a `Uint32Array`, most popular first.
+    #[wasm_bindgen(getter)]
+    pub fn ids(&self) -> Vec<u32> {
+        self.ids.clone()
+    }
+
+    /// Whether the prefix matched more terms than the cap, making `ids` a bounded
+    /// approximation of the full prefix union.
+    #[wasm_bindgen(getter)]
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
 /// A range-fetchable `RRTI` term-level inverted index exposed to JavaScript. Boot
 /// holds only the small resident block router in memory (O(#blocks), not O(vocab));
 /// each query range-fetches the dict blocks and postings it needs. Built with
@@ -1797,6 +1825,24 @@ impl RrtIndex {
             .search_prefix(prefix, limit)
             .await
             .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Like [`searchPrefix`](Self::search_prefix) but returns a [`PrefixSearch`]
+    /// carrying a `truncated` flag: `true` when the prefix matched more dictionary
+    /// terms than the union cap, so `ids` is a bounded approximation of the full
+    /// prefix union rather than the exact set.
+    #[wasm_bindgen(js_name = searchPrefixCapped)]
+    pub async fn search_prefix_capped(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<PrefixSearch, JsError> {
+        let (ids, truncated) = self
+            .inner
+            .search_prefix_capped(prefix, limit)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(PrefixSearch { ids, truncated })
     }
 
     /// Autocompletes `prefix`: up to `max_terms` dictionary terms that start with
