@@ -266,6 +266,47 @@ def test_splitset_writer_flush_and_resume(tmp_path):
     assert split_count == 2  # original delta + the new one
 
 
+def test_splitset_writer_case_sensitive_flag_set_and_inherited():
+    # Default folds case: manifest flag clear, delta split is RRSI v3.
+    w = rr.SplitSetWriter(gram_size=3, name_prefix="corpus", policy="stable_key")
+    w.add("Abc Hello")
+    _n, split_bytes, manifest = w.flush()
+    (flags,) = struct.unpack_from("<H", manifest, 6)
+    (version,) = struct.unpack_from("<H", split_bytes, 4)
+    assert flags & (1 << 4) == 0  # FLAG_CASE_SENSITIVE clear
+    assert version == 3
+
+    # case_sensitive=True: manifest flag set, delta split is the case-sensitive v4.
+    cw = rr.SplitSetWriter(
+        gram_size=3, name_prefix="corpus", policy="stable_key", case_sensitive=True
+    )
+    cw.add("Abc Hello")
+    _n2, cs_split, cs_manifest = cw.flush()
+    (cs_flags,) = struct.unpack_from("<H", cs_manifest, 6)
+    (cs_version,) = struct.unpack_from("<H", cs_split, 4)
+    assert cs_flags & (1 << 4) != 0
+    assert cs_version == 4
+
+    # Resume (without re-passing the flag) inherits case sensitivity from the
+    # manifest, so the appended delta stays v4 and the flag persists.
+    rw = rr.SplitSetWriter.resume(cs_manifest, gram_size=3, name_prefix="corpus")
+    rw.add("Xyz World")
+    _n3, resumed_split, resumed_manifest = rw.flush()
+    (r_flags,) = struct.unpack_from("<H", resumed_manifest, 6)
+    (r_version,) = struct.unpack_from("<H", resumed_split, 4)
+    assert r_flags & (1 << 4) != 0, "resumed manifest lost the case-sensitive flag"
+    assert r_version == 4, "resumed delta silently reverted to case-folded v3"
+
+
+def test_builder_rejects_non_container_head_boundary():
+    # A head_boundary off a 65536 container boundary would straddle a roaring
+    # container; the ctor must reject it rather than build a misaligned sidecar.
+    with pytest.raises(ValueError):
+        rr.Builder(gram_size=3, head_boundary=65537)
+    # A multiple is accepted.
+    rr.Builder(gram_size=3, head_boundary=131072)
+
+
 def test_splitset_writer_delete_then_compact(tmp_path):
     w = rr.SplitSetWriter(gram_size=3, name_prefix="corpus", policy="stable_key")
     w.add("abc one")

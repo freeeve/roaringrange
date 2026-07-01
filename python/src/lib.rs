@@ -23,8 +23,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use roaring::RoaringBitmap;
 use roaringrange_core::build::{
-    serialize_posting, split_posting, write_facets, write_index, write_records, FacetCategory,
-    FacetField, DEFAULT_HEAD_BOUNDARY,
+    serialize_posting, split_posting, write_facets, write_index, FacetCategory, FacetField,
+    RecordWriter, DEFAULT_HEAD_BOUNDARY,
 };
 use roaringrange_core::ngram_keys;
 use roaringrange_core::vector::Metric;
@@ -89,16 +89,24 @@ struct Builder {
 impl Builder {
     /// Creates a builder. `gram_size` is the trigram window (3 is the usual
     /// choice; it must match what the reader queries with). `head_boundary` is the
-    /// doc-ID split between the head posting (the top-ranked docs, fetched first)
-    /// and the tail; it must be a multiple of 65536 and defaults to 65536.
+    /// doc-ID split between the facet head posting (the top-ranked docs, fetched
+    /// first) and the tail; it must be a multiple of 65536 (a roaring container
+    /// boundary) and defaults to 65536. Raises `ValueError` otherwise.
     #[new]
     #[pyo3(signature = (gram_size = 3, head_boundary = 65536))]
-    fn new(gram_size: u16, head_boundary: u32) -> Self {
-        Builder {
+    fn new(gram_size: u16, head_boundary: u32) -> PyResult<Self> {
+        // A head/tail split off a container boundary would straddle a roaring
+        // container, which the reader's container-level tail seek assumes is aligned.
+        if !head_boundary.is_multiple_of(DEFAULT_HEAD_BOUNDARY) {
+            return Err(PyValueError::new_err(format!(
+                "head_boundary must be a multiple of {DEFAULT_HEAD_BOUNDARY}, got {head_boundary}"
+            )));
+        }
+        Ok(Builder {
             gram_size: gram_size.max(1),
             head_boundary: head_boundary.max(DEFAULT_HEAD_BOUNDARY),
             docs: Vec::new(),
-        }
+        })
     }
 
     /// Stages one record. `rank` orders results (higher first); `text` is
@@ -160,7 +168,6 @@ impl Builder {
 
         let mut index: HashMap<u64, RoaringBitmap> = HashMap::new();
         let mut facet_index: BTreeMap<String, BTreeMap<String, RoaringBitmap>> = BTreeMap::new();
-        let mut records: Vec<Vec<u8>> = vec![Vec::new(); n];
 
         for (doc_id, &orig) in order.iter().enumerate() {
             let did = doc_id as u32;
@@ -174,7 +181,6 @@ impl Builder {
                     f.entry(cat.clone()).or_default().insert(did);
                 }
             }
-            records[doc_id] = doc.record.clone();
         }
 
         // RRS text index (v3: one posting per term, no head/tail split).
@@ -215,13 +221,19 @@ impl Builder {
         write_facets(File::create(dir.join("index.rrf")).map_err(io_err)?, fields)
             .map_err(io_err)?;
 
-        // RRSR record store.
-        write_records(
+        // RRSR record store, streamed in doc-ID order straight from the staged docs
+        // so the records are never cloned into a second in-memory copy (peak memory
+        // stays ~1x the record bytes, not 2x); self.docs is left intact for a repeat
+        // build.
+        let mut rw = RecordWriter::new(
             File::create(dir.join("records.bin")).map_err(io_err)?,
             File::create(dir.join("records.idx")).map_err(io_err)?,
-            &records,
+            n as u32,
         )
         .map_err(io_err)?;
+        for &orig in &order {
+            rw.write(&self.docs[orig].record).map_err(io_err)?;
+        }
 
         Ok(BuildStats {
             docs: n,
@@ -935,9 +947,11 @@ struct SplitSetWriter {
 impl SplitSetWriter {
     /// Creates a fresh writer (no prior splits — the first flush writes the first delta).
     /// `policy`/`tier_count`/`sortcol` are recorded in the manifest header for when a base is
-    /// later compacted in; `head_boundary`/`stride` of `0` take the `RRS` defaults.
+    /// later compacted in; `stride` of `0` takes the `RRS` default. `case_sensitive=True` builds
+    /// case-sensitive delta splits and sets the manifest flag (default folds case). `head_boundary`
+    /// is accepted for compatibility but ignored (v3 delta splits have no head/tail split).
     #[new]
-    #[pyo3(signature = (gram_size=3, byte_cap=33_554_432, name_prefix="split", policy="stable_key", head_boundary=0, stride=0, tier_count=0, sortcol=None, bloom_bits_per_key=10))]
+    #[pyo3(signature = (gram_size=3, byte_cap=33_554_432, name_prefix="split", policy="stable_key", head_boundary=0, stride=0, tier_count=0, sortcol=None, bloom_bits_per_key=10, case_sensitive=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         gram_size: u16,
@@ -949,6 +963,7 @@ impl SplitSetWriter {
         tier_count: u16,
         sortcol: Option<(String, u16, bool)>,
         bloom_bits_per_key: u32,
+        case_sensitive: bool,
     ) -> PyResult<Self> {
         let config = WriterConfig {
             gram_size: gram_size.max(1),
@@ -960,7 +975,7 @@ impl SplitSetWriter {
             tier_count,
             sortcol: sortcol_spec(sortcol),
             bloom_bits_per_key,
-            case_sensitive: false,
+            case_sensitive,
         };
         Ok(SplitSetWriter {
             inner: CoreSplitSetWriter::new(config),
@@ -968,9 +983,12 @@ impl SplitSetWriter {
     }
 
     /// Resumes over an existing split set given its manifest `bytes`: carries forward every
-    /// split, continues the global id space, and advances the epoch. `gram_size`/
-    /// `head_boundary`/`stride`/`bloom_bits_per_key` must match the base (they are not fully
-    /// recorded per split in the manifest). Raises `ValueError` if the manifest is malformed.
+    /// split, continues the global id space, and advances the epoch. `gram_size`/`stride`/
+    /// `bloom_bits_per_key` must match the base (they are not fully recorded per split in the
+    /// manifest); the case-sensitivity mode is inherited from the manifest's flag, so delta
+    /// splits key identically to the base. `head_boundary` is accepted for compatibility but
+    /// ignored (v3 delta splits have no head/tail split). Raises `ValueError` if the manifest
+    /// is malformed.
     #[staticmethod]
     #[pyo3(signature = (manifest, gram_size=3, head_boundary=0, stride=0, name_prefix="split", bloom_bits_per_key=10))]
     fn resume(

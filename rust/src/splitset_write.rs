@@ -45,7 +45,9 @@ use std::io;
 pub struct WriterConfig {
     /// N-gram window the delta `RRS` splits are built with (must match the base).
     pub gram_size: u16,
-    /// Doc-ID head/tail split for delta splits (`0` → [`DEFAULT_HEAD_BOUNDARY`]).
+    /// Accepted for API/source compatibility but **ignored**: v3 RRS delta splits
+    /// have no head/tail split (one posting per term), so this never affects output.
+    /// `SplitSetWriter::new` does not read it and `resume` explicitly ignores it.
     pub head_boundary: u32,
     /// Sparse-index stride for delta splits (`0` → [`DEFAULT_STRIDE`]).
     pub stride: u32,
