@@ -841,6 +841,67 @@ fn facet_filtering_within_or_across_and() {
 }
 
 #[test]
+fn cursor_tail_pagination_applies_excludes() {
+    use crate::facet::FilterSel;
+    let abc = ngram_keys("abc", 3)[0];
+    // "abc" matches two head docs and three tail docs (>= BUCKET, so they page
+    // through the incremental tail scan, not the eager head prefix).
+    let t1 = BUCKET + 1;
+    let t2 = BUCKET + 2;
+    let t3 = 2 * BUCKET + 5;
+    let idx = block_on(Index::open(MemoryFetch::new(build_rrs(
+        3,
+        2,
+        &[(abc, bm(&[1, 3, t1, t2, t3]))],
+    ))))
+    .unwrap();
+
+    let facets = block_on(FacetIndex::open(MemoryFetch::new(build_rrsf(&[
+        (
+            "format",
+            vec![("ebook", bm(&[1, t1, t3])), ("audiobook", bm(&[3, t2]))],
+        ),
+        // A category spanning a head doc (3) and a tail doc (t2) — the exclude
+        // must drop both, including t2 which lives past the eager prefix.
+        ("flag", vec![("spam", bm(&[3, t2]))]),
+    ]))))
+    .unwrap();
+
+    let page_sels = |sels: Vec<FilterSel>| -> Vec<u32> {
+        let filter = facets.resolve_sels(&sels);
+        let mut cur = block_on(idx.search_cursor_filtered("abc", 0, Some(filter))).unwrap();
+        block_on(cur.page(0, 100)).unwrap()
+    };
+
+    // Excludes-only: text {1,3,t1,t2,t3} ANDNOT spam{3,t2} = {1,t1,t3}. The old
+    // incremental tail path dropped the exclude and returned t2 as well.
+    assert_eq!(
+        page_sels(vec![FilterSel::exclude("flag", "spam")]),
+        vec![1, t1, t3]
+    );
+
+    // Include + exclude: ebook{1,t1,t3} ANDNOT spam{3,t2} = {1,t1,t3} (spam
+    // touches no ebook doc, so the result is unchanged but must still page).
+    assert_eq!(
+        page_sels(vec![
+            FilterSel::include("format", "ebook"),
+            FilterSel::exclude("flag", "spam"),
+        ]),
+        vec![1, t1, t3]
+    );
+
+    // Include + exclude where the exclude removes an included tail doc:
+    // audiobook{3,t2} ANDNOT spam{3,t2} = {} (both docs are excluded).
+    assert_eq!(
+        page_sels(vec![
+            FilterSel::include("format", "audiobook"),
+            FilterSel::exclude("flag", "spam"),
+        ]),
+        Vec::<u32>::new()
+    );
+}
+
+#[test]
 fn facet_open_rejects_out_of_bounds_category_range() {
     let mut rrsf = build_rrsf(&[
         (

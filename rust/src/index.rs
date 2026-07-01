@@ -1023,12 +1023,21 @@ impl<F: RangeFetch> Cursor<F> {
                         .collect(),
                     None => Vec::new(),
                 };
+                let exclude_ranges: Vec<(u64, usize)> = match &self.filter {
+                    Some(f) => f
+                        .excludes
+                        .iter()
+                        .map(|c| (c.tail_off, c.tail_size as usize))
+                        .collect(),
+                    None => Vec::new(),
+                };
                 let facet_fetch = self.filter.as_ref().map(|f| &f.fetch);
                 self.tail_scan = crate::posting::TailScan::open(
                     &self.fetch,
                     &ranges,
                     facet_fetch,
                     &facet_fields,
+                    &exclude_ranges,
                     EAGER_BUCKETS,
                 )
                 .await?;

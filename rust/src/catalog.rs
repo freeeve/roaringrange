@@ -388,7 +388,9 @@ mod tests {
 
     #[test]
     fn include_and_exclude_combine() {
-        // ebook{1,3,5,tail} ANDNOT es{4,5} = {1,3,tail}.
+        // ebook{1,3,5,tail} ANDNOT es{4,5,tail} = {1,3}. The excluded `es`
+        // category includes the tail doc, so it must be dropped on the tail path
+        // too (regression for excludes skipped during incremental tail paging).
         let page = block_on(full_cat().search(
             "abc",
             0,
@@ -400,12 +402,14 @@ mod tests {
             ],
         ))
         .unwrap();
-        assert_eq!(page.ids, vec![1, 3, HEAD_BOUNDARY + 1]);
+        assert_eq!(page.ids, vec![1, 3]);
     }
 
     #[test]
     fn multiple_excludes_union() {
-        // query {1,2,3,4,5,tail} ANDNOT (audiobook{2,4} ∪ es{4,5}) = {1,3,tail}.
+        // query {1,2,3,4,5,tail} ANDNOT (audiobook{2,4} ∪ es{4,5,tail}) = {1,3}.
+        // The union of excludes spans the tail doc, which must be removed on the
+        // incremental tail path as well as the head.
         let page = block_on(full_cat().search(
             "abc",
             0,
@@ -417,6 +421,6 @@ mod tests {
             ],
         ))
         .unwrap();
-        assert_eq!(page.ids, vec![1, 3, HEAD_BOUNDARY + 1]);
+        assert_eq!(page.ids, vec![1, 3]);
     }
 }

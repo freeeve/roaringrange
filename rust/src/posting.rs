@@ -441,28 +441,38 @@ pub(crate) struct TailScan {
     /// Per facet field, the selected categories' tail directories (ORed within a
     /// field, ANDed across fields). Empty when the query is unfiltered.
     facets: Vec<Vec<TailDir>>,
+    /// Excluded categories' tail directories, unioned and subtracted from every
+    /// window: a doc surviving the include-AND is dropped if it matches ANY of
+    /// these (`result = includeAnd ANDNOT (OR of excludes)`). Empty when the
+    /// filter has no negated categories. Excludes never prune the candidate keys
+    /// — an excluded doc removes docs from a bucket, not the whole bucket.
+    excludes: Vec<TailDir>,
     keys: Vec<u16>,
     pos: usize,
 }
 
 impl TailScan {
-    /// Opens a scan over the trigram `tails` and the optional `facet_fields` (each a
-    /// field's selected-category `(tail_off, tail_size)` list), reading every
-    /// posting's directory once. Returns `None` if any posting isn't seekable, so
-    /// the caller falls back to the whole-tail intersection.
+    /// Opens a scan over the trigram `tails`, the optional `facet_fields` (each a
+    /// field's selected-category `(tail_off, tail_size)` list) to AND in, and the
+    /// optional `exclude_ranges` (a flat list of negated categories' tails) to
+    /// subtract, reading every posting's directory once. Returns `None` if any
+    /// posting isn't seekable, so the caller falls back to the whole-tail
+    /// intersection (which applies the same includes and excludes).
     pub(crate) async fn open<F: RangeFetch>(
         fetch: &F,
         tails: &[(u64, usize)],
         facet_fetch: Option<&F>,
         facet_fields: &[Vec<(u64, usize)>],
+        exclude_ranges: &[(u64, usize)],
         min_key: u16,
     ) -> Result<Option<TailScan>, IndexError> {
         let trigrams = match open_tail_dirs(fetch, tails).await? {
             Some(d) => d,
             None => return Ok(None),
         };
-        // Facet postings live in the separate facet sidecar, so they are read with
-        // the filter's own fetcher, not the index fetcher.
+        // Facet postings (includes and excludes) live in the separate facet
+        // sidecar, so they are read with the filter's own fetcher, not the index
+        // fetcher.
         let mut facets = Vec::with_capacity(facet_fields.len());
         for field in facet_fields {
             let ff = facet_fetch.expect("facet_fetch is required when facet_fields is non-empty");
@@ -471,6 +481,15 @@ impl TailScan {
                 None => return Ok(None),
             }
         }
+        let excludes = if exclude_ranges.is_empty() {
+            Vec::new()
+        } else {
+            let ff = facet_fetch.expect("facet_fetch is required when exclude_ranges is non-empty");
+            match open_tail_dirs(ff, exclude_ranges).await? {
+                Some(d) => d,
+                None => return Ok(None),
+            }
+        };
         // Only buckets present in all trigrams AND (per field) in at least one
         // selected category can survive the filtered AND — so a selective facet
         // never reads trigram containers for buckets it would empty anyway.
@@ -488,6 +507,7 @@ impl TailScan {
         Ok(Some(TailScan {
             trigrams,
             facets,
+            excludes,
             keys,
             pos: 0,
         }))
@@ -499,8 +519,9 @@ impl TailScan {
     }
 
     /// Intersects up to `batch` more candidate buckets — the trigram strict AND,
-    /// then each facet field's category-OR ANDed in — and returns the surviving
-    /// docs (ascending), advancing the scan. Empty once exhausted.
+    /// then each facet field's category-OR ANDed in, then the excluded categories
+    /// subtracted — and returns the surviving docs (ascending), advancing the
+    /// scan. Empty once exhausted.
     pub(crate) async fn next_window<F: RangeFetch>(
         &mut self,
         fetch: &F,
@@ -526,6 +547,18 @@ impl TailScan {
                 }
                 bm &= field_bm;
             }
+        }
+        if !self.excludes.is_empty() && !bm.is_empty() {
+            let ff = facet_fetch.expect("facet_fetch is required when the scan has excludes");
+            let reads = self
+                .excludes
+                .iter()
+                .map(|cat| read_dir_subset(ff, cat, window));
+            let mut x = RoaringBitmap::new();
+            for c in join_all(reads).await {
+                x |= c?;
+            }
+            bm -= x;
         }
         self.pos = end;
         Ok(bm)
@@ -622,7 +655,7 @@ mod tests {
         let tails = vec![(oa, sa.len()), (ob, sb.len()), (oc, sc.len())];
         let want = block_on(tail_intersect_and(&fetch, &tails)).unwrap();
         for batch in [1usize, 2, 3, 100] {
-            let mut scan = block_on(TailScan::open(&fetch, &tails, None, &[], 0))
+            let mut scan = block_on(TailScan::open(&fetch, &tails, None, &[], &[], 0))
                 .unwrap()
                 .unwrap();
             let mut got = RoaringBitmap::new();
@@ -686,6 +719,7 @@ mod tests {
                 &tails,
                 Some(&fetch),
                 &facet_fields,
+                &[],
                 0,
             ))
             .unwrap()
@@ -695,6 +729,147 @@ mod tests {
                 got |= block_on(scan.next_window(&fetch, Some(&fetch), batch)).unwrap();
             }
             assert_eq!(got, want, "batch={batch}");
+        }
+    }
+
+    /// An exclude-aware TailScan must subtract the negated categories:
+    /// `(trigram_a AND trigram_b) AND (cat1 OR cat2) ANDNOT (excl1 OR excl2)`,
+    /// across every batch size (regression for excludes dropped on the
+    /// incremental tail path).
+    #[test]
+    fn tail_scan_with_excludes_matches_filtered_andnot() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+        let mut cat1 = RoaringBitmap::new();
+        let mut cat2 = RoaringBitmap::new();
+        let mut excl1 = RoaringBitmap::new();
+        let mut excl2 = RoaringBitmap::new();
+        for d in [70001u32, 130000, 200005, 400000, 5_000_000] {
+            a.insert(d);
+            b.insert(d);
+        }
+        for d in 300000..304000u32 {
+            a.insert(d);
+            b.insert(d);
+        }
+        for d in [70001u32, 200005, 303000, 5_000_000] {
+            cat1.insert(d);
+        }
+        for d in [130000u32, 303500] {
+            cat2.insert(d);
+        }
+        // Excludes land on docs across several buckets, including one inside the
+        // dense bucket-4 run and one that is NOT in the include set (a no-op).
+        for d in [200005u32, 303000, 303501] {
+            excl1.insert(d);
+        }
+        for d in [130000u32, 400000, 6_000_000] {
+            excl2.insert(d);
+        }
+        let want = {
+            let mut x = a.clone();
+            x &= &b;
+            let mut f = cat1.clone();
+            f |= &cat2;
+            x &= &f;
+            let mut ex = excl1.clone();
+            ex |= &excl2;
+            x -= &ex;
+            x
+        };
+
+        let mut buf = Vec::new();
+        let mut put = |bm: &RoaringBitmap| {
+            let s = ser(bm);
+            let off = buf.len() as u64;
+            buf.extend_from_slice(&s);
+            (off, s.len())
+        };
+        let ra = put(&a);
+        let rb = put(&b);
+        let r1 = put(&cat1);
+        let r2 = put(&cat2);
+        let x1 = put(&excl1);
+        let x2 = put(&excl2);
+        let fetch = MemoryFetch::new(buf);
+
+        let tails = vec![ra, rb];
+        let facet_fields = vec![vec![r1, r2]]; // one field, categories cat1/cat2
+        let excludes = vec![x1, x2];
+        for batch in [1usize, 2, 7, 100] {
+            let mut scan = block_on(TailScan::open(
+                &fetch,
+                &tails,
+                Some(&fetch),
+                &facet_fields,
+                &excludes,
+                0,
+            ))
+            .unwrap()
+            .unwrap();
+            let mut got = RoaringBitmap::new();
+            while !scan.exhausted() {
+                got |= block_on(scan.next_window(&fetch, Some(&fetch), batch)).unwrap();
+            }
+            assert_eq!(got, want, "include+exclude batch={batch}");
+        }
+    }
+
+    /// An excludes-only TailScan (no include fields) must return the trigram AND
+    /// minus the negated categories — not the unfiltered AND.
+    #[test]
+    fn tail_scan_excludes_only() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+        let mut excl = RoaringBitmap::new();
+        for d in [70001u32, 130000, 200005, 400000, 5_000_000] {
+            a.insert(d);
+            b.insert(d);
+        }
+        for d in [130000u32, 5_000_000] {
+            excl.insert(d);
+        }
+        let want = {
+            let mut x = a.clone();
+            x &= &b;
+            x -= &excl;
+            x
+        };
+
+        let mut buf = Vec::new();
+        let mut put = |bm: &RoaringBitmap| {
+            let s = ser(bm);
+            let off = buf.len() as u64;
+            buf.extend_from_slice(&s);
+            (off, s.len())
+        };
+        let ra = put(&a);
+        let rb = put(&b);
+        let xr = put(&excl);
+        let fetch = MemoryFetch::new(buf);
+
+        let tails = vec![ra, rb];
+        let excludes = vec![xr];
+        for batch in [1usize, 2, 100] {
+            let mut scan = block_on(TailScan::open(
+                &fetch,
+                &tails,
+                Some(&fetch),
+                &[],
+                &excludes,
+                0,
+            ))
+            .unwrap()
+            .unwrap();
+            let mut got = RoaringBitmap::new();
+            while !scan.exhausted() {
+                got |= block_on(scan.next_window(&fetch, Some(&fetch), batch)).unwrap();
+            }
+            assert_eq!(got, want, "excludes-only batch={batch}");
+            assert!(
+                !got.contains(130000) && !got.contains(5_000_000),
+                "excluded docs must not survive (batch={batch})"
+            );
         }
     }
 
