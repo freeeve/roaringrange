@@ -6,6 +6,17 @@ import (
 	"sort"
 )
 
+// maxReadBytes bounds any single buffer the RRS reader allocates from an
+// untrusted header field -- the resident sparse index during Open, a dict block
+// during lookup, or a posting during Posting. Index bytes may come from a
+// hostile origin or a corrupt/partial upload, so a crafted header must produce a
+// recoverable error rather than a multi-GB allocation (an OOM abort) or, on a
+// 32-bit build, a negative length. 1 GiB is far above any legitimate value (a
+// 100+ GB monolith's resident sparse index is tens of MB and its largest posting
+// is well under 100 MB) while fitting a 32-bit int. Mirrors the checked size math
+// the Rust reader adopted in 45fa50f.
+const maxReadBytes = 1 << 30
+
 // dictRec is one parsed v3 RRS dictionary entry: a key and its posting's byte range.
 type dictRec struct {
 	key    uint64
@@ -59,14 +70,21 @@ func Open(r io.ReaderAt) (*Index, error) {
 		return nil, ErrVersion
 	}
 	gramSize := int(binary.LittleEndian.Uint16(header[6:8]))
-	ngrams := int(binary.LittleEndian.Uint32(header[8:12]))
-	stride := int(binary.LittleEndian.Uint32(header[12:16]))
-	if stride <= 0 {
+	ngrams := binary.LittleEndian.Uint32(header[8:12])
+	stride := binary.LittleEndian.Uint32(header[12:16])
+	if stride == 0 {
 		return nil, ErrTruncated
 	}
 
-	sparseCount := (ngrams + stride - 1) / stride
-	sparseBytes := make([]byte, sparseCount*8)
+	// The header is untrusted: compute the sparse-index layout in uint64 so a
+	// large ngrams/stride can't overflow the size math (or yield a negative
+	// length on a 32-bit build), and bound the resident allocation before make.
+	sparseCount := (uint64(ngrams) + uint64(stride) - 1) / uint64(stride)
+	sparseLen := sparseCount * 8
+	if sparseLen > maxReadBytes {
+		return nil, ErrTruncated
+	}
+	sparseBytes := make([]byte, sparseLen)
 	if sparseCount > 0 {
 		if _, err := r.ReadAt(sparseBytes, int64(hdrSize)); err != nil {
 			return nil, err
@@ -81,9 +99,9 @@ func Open(r io.ReaderAt) (*Index, error) {
 		r:          r,
 		GramSize:   gramSize,
 		CaseFold:   caseFold,
-		ngrams:     ngrams,
-		stride:     stride,
-		dictStart:  int64(hdrSize + sparseCount*8),
+		ngrams:     int(ngrams),
+		stride:     int(stride),
+		dictStart:  int64(uint64(hdrSize) + sparseLen),
 		sparseKeys: sparseKeys,
 	}, nil
 }
@@ -104,7 +122,15 @@ func (s *Index) lookup(key uint64) (rec dictRec, ok bool, err error) {
 	if base+blockLen > s.ngrams {
 		blockLen = s.ngrams - base
 	}
-	blockBytes := make([]byte, blockLen*dictEntry)
+	// blockLen and the block size are derived from untrusted header fields; a
+	// corrupt sparse/stride pairing can drive a non-positive or multi-GB length.
+	// A valid index always yields blockLen >= 1, so treat anything else as
+	// malformed rather than allocating on it.
+	blockSize := uint64(blockLen) * dictEntry
+	if blockLen <= 0 || blockSize > maxReadBytes {
+		return dictRec{}, false, ErrTruncated
+	}
+	blockBytes := make([]byte, blockSize)
 	if _, err := s.r.ReadAt(blockBytes, s.dictStart+int64(base*dictEntry)); err != nil {
 		return dictRec{}, false, err
 	}
@@ -131,6 +157,10 @@ func (s *Index) Posting(key uint64) (data []byte, ok bool, err error) {
 	rec, ok, err := s.lookup(key)
 	if err != nil || !ok {
 		return nil, ok, err
+	}
+	// rec.size is an untrusted u32 (up to ~4 GiB); bound the posting allocation.
+	if uint64(rec.size) > maxReadBytes {
+		return nil, false, ErrTruncated
 	}
 	buf := make([]byte, rec.size)
 	if _, err := s.r.ReadAt(buf, int64(rec.offset)); err != nil {

@@ -101,7 +101,13 @@ func OpenRecordStoreWithDict(idx, bin io.ReaderAt, dict []byte) (*RecordStore, e
 	if err != nil {
 		return nil, err
 	}
-	dec, err := zstd.NewReader(nil, zstd.WithDecoderDicts(dict))
+	// Cap the per-frame decoded size against a decompression bomb from an
+	// untrusted store (a few bytes inflating to gigabytes); DecodeAll errors past
+	// the limit rather than allocating unbounded. Mirrors the Rust reader's cap.
+	dec, err := zstd.NewReader(nil,
+		zstd.WithDecoderDicts(dict),
+		zstd.WithDecoderMaxMemory(maxDecompressedRecord),
+	)
 	if err != nil {
 		return nil, err
 	}

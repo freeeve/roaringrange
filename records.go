@@ -21,6 +21,17 @@ const (
 	// recordHeaderSize is the fixed RRSR index header size in bytes:
 	// magic(4) + version(2) + reserved(2) + count(4) + reserved2(4).
 	recordHeaderSize = 16
+	// maxRecordBytes bounds a single record's on-disk byte span (end-start from
+	// the offset pair). The pair is untrusted, so a crafted end drives a multi-GB
+	// make() before the backing read can fail; records are document metadata, so
+	// 64 MiB is orders of magnitude above any legitimate record while bounding the
+	// allocation to a recoverable error.
+	maxRecordBytes = 64 << 20
+	// maxDecompressedRecord bounds a single zstd frame's inflated size, guarding
+	// against a decompression bomb (a few bytes inflating to gigabytes). Mirrors
+	// the Rust MAX_DECOMPRESSED_RECORD; enforced by the dictionary decoder in
+	// records_zstd.go.
+	maxDecompressedRecord = 64 << 20
 )
 
 // RecordWriter streams the RRSR record store: record bytes are pushed one at a
@@ -160,7 +171,13 @@ func (s *RecordStore) Get(id uint32) (data []byte, ok bool, err error) {
 	if end < start {
 		return nil, false, ErrTruncated
 	}
-	buf := make([]byte, end-start)
+	// The offset pair is untrusted: bound the record span before allocating, so a
+	// crafted end can't drive a multi-GB make() ahead of the backing read.
+	span := end - start
+	if span > maxRecordBytes {
+		return nil, false, ErrTruncated
+	}
+	buf := make([]byte, span)
 	if len(buf) > 0 {
 		if _, err := s.bin.ReadAt(buf, int64(start)); err != nil {
 			return nil, false, err
