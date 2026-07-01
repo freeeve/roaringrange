@@ -649,18 +649,21 @@ impl<F: RangeFetch> RerankStore<F> {
     }
 
     /// Fetches and decodes the stored vectors for `ids` (output aligned with
-    /// `ids`) in one concurrent wave of ranged reads. Each vector is `dim` bf16
-    /// values at `RRVR_HEADER_SIZE + id*dim*2`.
+    /// `ids`) in one concurrent, **coalesced** wave of ranged reads. Each vector is
+    /// `dim` bf16 values at `RRVR_HEADER_SIZE + id*dim*2`; rerank candidates skew
+    /// toward low (popular) doc IDs whose vectors sit adjacent in the dense array,
+    /// so [`read_coalesced`](crate::fetch::read_coalesced) merges runs of them into
+    /// a handful of GETs rather than one per id.
     pub async fn get_many(&self, ids: &[u32]) -> Result<Vec<Vec<f32>>, IndexError> {
         let stride = self.dim * 2;
-        let reads = ids.iter().map(|&id| {
-            let off = RRVR_HEADER_SIZE as u64 + id as u64 * stride as u64;
-            self.fetch.read(off, stride)
-        });
-        let results = join_all(reads).await;
+        let ranges: Vec<(u64, usize)> = ids
+            .iter()
+            .map(|&id| (RRVR_HEADER_SIZE as u64 + id as u64 * stride as u64, stride))
+            .collect();
+        let results =
+            crate::fetch::read_coalesced(&self.fetch, &ranges, crate::fetch::COALESCE_GAP).await?;
         let mut out = Vec::with_capacity(ids.len());
-        for bytes in results {
-            let b = bytes?;
+        for b in results {
             if b.len() != stride {
                 return Err(IndexError::Malformed("RRVR short read"));
             }

@@ -679,8 +679,9 @@ impl SplitSet {
                 if !survives(split)? {
                     continue;
                 }
+                let remaining = limit - out.len();
                 for id in self
-                    .search_split_filtered(resolver, split, query, filter)
+                    .search_split_filtered(resolver, split, query, filter, remaining)
                     .await?
                 {
                     if out.len() >= limit {
@@ -692,24 +693,39 @@ impl SplitSet {
             return Ok(out);
         }
 
-        // Stable-key or base+delta: search every surviving split, merge, supersede, rank.
-        let mut base: Vec<u32> = Vec::new();
+        // Stable-key or base+delta: search every surviving split, merge, supersede, rank. Ranking
+        // reorders the full set globally, so there is no short-circuit — Bloom/facet-prune the
+        // splits (in memory, no fetch), then search all survivors in one concurrent wave each for
+        // base and delta rather than one serial split open+load per survivor.
+        let mut base_targets: Vec<&Split> = Vec::new();
         for split in self.base_splits() {
             if survives(split)? {
-                base.extend(
-                    self.search_split_filtered(resolver, split, query, filter)
-                        .await?,
-                );
+                base_targets.push(split);
             }
         }
-        let mut delta: Vec<u32> = Vec::new();
+        let mut delta_targets: Vec<&Split> = Vec::new();
         for split in self.delta_splits() {
             if survives(split)? {
-                delta.extend(
-                    self.search_split_filtered(resolver, split, query, filter)
-                        .await?,
-                );
+                delta_targets.push(split);
             }
+        }
+        let base_results =
+            join_all(base_targets.iter().map(|&split| {
+                self.search_split_filtered(resolver, split, query, filter, usize::MAX)
+            }))
+            .await;
+        let delta_results =
+            join_all(delta_targets.iter().map(|&split| {
+                self.search_split_filtered(resolver, split, query, filter, usize::MAX)
+            }))
+            .await;
+        let mut base: Vec<u32> = Vec::new();
+        for r in base_results {
+            base.extend(r?);
+        }
+        let mut delta: Vec<u32> = Vec::new();
+        for r in delta_results {
+            delta.extend(r?);
         }
         let mut dead = RoaringBitmap::new();
         for split in self.splits() {
@@ -763,19 +779,30 @@ impl SplitSet {
             }
         }
 
+        // Open every contributing split's `.rrf` in one concurrent wave (each open costs ~MBs of
+        // head region), then aggregate in split order so field/category first-seen order is
+        // deterministic. Grouping IDs by split is done; the opens are the round trips.
+        let entries: Vec<(usize, RoaringBitmap)> = per_split.into_iter().collect();
+        let names: Vec<String> = entries
+            .iter()
+            .map(|(si, _)| facet_file_name(&self.splits[*si].data_file))
+            .collect();
+        let opened = join_all(
+            names
+                .iter()
+                .map(|n| FacetIndex::open(resolver.fetch_named(n))),
+        )
+        .await;
+
         // Aggregate each contributing split's counts into name-keyed fields (first-seen order).
         let mut fields: Vec<FieldCounts> = Vec::new();
         let mut field_pos: BTreeMap<String, usize> = BTreeMap::new();
-        for (si, local) in per_split {
-            let split = &self.splits[si];
-            let facets =
-                match FacetIndex::open(resolver.fetch_named(&facet_file_name(&split.data_file)))
-                    .await
-                {
-                    Ok(f) => f,
-                    Err(_) => continue, // a split with no facet sidecar contributes nothing
-                };
-            let counts = facets.counts(&local); // Vec<Vec<u64>> aligned to facets.fields
+        for ((_si, local), fac) in entries.iter().zip(opened) {
+            let facets = match fac {
+                Ok(f) => f,
+                Err(_) => continue, // a split with no facet sidecar contributes nothing
+            };
+            let counts = facets.counts(local); // Vec<Vec<u64>> aligned to facets.fields
             for (fi, field) in facets.fields().iter().enumerate() {
                 let fp = *field_pos.entry(field.name.clone()).or_insert_with(|| {
                     fields.push(FieldCounts {
@@ -1024,13 +1051,17 @@ impl SplitSet {
     }
 
     /// Searches `split` for `query` ANDed with the facet `filter` resolved against the split's
-    /// own `RRSF` sidecar, returning all matching global ids (rank order within the split).
+    /// own `RRSF` sidecar, returning matching global ids in rank order within the split. At most
+    /// `limit` ids are materialized: the tiered short-circuit passes `limit - out.len()` so a
+    /// surviving split never loads (and pages) its whole tail-heavy match set when the page is
+    /// nearly full; the merge/rank paths pass `usize::MAX` for the complete filtered set.
     async fn search_split_filtered<R: SplitFetcher>(
         &self,
         resolver: &R,
         split: &Split,
         query: &str,
         filter: &[(String, String)],
+        limit: usize,
     ) -> Result<Vec<u32>, IndexError> {
         // Resolve the filter from the sidecar's META alone (KBs) and bail BEFORE opening
         // anything else: filtering never reads head postings, and an unsatisfiable arm — a
@@ -1056,8 +1087,16 @@ impl SplitSet {
             }
         };
         let mut cursor = idx.search_cursor_filtered(query, 0, Some(resolved)).await?;
-        cursor.load_tail().await?;
-        let local = cursor.page(0, usize::MAX).await?;
+        // A bounded caller pages only until it has `limit` hits (each page advances the lazy tail
+        // scan by a bounded window); the unbounded caller forces the whole tail once.
+        if limit == usize::MAX {
+            cursor.load_tail().await?;
+        } else {
+            while cursor.loaded() < limit && cursor.pending_tail() {
+                cursor.page(0, limit).await?;
+            }
+        }
+        let local = cursor.page(0, limit).await?;
         Ok(local.into_iter().map(|l| split.to_global(l)).collect())
     }
 }
@@ -2043,6 +2082,127 @@ mod tests {
         assert_eq!(
             block_on(ss.search_filtered(&resolver(0), "abc", &[], 10)).unwrap(),
             vec![0, 1, 2, 3]
+        );
+    }
+
+    /// Task 062 item 2: the tiered filtered short-circuit passes `limit - out.len()` to each
+    /// split so a nearly-full page never materializes a split's whole match set. A small page
+    /// must equal the full page truncated (bounding drops/reorders nothing) and must stop opening
+    /// splits once it is full.
+    #[test]
+    fn tiered_filtered_search_bounded_page_matches_full_and_stops_early() {
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::Tiered,
+            byte_cap: 250, // tiny cap -> ~2 docs per split
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 8,
+            case_sensitive: false,
+        });
+        let f = |lang: &str| vec![("lang".to_string(), lang.to_string())];
+        for i in 0..8u32 {
+            b.add_faceted(&format!("abc en{i}"), &f("en")).unwrap();
+        }
+        let built = b.finish().unwrap();
+        assert!(
+            built.splits.len() >= 3,
+            "need several splits for an early-stop, got {}",
+            built.splits.len()
+        );
+        let ss = open_built(&built);
+
+        let files: HashMap<String, Vec<u8>> = built
+            .splits
+            .iter()
+            .chain(built.facets.iter())
+            .cloned()
+            .collect();
+        let resolver = || CountingResolver {
+            files: files.clone(),
+            opens: std::cell::Cell::new(0),
+        };
+
+        // Full page: every en doc in ascending (rank) order.
+        let full = block_on(ss.search_filtered(&resolver(), "abc", &f("en"), 100)).unwrap();
+        assert_eq!(full, (0..8).collect::<Vec<u32>>());
+
+        // A small page equals the full page truncated -- per-split bounding never drops/reorders.
+        let r_small = resolver();
+        let small = block_on(ss.search_filtered(&r_small, "abc", &f("en"), 3)).unwrap();
+        assert_eq!(small, full[..3].to_vec());
+
+        // Early stop: the small page opens strictly fewer splits than the full page.
+        let r_full = resolver();
+        let _ = block_on(ss.search_filtered(&r_full, "abc", &f("en"), 100)).unwrap();
+        assert!(
+            r_small.opens.get() < r_full.opens.get(),
+            "small page opened {} files, full page {}",
+            r_small.opens.get(),
+            r_full.opens.get()
+        );
+    }
+
+    /// Task 062 item 1: the non-tiered (here StableKey) filtered path searches every surviving
+    /// split in one concurrent wave rather than serially. It must still return every matching id
+    /// (ranked ascending with no sort-column) and prune the split lacking the category.
+    #[test]
+    fn stable_key_filtered_search_wave_returns_all_matches() {
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::StableKey,
+            byte_cap: 250,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 8,
+            case_sensitive: false,
+        });
+        let f = |lang: &str| vec![("lang".to_string(), lang.to_string())];
+        b.add_faceted("abc en0", &f("en")).unwrap();
+        b.add_faceted("abc en1", &f("en")).unwrap();
+        b.add_faceted("abc fr0", &f("fr")).unwrap();
+        b.add_faceted("abc fr1", &f("fr")).unwrap();
+        let built = b.finish().unwrap();
+        assert_eq!(built.splits.len(), 2, "cap should split en|fr");
+        let ss = open_built(&built);
+        assert_eq!(ss.policy(), Policy::StableKey);
+
+        let files: HashMap<String, Vec<u8>> = built
+            .splits
+            .iter()
+            .chain(built.facets.iter())
+            .cloned()
+            .collect();
+        let resolver = || CountingResolver {
+            files: files.clone(),
+            opens: std::cell::Cell::new(0),
+        };
+
+        // The wave over the surviving en split returns both en docs; the fr split is pruned.
+        assert_eq!(
+            block_on(ss.search_filtered(&resolver(), "abc", &f("en"), 10)).unwrap(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            block_on(ss.search_filtered(&resolver(), "abc", &f("fr"), 10)).unwrap(),
+            vec![2, 3]
+        );
+        // No filter searches both splits (the full wave) and returns all matches ascending.
+        assert_eq!(
+            block_on(ss.search_filtered(&resolver(), "abc", &[], 10)).unwrap(),
+            vec![0, 1, 2, 3]
+        );
+        // An absent category prunes every split.
+        assert!(
+            block_on(ss.search_filtered(&resolver(), "abc", &f("de"), 10))
+                .unwrap()
+                .is_empty()
         );
     }
 

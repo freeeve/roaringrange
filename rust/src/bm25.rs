@@ -48,6 +48,7 @@
 use crate::fetch::{read_coalesced, RangeFetch, COALESCE_GAP};
 use crate::index::{read_u16, read_u32, read_u64, IndexError};
 use crate::terms::TermIndex;
+use futures::future::join_all;
 use roaring::RoaringBitmap;
 
 /// Default BM25 term-frequency saturation parameter.
@@ -341,12 +342,17 @@ pub async fn search_bm25<F: RangeFetch, G: RangeFetch>(
     }
 
     // Head underfilled and tails exist: upgrade to full postings (the same lazy
-    // second wave the plain search takes).
+    // second wave the plain search takes). Every term's tail is independent, so
+    // fetch them in one concurrent wave rather than one serial RTT per term.
+    let tail_futs: Vec<_> = heads
+        .iter()
+        .map(|(_, b)| terms.fetch_tail(b.tail_off, b.tail_size))
+        .collect();
+    let tails = join_all(tail_futs).await;
     let mut postings = Vec::with_capacity(heads.len());
-    for (off, b) in heads {
-        let tail = terms.fetch_tail(b.tail_off, b.tail_size).await?;
+    for ((off, b), tail) in heads.into_iter().zip(tails) {
         let mut full = b.head;
-        full |= &tail;
+        full |= &tail?;
         postings.push((off, full));
     }
     let mut sorted: Vec<&RoaringBitmap> = postings.iter().map(|(_, b)| b).collect();
@@ -450,12 +456,16 @@ pub async fn search_bm25_min_match<F: RangeFetch, G: RangeFetch>(
 
     // Head qualifiers underfill the window and tails exist: upgrade to full
     // postings (the same lazy second wave the strict-AND path takes) and recompute
-    // ≥`need` over them.
+    // ≥`need` over them. Fetch every term's tail in one concurrent wave.
+    let tail_futs: Vec<_> = heads
+        .iter()
+        .map(|(_, b)| terms.fetch_tail(b.tail_off, b.tail_size))
+        .collect();
+    let tails = join_all(tail_futs).await;
     let mut postings = Vec::with_capacity(heads.len());
-    for (off, b) in heads {
-        let tail = terms.fetch_tail(b.tail_off, b.tail_size).await?;
+    for ((off, b), tail) in heads.into_iter().zip(tails) {
         let mut full = b.head;
-        full |= &tail;
+        full |= &tail?;
         postings.push((off, full));
     }
     let full_bms: Vec<&RoaringBitmap> = postings.iter().map(|(_, b)| b).collect();
