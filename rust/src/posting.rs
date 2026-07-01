@@ -475,7 +475,9 @@ impl TailScan {
         // fetcher.
         let mut facets = Vec::with_capacity(facet_fields.len());
         for field in facet_fields {
-            let ff = facet_fetch.expect("facet_fetch is required when facet_fields is non-empty");
+            let ff = facet_fetch.ok_or(IndexError::BadQuery(
+                "facet fetcher required for a filtered tail scan",
+            ))?;
             match open_tail_dirs(ff, field).await? {
                 Some(d) => facets.push(d),
                 None => return Ok(None),
@@ -484,7 +486,9 @@ impl TailScan {
         let excludes = if exclude_ranges.is_empty() {
             Vec::new()
         } else {
-            let ff = facet_fetch.expect("facet_fetch is required when exclude_ranges is non-empty");
+            let ff = facet_fetch.ok_or(IndexError::BadQuery(
+                "facet fetcher required for a filtered tail scan",
+            ))?;
             match open_tail_dirs(ff, exclude_ranges).await? {
                 Some(d) => d,
                 None => return Ok(None),
@@ -535,7 +539,9 @@ impl TailScan {
         let window = &self.keys[self.pos..end];
         let mut bm = intersect_key_window(fetch, &self.trigrams, window).await?;
         if !self.facets.is_empty() {
-            let ff = facet_fetch.expect("facet_fetch is required when the scan has facets");
+            let ff = facet_fetch.ok_or(IndexError::BadQuery(
+                "facet fetcher required for a filtered tail scan",
+            ))?;
             for field in &self.facets {
                 if bm.is_empty() {
                     break;
@@ -549,7 +555,9 @@ impl TailScan {
             }
         }
         if !self.excludes.is_empty() && !bm.is_empty() {
-            let ff = facet_fetch.expect("facet_fetch is required when the scan has excludes");
+            let ff = facet_fetch.ok_or(IndexError::BadQuery(
+                "facet fetcher required for a filtered tail scan",
+            ))?;
             let reads = self
                 .excludes
                 .iter()

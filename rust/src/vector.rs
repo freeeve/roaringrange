@@ -175,6 +175,9 @@ impl<F: RangeFetch> VectorIndex<F> {
     /// into memory. Subsequent queries fetch only per-cluster code lists.
     pub async fn open(fetch: F) -> Result<Self, IndexError> {
         let header = fetch.read(0, HEADER_SIZE).await?;
+        if header.len() < HEADER_SIZE {
+            return Err(IndexError::Malformed("short RRVI header"));
+        }
         if &header[0..4] != MAGIC {
             let mut m = [0u8; 4];
             m.copy_from_slice(&header[0..4]);
@@ -200,6 +203,11 @@ impl<F: RangeFetch> VectorIndex<F> {
         }
         if nlist == 0 {
             return Err(IndexError::Malformed("RRVI nlist is zero"));
+        }
+        // `vector_id == doc_id` is a u32; reject a header claiming more so `len()`
+        // reports the true count rather than silently truncating it.
+        if n > u32::MAX as u64 {
+            return Err(IndexError::Malformed("RRVI vector count exceeds u32"));
         }
         let ksub = 1usize << nbits;
         let dsub = dim / m;
@@ -409,19 +417,30 @@ impl<F: RangeFetch> VectorIndex<F> {
             .into_iter()
             .filter(|&j| self.dir_counts[j] > 0)
             .collect();
-        let reads = active.iter().map(|&j| {
+        // Cluster counts come from the untrusted directory: size each block with
+        // checked math up front. A wrapping `count*(4+m)` (on wasm32, or overflowing
+        // usize) would otherwise yield a short read that still passes the size check
+        // below (both sides wrap identically) and decode into garbage hits.
+        let mut lens = Vec::with_capacity(active.len());
+        for &j in &active {
             let count = self.dir_counts[j] as usize;
-            let len = count * (4 + self.m);
-            self.fetch.read(self.dir_offsets[j], len)
-        });
+            let len = count
+                .checked_mul(4 + self.m)
+                .ok_or(IndexError::Malformed("RRVI cluster block size overflow"))?;
+            lens.push(len);
+        }
+        let reads = active
+            .iter()
+            .zip(&lens)
+            .map(|(&j, &len)| self.fetch.read(self.dir_offsets[j], len));
         let blocks = join_all(reads).await;
 
         let mut heap: BinaryHeap<Candidate> = BinaryHeap::with_capacity(k + 1);
-        for (&j, block) in active.iter().zip(blocks) {
+        for ((&j, block), &len) in active.iter().zip(blocks).zip(&lens) {
             let block = block?;
             let count = self.dir_counts[j] as usize;
             let ids_len = count * 4;
-            if block.len() != ids_len + count * self.m {
+            if block.len() != len {
                 return Err(IndexError::Malformed("RRVI cluster block size mismatch"));
             }
             let centroid = &self.centroids[j * self.dim..(j + 1) * self.dim];
@@ -575,6 +594,9 @@ impl<F: RangeFetch> RerankStore<F> {
     /// Boots the sidecar: reads and validates the 20-byte header.
     pub async fn open(fetch: F) -> Result<Self, IndexError> {
         let h = fetch.read(0, RRVR_HEADER_SIZE).await?;
+        if h.len() < RRVR_HEADER_SIZE {
+            return Err(IndexError::Malformed("short RRVR header"));
+        }
         if &h[0..4] != RRVR_MAGIC {
             let mut m = [0u8; 4];
             m.copy_from_slice(&h[0..4]);
@@ -593,6 +615,11 @@ impl<F: RangeFetch> RerankStore<F> {
             return Err(IndexError::Malformed("RRVR dim is zero"));
         }
         let n = read_u64(&h, 12);
+        // Stored vector ids are u32 (doc IDs); reject a larger count so `len()`
+        // doesn't silently truncate.
+        if n > u32::MAX as u64 {
+            return Err(IndexError::Malformed("RRVR vector count exceeds u32"));
+        }
         Ok(Self {
             fetch,
             dim,

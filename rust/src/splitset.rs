@@ -1216,7 +1216,11 @@ pub(crate) fn bloom_contains(bloom: &[u8], key: u64) -> bool {
     }
     let k = read_u32(bloom, 0);
     let nbits = read_u32(bloom, 4) as u64;
-    if nbits == 0 {
+    // `k` is the hash-iteration count read from an untrusted summary; an out-of-range
+    // value (e.g. `0xFFFF_FFFF`) would spin billions of splitmix64 rounds per key per
+    // split and hang the reader. Bound it exactly as `RemoteBloom::open` does; a bad
+    // header conservatively returns "possibly present" (never prune on bad data).
+    if k == 0 || k > 64 || nbits == 0 {
         return true;
     }
     let bits = &bloom[8..];

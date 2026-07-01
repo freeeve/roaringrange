@@ -17,3 +17,40 @@
 
 - Extend the 45fa50f mutation-fuzz harness to cover: terms router_len, sortcols data_off, splitset bloom summaries, vector cluster directory, bm25 header scale. No panics/hangs/huge allocs on mutated bytes; typed errors only.
 - All existing goldens/conformance pass unchanged (readers only; no byte-output changes).
+
+## Outcome (DONE -- item 6 deferred to task 072)
+
+Reader-side only; no format or output-byte changes. Fixed items 1-5, 7, 8:
+
+- **item 1** `terms.rs`: added `MAX_RESIDENT_ROUTER` (512 MiB); `open` rejects an
+  implausible `router_len` before the fetch (no native OOM / wasm32 `as usize`
+  truncation).
+- **item 2** `sortcols.rs`: `values`/`slice_u32` saturate `data_off + off` so a
+  near-`u64::MAX` offset can't wrap into the file and return wrong bytes as `Ok`,
+  plus a post-fetch length check before the direct-indexing decode.
+- **item 3** `splitset.rs`: `bloom_contains` clamps `k` (`0` / `> 64` -> conservative
+  "possibly present") -- no billion-round hash-loop hang.
+- **item 4** `vector.rs`: cluster code-list sizes computed with `checked_mul` and
+  the block-size check compares against the precomputed length (a wasm32
+  `count*(4+m)` wrap can no longer pass and decode garbage).
+- **item 5** `bm25.rs`: `open` rejects a non-finite (NaN/inf) scale.
+- **item 7** header length guards added to `Index::open`, `SortCols::open`,
+  `VectorIndex::open`, `RerankStore::open` (a short fetch errors, not panics).
+  `FacetIndex::open_meta` was already covered by `rrsf_boot_len`; `TermIndex`/
+  `Lookup`/`RecordStore`/`Hotcache`/`ImpactIndex` already had guards.
+- **item 8** `VectorIndex::open`/`RerankStore::open` reject `n > u32::MAX` (so
+  `len()` can't silently truncate); the four `posting.rs` `facet_fetch.expect(...)`
+  sites now return `IndexError::BadQuery` (no wasm-uncatchable abort).
+
+Fuzz coverage (`fuzz_tests.rs`): extended `fuzz_rrsc` to exercise `values_u32`/
+`slice_u32`; added `fuzz_rrvi_search_no_panic` (real trained index, mutated boot/
+directory through `open`+`search`), and targeted regressions
+`bloom_contains_rejects_out_of_range_k`, `rrsb_open_rejects_nonfinite_scale`,
+`rrti_open_rejects_implausible_router_len`. Full per-feature test matrix +
+clippy (`-D warnings`) + fmt clean.
+
+**Item 6 deferred (task 072):** `splitset.rs` `facet_counts` swallows every
+`FacetIndex::open` error as "no sidecar." Distinguishing an absent sidecar from a
+transient transport error needs a `FetchError::NotFound` variant (touches every
+`RangeFetch` impl) or a manifest presence flag -- an error-taxonomy change, not a
+malicious-bytes fix, so it is out of scope for this pass. Tracked in task 072.

@@ -132,6 +132,9 @@ impl<F: RangeFetch + Clone> SortCols<F> {
     /// dense data is read — boot is a few KB regardless of row count.
     pub async fn open(fetch: F) -> Result<Self, IndexError> {
         let header = fetch.read(0, HEADER_SIZE).await?;
+        if header.len() < HEADER_SIZE {
+            return Err(IndexError::Malformed("short RRSC header"));
+        }
         if &header[0..4] != MAGIC {
             let mut m = [0u8; 4];
             m.copy_from_slice(&header[0..4]);
@@ -247,9 +250,14 @@ impl<F: RangeFetch + Clone> SortCols<F> {
             span_of[i] = spans.len() - 1;
         }
 
-        let reads = spans
-            .iter()
-            .map(|&(s, e)| self.fetch.read(info.data_off + s, (e - s) as usize));
+        // `data_off` is an untrusted column-table field; saturate the offset sum so
+        // a near-`u64::MAX` value can't wrap to a small (in-file) offset that reads
+        // the wrong bytes and returns them as `Ok` — a saturated offset instead
+        // fails the range fetch out of range.
+        let reads = spans.iter().map(|&(s, e)| {
+            self.fetch
+                .read(info.data_off.saturating_add(s), (e - s) as usize)
+        });
         let datas = join_all(reads).await;
         let mut bytes = Vec::with_capacity(spans.len());
         for d in datas {
@@ -260,6 +268,11 @@ impl<F: RangeFetch + Clone> SortCols<F> {
         for i in 0..ids.len() {
             let span = span_of[i];
             let rel = (ids[i] as u64 * w - spans[span].0) as usize;
+            // A short span (e.g. from a saturated/bogus offset that returned fewer
+            // bytes than requested) would panic the direct-indexing decode; reject it.
+            if rel + w as usize > bytes[span].len() {
+                return Err(IndexError::Malformed("RRSC column read truncated"));
+            }
             out[i] = info.value_type.decode(&bytes[span], rel);
         }
         Ok(out)
@@ -318,8 +331,13 @@ impl<F: RangeFetch + Clone> SortCols<F> {
         if take == 0 {
             return Ok(Vec::new());
         }
-        let off = info.data_off + start as u64 * 4;
+        // Saturate against a near-`u64::MAX` `data_off` wrapping into the file (see
+        // `values`), and verify the fetch returned the full run before decoding.
+        let off = info.data_off.saturating_add(start as u64 * 4);
         let buf = self.fetch.read(off, take * 4).await?;
+        if buf.len() < take * 4 {
+            return Err(IndexError::Malformed("RRSC u32 slice truncated"));
+        }
         Ok((0..take).map(|i| read_u32(&buf, i * 4)).collect())
     }
 

@@ -151,6 +151,9 @@ impl<F: RangeFetch> Index<F> {
     /// the sparse block.
     pub async fn open(fetch: F) -> Result<Self, IndexError> {
         let header = fetch.read(0, HEADER_SIZE).await?;
+        if header.len() < HEADER_SIZE {
+            return Err(IndexError::Malformed("short RRS header"));
+        }
         if &header[0..4] != MAGIC {
             let mut m = [0u8; 4];
             m.copy_from_slice(&header[0..4]);

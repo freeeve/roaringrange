@@ -127,7 +127,10 @@ impl<F: RangeFetch> ImpactIndex<F> {
         let entries_off = read_u64(&header, 32);
         let impacts_off = read_u64(&header, 40);
         let doc_count = read_u64(&header, 48);
-        if stride == 0 || scale <= 0.0 {
+        // `!scale.is_finite()` also rejects NaN (every `NaN <= 0.0` is false, so the
+        // bound alone would admit a NaN scale that then makes all scores NaN and
+        // sorts arbitrarily via `partial_cmp(...).unwrap_or(Equal)`).
+        if stride == 0 || !scale.is_finite() || scale <= 0.0 {
             return Err(IndexError::Malformed("bad RRSB stride/scale"));
         }
         let sparse_count = (term_count as usize).div_ceil(stride as usize);

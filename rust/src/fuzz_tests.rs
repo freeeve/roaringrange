@@ -288,6 +288,91 @@ fn fuzz_rrvi_boot_size_overflow_rejected() {
     );
 }
 
+#[cfg(feature = "vector")]
+#[test]
+fn fuzz_rrvi_search_no_panic() {
+    use crate::vector::VectorIndex;
+    use crate::vector_build::{build_ivfpq, IvfpqParams};
+
+    // A tiny trained index; corrupting the boot region hits the cluster directory's
+    // counts/offsets, so `search` drives each per-cluster code-list read through the
+    // checked block-size path (a wrapping `count*(4+m)` on wasm32, or a short read
+    // here, must reject rather than decode garbage).
+    let mut s = 0x1234_5678_9abc_def0u64;
+    let mut next = || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        ((s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+    };
+    let corpus: Vec<(u32, Vec<f32>)> = (0..64)
+        .map(|i| (i, (0..8).map(|_| next()).collect()))
+        .collect();
+    let seed = build_ivfpq(&corpus, &IvfpqParams::new(8, 4, 4))
+        .expect("build_ivfpq")
+        .to_bytes();
+
+    let query: Vec<f32> = vec![0.1, -0.2, 0.3, 0.4, -0.5, 0.6, -0.7, 0.8];
+    assert_no_panic("RRVI-search", seed, move |f| {
+        if let Ok(idx) = block_on(VectorIndex::open(f)) {
+            let _ = block_on(idx.search(&query, 10, idx.nlist()));
+        }
+    });
+}
+
+#[cfg(feature = "splits")]
+#[test]
+fn bloom_contains_rejects_out_of_range_k() {
+    // A per-split Bloom summary claiming `k = u32::MAX` must not spin billions of
+    // hash rounds (a reader-hang DoS): a bad header conservatively returns "possibly
+    // present" and returns at once. `k = 0` is likewise invalid.
+    let mut bloom = Vec::new();
+    bloom.extend_from_slice(&u32::MAX.to_le_bytes()); // k
+    bloom.extend_from_slice(&64u32.to_le_bytes()); // nbits
+    bloom.extend_from_slice(&[0u8; 8]); // bits
+    assert!(crate::splitset::bloom_contains(&bloom, 0xdead_beef));
+    bloom[0..4].copy_from_slice(&0u32.to_le_bytes());
+    assert!(crate::splitset::bloom_contains(&bloom, 0xdead_beef));
+}
+
+#[cfg(feature = "terms")]
+#[test]
+fn rrsb_open_rejects_nonfinite_scale() {
+    use crate::bm25::{ImpactIndex, HEADER_SIZE, MAGIC, VERSION};
+    // A finite, positive scale is required: NaN (every comparison false) would slip
+    // past a `scale <= 0.0` bound and make every score NaN, sorting arbitrarily.
+    for bits in [f32::NAN.to_bits(), f32::INFINITY.to_bits(), 0u32] {
+        let mut h = vec![0u8; HEADER_SIZE];
+        h[0..4].copy_from_slice(MAGIC);
+        h[4..6].copy_from_slice(&VERSION.to_le_bytes());
+        h[8..12].copy_from_slice(&bits.to_le_bytes()); // scale
+        h[28..32].copy_from_slice(&1u32.to_le_bytes()); // stride
+        let got = block_on(ImpactIndex::open(MemoryFetch::new(h)));
+        assert!(
+            matches!(got, Err(crate::index::IndexError::Malformed(_))),
+            "expected Malformed for scale bits {bits:#x}"
+        );
+    }
+}
+
+#[cfg(feature = "terms")]
+#[test]
+fn rrti_open_rejects_implausible_router_len() {
+    use crate::terms::TermIndex;
+    // A header claiming a terabyte router must be rejected before the fetch, not
+    // drive a resident multi-GB allocation. Header layout: magic, version(2), then
+    // routerLen at offset 16.
+    let mut h = vec![0u8; 40];
+    h[0..4].copy_from_slice(b"RRTI");
+    h[4..6].copy_from_slice(&2u16.to_le_bytes()); // version
+    h[16..24].copy_from_slice(&(1u64 << 40).to_le_bytes()); // routerLen = 1 TiB
+    let got = block_on(TermIndex::open(MemoryFetch::new(h)));
+    assert!(
+        matches!(got, Err(crate::index::IndexError::Malformed(_))),
+        "expected Malformed for an implausible router length"
+    );
+}
+
 #[test]
 fn fuzz_rrsc_sortcols_no_panic() {
     let cols = vec![
@@ -308,6 +393,12 @@ fn fuzz_rrsc_sortcols_no_panic() {
             let _ = block_on(idx.value(0, 0));
             let _ = block_on(idx.values(0, &[0, 1, 2, 3, 9_999]));
             let _ = block_on(idx.values(99, &[0]));
+            // The u32 column's gather/slice paths read `data_off`-relative bytes; a
+            // corrupted `data_off` must saturate and length-check, not read wrong
+            // bytes or panic the direct-indexing decode.
+            let _ = block_on(idx.values_u32(0, &[0, 1, 2, 3]));
+            let _ = block_on(idx.slice_u32(0, 0, 8));
+            let _ = block_on(idx.slice_u32(0, 2, 100));
         }
     });
 }

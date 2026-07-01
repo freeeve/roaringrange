@@ -33,6 +33,14 @@ const MAGIC: &[u8; 4] = b"RRTI";
 /// headBoundary[4] + routerLen[8] + dictLen[8] + blockCap[4] + reserved[4]
 /// (stemmer language at offset 36). Kept in sync with the builder.
 const HEADER_SIZE: usize = 40;
+/// Upper bound on the resident router FST length read at open. `router_len` is an
+/// untrusted header field, and the native fetcher allocates the requested length
+/// before reading, so a crafted value would OOM (or, cast to `usize` on wasm32,
+/// silently truncate) before the FST checksum can reject it. The router routes
+/// over dict-block boundaries (one entry per block), so it is small relative to
+/// the dictionary — 512 MiB is far above any real value while bounding a hostile
+/// allocation to a recoverable error.
+const MAX_RESIDENT_ROUTER: u64 = 512 << 20;
 /// Format version written into / accepted from the header (v2 = blocked dictionary
 /// with a router FST; the original monolithic-FST v1 is no longer read).
 const VERSION: u16 = 2;
@@ -382,6 +390,12 @@ impl<F: RangeFetch> TermIndex<F> {
         let dict_len = read_u64(&header, 24);
         // blockCap (offset 32) is informational; the language byte is at offset 36.
         let tokenizer = Tokenizer::from_header(flags, header[36]);
+        // `router_len` is untrusted: reject an implausible value before the fetch
+        // so a crafted header can't drive a multi-GB resident allocation (native)
+        // or truncate the `as usize` cast (wasm32). See `MAX_RESIDENT_ROUTER`.
+        if router_len > MAX_RESIDENT_ROUTER {
+            return Err(IndexError::Malformed("RRTI router FST length implausible"));
+        }
         let router_bytes = fetch.read(HEADER_SIZE as u64, router_len as usize).await?;
         let router =
             Map::new(router_bytes).map_err(|_| IndexError::Malformed("RRTI invalid router FST"))?;
