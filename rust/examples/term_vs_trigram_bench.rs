@@ -136,6 +136,7 @@ fn build_term(docs: &[String], byte_cap: u64) -> (Vec<u8>, Files) {
         name_prefix: "term".to_string(),
         sortcol: None,
         language: None,
+        stem: false,
         stopwords: false,
         case_sensitive: false,
     });

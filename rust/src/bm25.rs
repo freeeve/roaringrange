@@ -608,6 +608,7 @@ mod tests {
     const CFG: TermIndexConfig = TermIndexConfig {
         head_boundary: 65536,
         language: None,
+        stem: false,
         stopwords: false,
         case_sensitive: false,
         block_cap: 0,
@@ -750,6 +751,7 @@ mod tests {
         let cfg = TermIndexConfig {
             head_boundary,
             language: None,
+            stem: false,
             stopwords: false,
             case_sensitive: false,
             block_cap: 0,

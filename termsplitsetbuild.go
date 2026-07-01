@@ -33,8 +33,9 @@ type TermSplitBuildConfig struct {
 	HeadBoundary uint32       // head/tail doc-ID split; 0 -> 65536
 	NamePrefix   string       // split filenames: ‹prefix›-s00000.rrt, …
 	SortCol      *SortColSpec // stable-key rank source, or nil
-	Language     TermLanguage // Snowball stemmer; TermLanguageNone = unstemmed
-	Stopwords    bool         // remove common stop words (and from queries)
+	Language     TermLanguage // index language, shared by Stem and Stopwords; required when either is set
+	Stem         bool         // apply Snowball stemming in Language (independent of Stopwords)
+	Stopwords    bool         // remove the language's stop words (and from queries); requires Language
 	// CaseSensitive builds a case-sensitive term split set: terms and facet keys are NOT
 	// lowercased (each split's RRTI carries the case-sensitive flag, the RRSF keys are
 	// case-sensitive, and the manifest sets its case-sensitive flag). The zero value (false)
@@ -70,7 +71,7 @@ func NewTermSplitSetBuilder(cfg TermSplitBuildConfig) *TermSplitSetBuilder {
 	return &TermSplitSetBuilder{
 		cfg:          cfg,
 		headBoundary: hb,
-		tok:          NewTermTokenizerWith(cfg.Language, cfg.Stopwords, !cfg.CaseSensitive),
+		tok:          NewTermTokenizerFull(cfg.Language, cfg.Stem, cfg.Stopwords, !cfg.CaseSensitive),
 		open:         make(map[string]*roaring.Bitmap),
 		openFacets:   make(map[string]map[string]*roaring.Bitmap),
 	}
@@ -155,7 +156,7 @@ func (b *TermSplitSetBuilder) seal() error {
 		return nil
 	}
 	var buf bytes.Buffer
-	if err := WriteTermIndexWith(&buf, b.open, b.headBoundary, b.cfg.Language, b.cfg.Stopwords, !b.cfg.CaseSensitive, 0); err != nil {
+	if err := WriteTermIndexFull(&buf, b.open, b.headBoundary, b.cfg.Language, b.cfg.Stem, b.cfg.Stopwords, !b.cfg.CaseSensitive, 0); err != nil {
 		return err
 	}
 

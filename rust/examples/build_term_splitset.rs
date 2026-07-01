@@ -102,6 +102,7 @@ fn main() {
         name_prefix: "openalex-484m-terms".to_string(),
         sortcol: None,
         language,
+        stem: language.is_some(),
         stopwords: false,
         case_sensitive: false,
     });

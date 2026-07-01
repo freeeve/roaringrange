@@ -39,8 +39,17 @@ All integers little-endian. Postings are standard **portable** RoaringBitmaps
 | routerLen | u64 | 8 | byte length of the router FST |
 | dictLen | u64 | 8 | byte length of the dict-blocks region |
 | blockCap | u32 | 4 | dict block byte cap used at build (informational) |
-| language | u8 | 1 | stemmer language when `bit0` set (`1` = English); `0` otherwise (offset 36) |
+| language | u8 | 1 | index language — `0` = none, `1`–`18` per the **Language bytes** list below. Meaningful when `bit0` (stemmed) **or** `bit1` (stop-words) is set (offset 36) |
 | reserved | u8[3] | 3 | zero padding to 40 B |
+
+**Language bytes** (offset 36): the single index language, shared by the stemmer (`bit0`) and
+the stop-word list (`bit1`) — it is meaningful when **either** filter is on, and a filter on
+with no language (`0`) is rejected at build. `0` = none; `1`–`18` name a Snowball language, per
+the `languages!` table in `rust/src/terms.rs` (the source of truth): `1` English, `2` Spanish,
+`3` Arabic, `4` Danish, `5` Dutch, `6` Finnish, `7` French, `8` German, `9` Greek,
+`10` Hungarian, `11` Italian, `12` Norwegian, `13` Portuguese, `14` Romanian, `15` Russian,
+`16` Swedish, `17` Tamil, `18` Turkish. The stemmer is built only for `bit0` (so an index can
+strip a language's stop words without stemming); an unknown byte ⇒ no stemmer / no stop list.
 
 **Router FST** — `routerLen` bytes at offset `40`. A minimized FST
 ([BurntSushi `fst`](https://docs.rs/fst)) mapping **each dict block's last term (UTF-8) →
@@ -116,9 +125,13 @@ same doc-ID space.
 The same function tokenizes the indexed text (builder) and the query (reader), so a query
 resolves to the same terms that were indexed. Optional filters then run **after** this base
 step, recorded in the header so the reader applies them identically: **stop-word removal**
-(`flags bit1`) and **Snowball stemming** (`flags bit0`, language in the `language` byte —
-`1` = English, via the pure-Rust `rust-stemmers`, the same crate Tantivy uses; wasm-safe, so
-the browser stems queries too). **Test vectors:** `"Machine-Learning, FAST!"` →
+(`flags bit1`) then **Snowball stemming** (`flags bit0`). Both key on the single `language`
+byte (`1`–`18`, see **Language bytes** above) and are **independent** — an index can strip a
+language's stop words without stemming, stem without stripping, or both; either filter
+requires a language. Stop words come from per-language sorted lists embedded from
+`stopwords/<lang>.txt` (the same files the Go port embeds, so the lists are byte-identical);
+stemming is via the pure-Rust `rust-stemmers`, the same crate Tantivy uses. Both are wasm-safe,
+so the browser filters/stems queries too. **Test vectors:** `"Machine-Learning, FAST!"` →
 `["machine","learning","fast"]`; `"GPT-4 and BERT"` → `["gpt","4","and","bert"]`.
 
 ## Status

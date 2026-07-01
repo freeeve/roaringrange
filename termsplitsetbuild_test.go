@@ -61,6 +61,7 @@ func termConformanceBuild(t *testing.T) *BuiltSplitSet {
 		ByteCap:    400,
 		NamePrefix: "tcorpus",
 		Language:   TermLanguageEnglish,
+		Stem:       true,
 		Stopwords:  true,
 	})
 	for _, d := range docs {

@@ -27,9 +27,15 @@ const VERSION: u16 = 2;
 pub struct TermIndexConfig {
     /// Doc-ID head/tail split (a multiple of 65536, e.g. [`crate::build::DEFAULT_HEAD_BOUNDARY`]).
     pub head_boundary: u32,
-    /// Optional Snowball stemmer language; `None` builds an unstemmed index.
+    /// The index language, shared by the `stem` and `stopwords` filters below and recorded
+    /// in the header. Must be `Some` whenever either filter is on; `None` only when both are
+    /// off (a filter on with no language is rejected at build).
     pub language: Option<Language>,
-    /// Remove common stop words from the index (and, symmetrically, from queries).
+    /// Apply Snowball stemming in `language`. Independent of `stopwords`, so an index can
+    /// stem without stripping stop words, or strip stop words without stemming.
+    pub stem: bool,
+    /// Remove the language's stop words from the index (and, symmetrically, from queries).
+    /// Requires `language`.
     pub stopwords: bool,
     /// Build a **case-sensitive** index: terms are not lowercased at index or query time
     /// (recorded in the header so the reader skips query-side folding too). The default
@@ -58,6 +64,7 @@ pub fn write_term_index<W: Write>(
         &TermIndexConfig {
             head_boundary,
             language: None,
+            stem: false,
             stopwords: false,
             case_sensitive: false,
             block_cap: 0,
@@ -92,6 +99,7 @@ pub struct TermIndexBuilder {
     tokenizer: Tokenizer,
     head_boundary: u32,
     language: Option<Language>,
+    stem: bool,
     stopwords: bool,
     case_normalization: bool,
     block_cap: usize,
@@ -102,9 +110,15 @@ impl TermIndexBuilder {
     pub fn new(config: &TermIndexConfig) -> Self {
         TermIndexBuilder {
             postings: BTreeMap::new(),
-            tokenizer: Tokenizer::new(config.language, config.stopwords, !config.case_sensitive),
+            tokenizer: Tokenizer::with(
+                config.language,
+                config.stem,
+                config.stopwords,
+                !config.case_sensitive,
+            ),
             head_boundary: config.head_boundary,
             language: config.language,
+            stem: config.stem,
             stopwords: config.stopwords,
             case_normalization: !config.case_sensitive,
             block_cap: config.block_cap,
@@ -138,6 +152,7 @@ impl TermIndexBuilder {
             self.postings,
             self.head_boundary,
             self.language,
+            self.stem,
             self.stopwords,
             self.case_normalization,
             self.block_cap,
@@ -154,15 +169,17 @@ impl TermIndexBuilder {
 /// ([`crate::terms_dict`]) that the reader range-fetches one at a time; a small **router FST**
 /// maps each block's last term to its byte range, so only O(#blocks) — not O(vocab) — is
 /// resident. The postings region is byte-identical to v1. Doc IDs must be the shared rank-order
-/// IDs; `head_boundary` is the head/tail split; the tokenizer settings (`language`/`stopwords`/
-/// `case_normalization`) are recorded in the header so the reader tokenizes queries identically;
-/// `block_cap` is the dict block byte cap (`0` selects [`DEFAULT_DICT_BLOCK_CAP`]). Shared by
-/// [`TermIndexBuilder::finish`] and the split-set term builder.
+/// IDs; `head_boundary` is the head/tail split; the tokenizer settings (`language`/`stem`/
+/// `stopwords`/`case_normalization`) are recorded in the header so the reader tokenizes queries
+/// identically; `block_cap` is the dict block byte cap (`0` selects [`DEFAULT_DICT_BLOCK_CAP`]).
+/// Shared by [`TermIndexBuilder::finish`] and the split-set term builder.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_term_index_from_postings<W: Write>(
     w: W,
     postings: BTreeMap<String, RoaringBitmap>,
     head_boundary: u32,
     language: Option<Language>,
+    stem: bool,
     stopwords: bool,
     case_normalization: bool,
     block_cap: usize,
@@ -172,6 +189,7 @@ pub(crate) fn write_term_index_from_postings<W: Write>(
         &mut region,
         head_boundary,
         language,
+        stem,
         stopwords,
         case_normalization,
         block_cap,
@@ -205,6 +223,7 @@ pub struct TermIndexStreamWriter<W: Write> {
     term_count: u64,
     head_boundary: u32,
     language: Option<Language>,
+    stem: bool,
     stopwords: bool,
     case_normalization: bool,
     block_cap: usize,
@@ -217,6 +236,7 @@ impl<W: Write> TermIndexStreamWriter<W> {
         region_sink: W,
         head_boundary: u32,
         language: Option<Language>,
+        stem: bool,
         stopwords: bool,
         case_normalization: bool,
         block_cap: usize,
@@ -228,6 +248,7 @@ impl<W: Write> TermIndexStreamWriter<W> {
             term_count: 0,
             head_boundary,
             language,
+            stem,
             stopwords,
             case_normalization,
             block_cap,
@@ -291,6 +312,11 @@ impl<W: Write> TermIndexStreamWriter<W> {
     /// blocks, then their streamed region — e.g. an `io::copy` from the temp file).
     #[allow(clippy::type_complexity)]
     pub fn finish_meta(self) -> io::Result<(Vec<u8>, Vec<u8>, Vec<Vec<u8>>)> {
+        if (self.stem || self.stopwords) && self.language.is_none() {
+            return Err(io::Error::other(
+                "RRTI: stemming and stop-word removal require a language, but none is set",
+            ));
+        }
         let blocks = self.blocks.finish();
         let mut router = MapBuilder::memory();
         let mut dict_len: u64 = 0;
@@ -316,14 +342,11 @@ impl<W: Write> TermIndexStreamWriter<W> {
             .map_err(|e| io::Error::other(format!("router fst finish: {e}")))?;
 
         // Header (40 B): `flags` records the tokenizer (stemmed / stop-words /
-        // case-sensitive); the first reserved byte (offset 36) carries the stemmer
-        // language so the reader rebuilds it. `routerLen`/`dictLen` locate the dict
-        // region and postings.
-        let flags = (if self.language.is_some() {
-            FLAG_STEMMED
-        } else {
-            0
-        }) | (if self.stopwords { FLAG_STOPWORDS } else { 0 })
+        // case-sensitive); the first reserved byte (offset 36) carries the index language
+        // (used by the stemmer and/or the stop-word list) so the reader rebuilds the
+        // tokenizer. `routerLen`/`dictLen` locate the dict region and postings.
+        let flags = (if self.stem { FLAG_STEMMED } else { 0 })
+            | (if self.stopwords { FLAG_STOPWORDS } else { 0 })
             | (if self.case_normalization {
                 0
             } else {
@@ -339,7 +362,11 @@ impl<W: Write> TermIndexStreamWriter<W> {
             .try_into()
             .map_err(|_| io::Error::other("RRTI term count exceeds the 32-bit limit"))?;
         let mut reserved = [0u8; 4];
-        reserved[0] = self.language.map_or(0, |l| l.to_u8());
+        reserved[0] = if self.stem || self.stopwords {
+            self.language.map_or(0, |l| l.to_u8())
+        } else {
+            0
+        };
         let mut header = Vec::with_capacity(40);
         header.extend_from_slice(MAGIC);
         header.extend_from_slice(&VERSION.to_le_bytes());

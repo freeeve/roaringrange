@@ -1544,6 +1544,7 @@ mod tests {
             name_prefix: "corpus".to_string(),
             sortcol: None,
             language: None,
+            stem: false,
             stopwords: false,
             case_sensitive: false,
         });

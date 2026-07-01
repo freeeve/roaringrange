@@ -116,7 +116,7 @@ fn slice(
     ))
     .map_err(|e| io::Error::other(format!("open mono: {e:?}")))?;
     let head_boundary = idx.head_boundary();
-    let (language, stopwords, case_normalization) = idx.tokenizer().spec();
+    let (language, stem, stopwords, case_normalization) = idx.tokenizer().spec();
     let block_locs = idx.dict_block_locs();
     let term_count = idx.len() as u64;
     drop(idx);
@@ -148,6 +148,7 @@ fn slice(
                     w,
                     head_boundary,
                     language,
+                    stem,
                     stopwords,
                     case_normalization,
                     0,
@@ -298,6 +299,7 @@ fn selftest() {
         name_prefix: "sl".to_string(),
         sortcol: None,
         language: None,
+        stem: false,
         stopwords: false,
         case_sensitive: false,
     });
@@ -318,6 +320,7 @@ fn selftest() {
     let cfg = TermIndexConfig {
         head_boundary: 65536,
         language: None,
+        stem: false,
         stopwords: false,
         case_sensitive: false,
         block_cap: 0,

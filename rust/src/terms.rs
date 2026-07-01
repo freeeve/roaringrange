@@ -25,6 +25,7 @@ use fst::{IntoStreamer, Map, Streamer};
 use futures::future::join_all;
 use roaring::RoaringBitmap;
 use rust_stemmers::{Algorithm, Stemmer};
+use std::sync::LazyLock;
 
 /// `RRTI` magic.
 const MAGIC: &[u8; 4] = b"RRTI";
@@ -180,17 +181,49 @@ languages! {
     Turkish = 18, "turkish", "tr", Turkish;
 }
 
-/// Common English stop words, sorted for binary search. Removed from the index (and
-/// from queries) only when the index was built with stop-word removal.
-const STOP_WORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "had", "has", "have",
-    "he", "in", "is", "it", "its", "of", "on", "or", "that", "the", "this", "to", "was", "were",
-    "which", "will", "with",
-];
+/// The sorted stop-word list for `lang`, embedded from the shared `stopwords/<lang>.txt`
+/// files at the repo root — the *same bytes* the Go port embeds (`//go:embed`), so the two
+/// ports' lists stay byte-identical by construction. Each list is lowercased, de-duplicated
+/// and sorted by UTF-8 byte order, matching the `binary_search` below. Parsed once on first
+/// use (the file's lines borrow the embedded `'static str`, so no allocation of the words).
+fn stop_words(lang: Language) -> &'static [&'static str] {
+    macro_rules! list {
+        ($file:literal) => {{
+            static L: LazyLock<Vec<&'static str>> =
+                LazyLock::new(|| include_str!($file).lines().collect());
+            L.as_slice()
+        }};
+    }
+    match lang {
+        Language::English => list!("../../stopwords/english.txt"),
+        Language::Spanish => list!("../../stopwords/spanish.txt"),
+        Language::Arabic => list!("../../stopwords/arabic.txt"),
+        Language::Danish => list!("../../stopwords/danish.txt"),
+        Language::Dutch => list!("../../stopwords/dutch.txt"),
+        Language::Finnish => list!("../../stopwords/finnish.txt"),
+        Language::French => list!("../../stopwords/french.txt"),
+        Language::German => list!("../../stopwords/german.txt"),
+        Language::Greek => list!("../../stopwords/greek.txt"),
+        Language::Hungarian => list!("../../stopwords/hungarian.txt"),
+        Language::Italian => list!("../../stopwords/italian.txt"),
+        Language::Norwegian => list!("../../stopwords/norwegian.txt"),
+        Language::Portuguese => list!("../../stopwords/portuguese.txt"),
+        Language::Romanian => list!("../../stopwords/romanian.txt"),
+        Language::Russian => list!("../../stopwords/russian.txt"),
+        Language::Swedish => list!("../../stopwords/swedish.txt"),
+        Language::Tamil => list!("../../stopwords/tamil.txt"),
+        Language::Turkish => list!("../../stopwords/turkish.txt"),
+    }
+}
 
-/// Whether the lowercased token `t` is a stop word.
-fn is_stop_word(t: &str) -> bool {
-    STOP_WORDS.binary_search(&t).is_ok()
+/// Whether the (already case-folded) token `t` is a stop word in `lang`. With no language
+/// nothing is a stop word: the builder rejects the stop-word filter without a language, so a
+/// well-formed index always carries one when the filter is on.
+fn is_stop_word(t: &str, lang: Option<Language>) -> bool {
+    match lang {
+        Some(l) => stop_words(l).binary_search(&t).is_ok(),
+        None => false,
+    }
 }
 
 /// The configured token-filter chain applied after the base [`tokenize`]
@@ -212,22 +245,40 @@ impl Tokenizer {
         Tokenizer::new(None, false, true)
     }
 
-    /// A tokenizer with the given optional stemmer language, stop-word removal, and
-    /// case folding (`case_fold == false` builds a case-sensitive index, keeping token
-    /// text verbatim).
-    pub fn new(language: Option<Language>, stopwords: bool, case_fold: bool) -> Self {
+    /// A tokenizer over `language` with independent `stem` (Snowball) and `stopwords`
+    /// filters plus `case_fold` (`case_fold == false` keeps token text verbatim for a
+    /// case-sensitive index). `language` is shared by both filters and must be `Some`
+    /// whenever `stem` or `stopwords` is set (the builder enforces this). The stemmer is
+    /// created only when `stem`, so an index can strip a language's stop words *without*
+    /// stemming.
+    pub fn with(language: Option<Language>, stem: bool, stopwords: bool, case_fold: bool) -> Self {
         Tokenizer {
-            stemmer: language.map(|l| Stemmer::create(l.algorithm())),
+            stemmer: if stem {
+                language.map(|l| Stemmer::create(l.algorithm()))
+            } else {
+                None
+            },
             stopwords,
             language,
             case_fold,
         }
     }
 
-    /// The `(language, stopwords, case_fold)` triple this tokenizer was built with —
-    /// lets build tooling construct identical tokenizers (e.g. one per worker thread).
-    pub fn spec(&self) -> (Option<Language>, bool, bool) {
-        (self.language, self.stopwords, self.case_fold)
+    /// Back-compat constructor: a `Some` language implies stemming in that language (the
+    /// historical coupling). Prefer [`Tokenizer::with`] to strip stop words without stemming.
+    pub fn new(language: Option<Language>, stopwords: bool, case_fold: bool) -> Self {
+        Tokenizer::with(language, language.is_some(), stopwords, case_fold)
+    }
+
+    /// The `(language, stem, stopwords, case_fold)` this tokenizer was built with — lets
+    /// build tooling construct identical tokenizers (e.g. one per worker thread).
+    pub fn spec(&self) -> (Option<Language>, bool, bool, bool) {
+        (
+            self.language,
+            self.stemmer.is_some(),
+            self.stopwords,
+            self.case_fold,
+        )
     }
 
     /// Whether this tokenizer case-folds (lowercases) tokens. The reader's prefix
@@ -236,27 +287,28 @@ impl Tokenizer {
         self.case_fold
     }
 
-    /// Builds the tokenizer the header describes from its `flags` + `language` byte.
+    /// Builds the tokenizer the header describes from its `flags` + `language` byte. The
+    /// language byte is meaningful when either the stemmed (`bit0`) or stop-words (`bit1`)
+    /// filter is on; the stemmer is built only for `bit0`, while the stop-word list keys on
+    /// the same language.
     fn from_header(flags: u16, language: u8) -> Self {
-        let lang = if flags & FLAG_STEMMED != 0 {
+        let stem = flags & FLAG_STEMMED != 0;
+        let stopwords = flags & FLAG_STOPWORDS != 0;
+        let lang = if stem || stopwords {
             Language::from_u8(language)
         } else {
             None
         };
-        Tokenizer::new(
-            lang,
-            flags & FLAG_STOPWORDS != 0,
-            flags & FLAG_CASE_SENSITIVE == 0,
-        )
+        Tokenizer::with(lang, stem, stopwords, flags & FLAG_CASE_SENSITIVE == 0)
     }
 
     /// Tokenizes `text`: base tokens (lowercased iff this tokenizer case-folds), then
-    /// drop stop words (if enabled), then stem each surviving token (if a stemmer is
-    /// configured).
+    /// drop the language's stop words (if enabled), then stem each surviving token (if a
+    /// stemmer is configured).
     pub fn tokenize(&self, text: &str) -> Vec<String> {
         tokenize_with(text, self.case_fold)
             .into_iter()
-            .filter(|t| !(self.stopwords && is_stop_word(t)))
+            .filter(|t| !(self.stopwords && is_stop_word(t, self.language)))
             .map(|t| match &self.stemmer {
                 Some(s) => s.stem(&t).into_owned(),
                 None => t,
@@ -868,6 +920,7 @@ mod tests {
             &TermIndexConfig {
                 head_boundary,
                 language: None,
+                stem: false,
                 stopwords: false,
                 case_sensitive: false,
                 block_cap,
@@ -921,6 +974,7 @@ mod tests {
             &TermIndexConfig {
                 head_boundary: 65_536,
                 language: None,
+                stem: false,
                 stopwords: false,
                 case_sensitive: true,
                 block_cap: 0,
@@ -1166,6 +1220,7 @@ mod tests {
             &TermIndexConfig {
                 head_boundary: 65_536,
                 language: Some(Language::English),
+                stem: true,
                 stopwords: false,
                 case_sensitive: false,
                 block_cap: 0,
@@ -1190,7 +1245,8 @@ mod tests {
             &docs,
             &TermIndexConfig {
                 head_boundary: 65_536,
-                language: None,
+                language: Some(Language::English),
+                stem: false,
                 stopwords: true,
                 case_sensitive: false,
                 block_cap: 0,
@@ -1204,5 +1260,87 @@ mod tests {
         assert!(block_on(ti.search("the and a", 10)).unwrap().is_empty());
         // Stop words in a query are dropped too, leaving "cat" -> docs 0, 1.
         assert_eq!(block_on(ti.search("the cat", 10)).unwrap(), vec![0, 1]);
+    }
+
+    // Every embedded stop-word list is non-empty, strictly byte-sorted, and de-duplicated —
+    // the invariant the binary search relies on — and English is the fixed back-compat list.
+    #[test]
+    fn stopword_lists_wellformed() {
+        for b in 1u8..=18 {
+            let lang = Language::from_u8(b).expect("language byte");
+            let list = stop_words(lang);
+            assert!(!list.is_empty(), "empty stop-word list for byte {b}");
+            assert!(
+                list.windows(2).all(|w| w[0] < w[1]),
+                "stop-word list for byte {b} is not strictly sorted/deduped"
+            );
+        }
+        assert_eq!(
+            stop_words(Language::English),
+            &[
+                "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "had",
+                "has", "have", "he", "in", "is", "it", "its", "of", "on", "or", "that", "the",
+                "this", "to", "was", "were", "which", "will", "with",
+            ]
+        );
+    }
+
+    // Stop-word removal keys on the index's language: "le" is a French stop word but not an
+    // English one, and vice-versa for "the".
+    #[test]
+    fn stop_words_key_on_language() {
+        assert!(is_stop_word("le", Some(Language::French)));
+        assert!(!is_stop_word("le", Some(Language::English)));
+        assert!(is_stop_word("the", Some(Language::English)));
+        assert!(!is_stop_word("the", Some(Language::French)));
+        assert!(!is_stop_word("the", None));
+    }
+
+    // Stop words can be stripped WITHOUT stemming (task 055): a French stop word is dropped,
+    // but content words are kept verbatim — "chats" is not reduced to a stem.
+    #[test]
+    fn stopwords_without_stemming() {
+        let docs = [(0u32, "les chats"), (1, "les chiens")];
+        let mut buf = Vec::new();
+        write_term_index_with(
+            &mut buf,
+            &docs,
+            &TermIndexConfig {
+                head_boundary: 65_536,
+                language: Some(Language::French),
+                stem: false,
+                stopwords: true,
+                case_sensitive: false,
+                block_cap: 0,
+            },
+        )
+        .unwrap();
+        let ti = block_on(TermIndex::open(MemoryFetch::new(buf))).unwrap();
+        // The French stop word "les" was dropped from both docs and from the query.
+        assert!(block_on(ti.search("les", 10)).unwrap().is_empty());
+        // Content words are indexed verbatim (no stemming): "chats" hits, its stem "chat" does not.
+        assert_eq!(block_on(ti.search("chats", 10)).unwrap(), vec![0]);
+        assert!(block_on(ti.search("chat", 10)).unwrap().is_empty());
+    }
+
+    // A stop-word (or stemming) filter with no language is rejected at build — no silent
+    // English fallback.
+    #[test]
+    fn stopwords_without_language_errors() {
+        let docs = [(0u32, "the cat")];
+        let mut buf = Vec::new();
+        let err = write_term_index_with(
+            &mut buf,
+            &docs,
+            &TermIndexConfig {
+                head_boundary: 65_536,
+                language: None,
+                stem: false,
+                stopwords: true,
+                case_sensitive: false,
+                block_cap: 0,
+            },
+        );
+        assert!(err.is_err(), "stopwords with no language must error");
     }
 }

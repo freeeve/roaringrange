@@ -539,10 +539,11 @@ struct TermBuilder {
 #[pymethods]
 impl TermBuilder {
     #[new]
-    #[pyo3(signature = (head_boundary = None, language = None, stopwords = false, block_cap = None, case_sensitive = false))]
+    #[pyo3(signature = (head_boundary = None, language = None, stem = None, stopwords = false, block_cap = None, case_sensitive = false))]
     fn new(
         head_boundary: Option<u32>,
         language: Option<String>,
+        stem: Option<bool>,
         stopwords: bool,
         block_cap: Option<usize>,
         case_sensitive: bool,
@@ -555,9 +556,19 @@ impl TermBuilder {
                 ))
             })?),
         };
+        // `stem` defaults to "a language was given" (the historical coupling); pass it
+        // explicitly to strip a language's stop words without stemming. Either filter
+        // requires a language.
+        let stem = stem.unwrap_or(language.is_some());
+        if (stem || stopwords) && language.is_none() {
+            return Err(PyValueError::new_err(
+                "stemming and stop-word removal require a language (pass language=...)",
+            ));
+        }
         let config = TermIndexConfig {
             head_boundary: head_boundary.unwrap_or(DEFAULT_HEAD_BOUNDARY),
             language,
+            stem,
             stopwords,
             block_cap: block_cap.unwrap_or(0),
             case_sensitive,
@@ -793,7 +804,7 @@ struct TermSplitSetBuilder {
 #[pymethods]
 impl TermSplitSetBuilder {
     #[new]
-    #[pyo3(signature = (policy="tiered", byte_cap=33_554_432, head_boundary=0, name_prefix="split", sortcol=None, language=None, stopwords=false, byte_cap_max=0, case_sensitive=false))]
+    #[pyo3(signature = (policy="tiered", byte_cap=33_554_432, head_boundary=0, name_prefix="split", sortcol=None, language=None, stem=None, stopwords=false, byte_cap_max=0, case_sensitive=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         policy: &str,
@@ -802,6 +813,7 @@ impl TermSplitSetBuilder {
         name_prefix: &str,
         sortcol: Option<(String, u16, bool)>,
         language: Option<String>,
+        stem: Option<bool>,
         stopwords: bool,
         byte_cap_max: u64,
         case_sensitive: bool,
@@ -814,6 +826,15 @@ impl TermSplitSetBuilder {
                 ))
             })?),
         };
+        // `stem` defaults to "a language was given" (the historical coupling); pass it
+        // explicitly to strip a language's stop words without stemming. Either filter
+        // requires a language.
+        let stem = stem.unwrap_or(language.is_some());
+        if (stem || stopwords) && language.is_none() {
+            return Err(PyValueError::new_err(
+                "stemming and stop-word removal require a language (pass language=...)",
+            ));
+        }
         let config = TermSplitBuildConfig {
             policy: parse_policy(policy)?,
             byte_cap,
@@ -822,6 +843,7 @@ impl TermSplitSetBuilder {
             name_prefix: name_prefix.to_string(),
             sortcol: sortcol_spec(sortcol),
             language,
+            stem,
             stopwords,
             case_sensitive,
         };

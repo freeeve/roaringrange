@@ -804,9 +804,14 @@ pub struct TermSplitBuildConfig {
     pub name_prefix: String,
     /// Optional stable-key rank source (the `RRSC` the manifest names).
     pub sortcol: Option<SortColSpec>,
-    /// Optional Snowball stemmer language; `None` builds an unstemmed term index.
+    /// The index language, shared by the `stem` and `stopwords` filters and recorded in each
+    /// split's header. Must be `Some` whenever either filter is on; `None` only when both are
+    /// off (a filter on with no language is rejected when a split seals).
     pub language: Option<Language>,
-    /// Remove common stop words from the index (and, symmetrically, from queries).
+    /// Apply Snowball stemming in `language`. Independent of `stopwords`.
+    pub stem: bool,
+    /// Remove the language's stop words from the index (and, symmetrically, from queries).
+    /// Requires `language`.
     pub stopwords: bool,
     /// Build a **case-sensitive** split set: terms are not lowercased at index or query time
     /// (each split's `RRTI`/`RRSF` records the choice). The default (`false`) case-folds,
@@ -848,6 +853,7 @@ pub struct TermSplitSetBuilder {
     name_prefix: String,
     sortcol: Option<SortColSpec>,
     language: Option<Language>,
+    stem: bool,
     stopwords: bool,
     case_normalization: bool,
     /// The resident tokenizer (fixed at construction); query-side tokenization must match it.
@@ -890,9 +896,15 @@ impl TermSplitSetBuilder {
             name_prefix: config.name_prefix,
             sortcol: config.sortcol,
             language: config.language,
+            stem: config.stem,
             stopwords: config.stopwords,
             case_normalization: !config.case_sensitive,
-            tokenizer: Tokenizer::new(config.language, config.stopwords, !config.case_sensitive),
+            tokenizer: Tokenizer::with(
+                config.language,
+                config.stem,
+                config.stopwords,
+                !config.case_sensitive,
+            ),
             open: BTreeMap::new(),
             open_count: 0,
             global_base: 0,
@@ -981,6 +993,7 @@ impl TermSplitSetBuilder {
             open,
             self.head_boundary,
             self.language,
+            self.stem,
             self.stopwords,
             self.case_normalization,
             0, // default dictionary block cap
@@ -1148,6 +1161,7 @@ pub(crate) fn term_conformance_build() -> BuiltSplitSet {
         name_prefix: "tcorpus".to_string(),
         sortcol: None,
         language: Some(Language::English),
+        stem: true,
         stopwords: true,
         case_sensitive: false,
     });
@@ -1183,6 +1197,7 @@ pub(crate) fn term_conformance_cs_build() -> BuiltSplitSet {
         name_prefix: "cscorpus".to_string(),
         sortcol: None,
         language: None,
+        stem: false,
         stopwords: false,
         case_sensitive: true,
     });
