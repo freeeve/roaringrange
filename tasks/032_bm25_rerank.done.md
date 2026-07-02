@@ -70,7 +70,7 @@ Sizing (484M docs, title+abstract, ~80–120 unique terms/doc → ~40–60 B pai
       from the bytes plain search already moves; tails only when the head
       can't fill the window) so common queries pay ~KBs extra.
       Hybrid-term's text arm feeds BM25-ranked ids into the RRF fusion.
-- [ ] Cross-mode rerank: score TRIGRAM-mode (and hybrid-tri) candidates with
+- [x] Cross-mode rerank: score TRIGRAM-mode (and hybrid-tri) candidates with
       the same term `.rrb` — the shared doc-ID space makes one sidecar serve
       every mode. Glue only: trigram search yields candidate ids; resolve the
       query's words via `TermIndex::query_postings`; feed both straight into
@@ -81,8 +81,41 @@ Sizing (484M docs, title+abstract, ~80–120 unique terms/doc → ~40–60 B pai
       n-gram tf/idf is noise as a relevance signal, and the artifact would be
       ~150–190 GB (every doc posts to ~300–500 distinct trigrams) vs the term
       sidecar's ~35 GB.
-- [ ] Bench row in `live_bench`: bytes/latency of rerank vs rank-order-only,
+      **DONE 2026-07-02** (demo glue; core `rerankIds` binding already shipped):
+      `index.html` reranks trigram + hybrid-tri candidates through the shared
+      `.rrb` via `rterm.rerankIds` (resolves `query_postings`, then
+      `ImpactIndex::rerank` — unmatched/unresolvable candidates fall back to
+      static rank, never error). UI: the BM25 toggle now also shows under
+      trigram as **opt-IN** (default OFF there to preserve the cursor's exact
+      count + tail paging; default ON stays for the word/term-hybrid modes).
+      `bm25Off` became a tri-state (null = per-mode default / true = opted out /
+      false = opted in); the URL encodes only the exception vs the mode default
+      (`?bm25=0` opts a default-on mode out, `?bm25=1` opts trigram in). The
+      trigram rerank path runs before the server branch and engages whenever a
+      client candidate source (`idx` or the split set `rrss`) is booted; a
+      server-only boot falls through to the normal Lambda path unchanged.
+      **Deploy pending** (wasm bundle already carries `rerankIds`; needs a
+      `deploy.sh` push of the updated `index.html`).
+- [x] Bench row in `live_bench`: bytes/latency of rerank vs rank-order-only,
       plus a relevance spot-check (the "roaring bitmaps" seminal-paper test).
+      **DONE 2026-07-02** (live over CloudFront): added `term mono +bm25`
+      (`search_bm25`, M=2000) and `trigram mono +bm25` (trigram candidates at
+      SEM_K=250 reranked through the SAME term `.rrb`), plus a `roaring bitmaps`
+      spot-check printing top-5 rank-order vs bm25 (term) and trigram→bm25.
+      Live K=25, "machine learning": term mono 15.5 KB / 662 ms → +bm25
+      24.29 MB / 6.3 s; trigram mono 860 KB / 7.6 s → +bm25 25.12 MB / 15.9 s.
+      The rerank cost is the impact-byte candidate-window fetch — largest on
+      mega-common terms (both query words span most containers); rarer queries
+      (e.g. the spot-check) are KB-scale. Relevance spot-check (live) — "roaring
+      bitmaps", top-25 rank-order vs bm25 differ in **24 of 25 slots**:
+      - rank-order top-5: `[2722648, 7776809, 11137692, 14211300, 36283355]`
+        (generic bitmap-compression papers; the real Roaring paper demoted to #5)
+      - term bm25 top-5: `[36283355, 314306731, 11137692, 84865397, 278229021]`
+      - trigram→bm25 top-5: `[36283355, 314306731, 11137692, 84865397, 278229021]`
+      The trigram→bm25 top-5 is **byte-identical** to the term bm25 top-5: one
+      `.rrb`, fed candidates from a different backend (trigram), yields the same
+      relevance order — the cross-mode thesis (one sidecar, shared doc-ID space)
+      proven live. Both surface the real Roaring paper at #1.
 
 ## Non-goals (Tier 2, separate decision)
 
