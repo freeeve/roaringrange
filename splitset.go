@@ -95,6 +95,10 @@ type SplitSetConfig struct {
 // (base splits first, then delta splits — BaseCount marks the boundary). The
 // output is byte-for-byte identical to the Rust writer for the same inputs. See
 // SPLITSET.md.
+//
+// PERFORMANCE: this emits many small (~56-byte) writes to w; pass a buffered
+// writer (e.g. bufio.Writer) when w is a file or socket and flush it after. The
+// library does not buffer internally.
 func WriteSplitSet(w io.Writer, splits []SplitSpec, config SplitSetConfig) error {
 	if int(config.BaseCount) > len(splits) {
 		return fmt.Errorf("RRSS base_count %d exceeds split count %d", config.BaseCount, len(splits))

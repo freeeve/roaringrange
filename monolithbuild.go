@@ -56,6 +56,7 @@ type TrigramMonolithBuilder struct {
 	caseFold bool
 	open     map[uint64]*roaring.Bitmap
 	nextID   uint32
+	keyer    NgramKeyer // reused across AddText calls to avoid per-doc allocations
 }
 
 // NewTrigramMonolithBuilder opens a monolith builder for the given trigram size and sparse
@@ -86,7 +87,8 @@ func NewTrigramMonolithBuilderWith(gramSize uint16, stride int, caseSensitive bo
 // AddText tokenizes text into gramSize-gram trigram keys and indexes them under the next doc
 // ID, returning that ID. Mirrors SplitSetBuilder.AddText.
 func (b *TrigramMonolithBuilder) AddText(text string) uint32 {
-	return b.AddKeys(NgramKeysWith(text, int(b.gramSize), b.caseFold))
+	// AddKeys consumes the keys immediately, so the reused keyer buffer is safe.
+	return b.AddKeys(b.keyer.Keys(text, int(b.gramSize), b.caseFold))
 }
 
 // AddKeys indexes the given trigram keys under the next doc ID and returns that ID. An empty

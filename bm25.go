@@ -111,6 +111,10 @@ type DictEntry struct {
 // dict over the stats in acc — byte-for-byte with the Rust write_impacts. Every dict
 // term must have accumulated stats (else error — a tokenizer-config mismatch would
 // otherwise mis-address every later term). k1/b are the BM25 parameters used.
+//
+// PERFORMANCE: this emits many small (~20-byte) writes to dst; pass a buffered
+// writer (e.g. bufio.Writer) when dst is a file or socket and flush it after. The
+// library does not buffer internally.
 func WriteImpacts(dst io.Writer, dict []DictEntry, acc *ImpactsAccumulator, k1, b float32) error {
 	nDocs := uint64(len(acc.docLens))
 	if nDocs == 0 {

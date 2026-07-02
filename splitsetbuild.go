@@ -96,6 +96,7 @@ type SplitSetBuilder struct {
 	specs      []SplitSpec
 	blobs      []NamedSplit
 	facetBlobs []NamedSplit
+	keyer      NgramKeyer // reused across AddText/AddFaceted calls to avoid per-doc allocations
 }
 
 // NewSplitSetBuilder creates a builder. A HeadBoundary/Stride of 0 take the RRS defaults.
@@ -120,7 +121,8 @@ func NewSplitSetBuilder(cfg SplitBuildConfig) *SplitSetBuilder {
 // AddText tokenizes text into n-gram keys and appends it as one document, returning
 // its global doc id.
 func (b *SplitSetBuilder) AddText(text string) (uint32, error) {
-	return b.addInner(NgramKeysWith(text, int(b.cfg.GramSize), !b.cfg.CaseSensitive), nil)
+	// addInner consumes the keys immediately, so the reused keyer buffer is safe.
+	return b.addInner(b.keyer.Keys(text, int(b.cfg.GramSize), !b.cfg.CaseSensitive), nil)
 }
 
 // AddKeys appends one document by its (deduplicated) n-gram keys, returning its
@@ -134,7 +136,7 @@ func (b *SplitSetBuilder) AddKeys(keys []uint64) (uint32, error) {
 // sealed split then gets its own RRSF facet sidecar plus a facet-presence summary, so a
 // facet-filtered query can skip a split lacking a selected category. Returns the global id.
 func (b *SplitSetBuilder) AddFaceted(text string, facets map[string][]string) (uint32, error) {
-	return b.addInner(NgramKeysWith(text, int(b.cfg.GramSize), !b.cfg.CaseSensitive), facets)
+	return b.addInner(b.keyer.Keys(text, int(b.cfg.GramSize), !b.cfg.CaseSensitive), facets)
 }
 
 // addInner is the shared add path: the seal decision (text estimate only — facets live in a

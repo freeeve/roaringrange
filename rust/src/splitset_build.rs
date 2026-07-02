@@ -951,9 +951,16 @@ impl TermSplitSetBuilder {
 
         let local_id = self.open_count;
         for t in terms {
-            let is_new = !self.open.contains_key(t.as_str());
             let len = t.len() as u64;
-            if self.open.entry(t).or_default().insert(local_id) {
+            // One BTreeMap walk per term: the entry tells us if the term is new (for
+            // the new-term byte accounting) and hands back the posting to insert into.
+            let (bm, is_new) = match self.open.entry(t) {
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    (e.insert(RoaringBitmap::new()), true)
+                }
+                std::collections::btree_map::Entry::Occupied(e) => (e.into_mut(), false),
+            };
+            if bm.insert(local_id) {
                 self.bytes_upper += PER_TERM_ELEMENT_BYTES;
                 if is_new {
                     self.bytes_upper += PER_NEW_TERM_BYTES + len;

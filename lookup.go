@@ -64,6 +64,10 @@ type LookupEntry struct {
 // write_lookup. Identifiers are normalized and double-hashed, empties dropped, and
 // the records sorted by (hash, doc) with a stable sort (matching Rust's stable
 // sort_by on equal-hash, equal-doc ties).
+//
+// PERFORMANCE: this emits many small (~16-byte) writes to dst; pass a buffered
+// writer (e.g. bufio.Writer) when dst is a file or socket and flush it after. The
+// library does not buffer internally.
 func WriteLookup(dst io.Writer, entries []LookupEntry) error {
 	type rec struct {
 		hash   uint64

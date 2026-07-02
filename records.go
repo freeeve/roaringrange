@@ -58,6 +58,12 @@ type RecordWriter struct {
 // NewRecordWriter opens a streaming record store for count records, writing the
 // 16-byte RRSR header and the leading off[0]=0 to idx. Push each record with
 // Write in ascending doc-ID order.
+//
+// PERFORMANCE: Write issues one bin write plus one 8-byte idx write per record, so
+// pass BUFFERED writers (e.g. bufio.Writer) for bin and idx when they are files or
+// sockets — otherwise a full-corpus build pays ~2 syscalls per record. The library
+// does not buffer internally (so it never double-buffers a caller that already
+// does); flush your buffers after the final Write / Finish.
 func NewRecordWriter(bin, idx io.Writer, count uint32) (*RecordWriter, error) {
 	header := make([]byte, recordHeaderSize)
 	copy(header[0:4], MagicRecord)
