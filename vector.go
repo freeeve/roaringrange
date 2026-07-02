@@ -87,14 +87,22 @@ func WriteRRVI(dst io.Writer, m *ivfpq.Model) error {
 		return err
 	}
 
-	// Lists: per cluster, [ids u32 LE][codes bytes].
+	// Lists: per cluster, [ids u32 LE][codes bytes]. One id buffer is grown to the
+	// largest cluster and reused across clusters rather than allocated per cluster
+	// (dst.Write copies, so reuse after Write is safe).
+	var idBuf []byte
 	for c := range m.Nlist {
 		ids := m.ListIDs[c]
-		buf := make([]byte, len(ids)*4)
-		for i, id := range ids {
-			binary.LittleEndian.PutUint32(buf[i*4:], id)
+		n := len(ids) * 4
+		if cap(idBuf) < n {
+			idBuf = make([]byte, n)
+		} else {
+			idBuf = idBuf[:n]
 		}
-		if _, err := dst.Write(buf); err != nil {
+		for i, id := range ids {
+			binary.LittleEndian.PutUint32(idBuf[i*4:], id)
+		}
+		if _, err := dst.Write(idBuf); err != nil {
 			return err
 		}
 		if _, err := dst.Write(m.ListCodes[c]); err != nil {

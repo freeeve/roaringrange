@@ -320,8 +320,14 @@ impl<F: RangeFetch> Index<F> {
     /// read repeatedly — wasted bandwidth, and, because the reads run concurrently,
     /// duplicate in-flight Range requests for one URL that some HTTP caches answer
     /// with a truncated body (which then trips the reader's exact-length check).
-    /// The returned vec is aligned with `blocks`.
-    async fn read_dict_blocks(&self, blocks: &[DictBlock]) -> Result<Vec<Vec<u8>>, IndexError> {
+    /// Returns `(unique_block_bytes, which)`: `which[k]` indexes `unique_block_bytes`
+    /// for `blocks[k]`, so several n-grams sharing a block address the same buffer
+    /// with no per-key copy (a naive per-key clone copies the ~stride-sized block
+    /// once per n-gram, on the per-keystroke `query_cost` path).
+    async fn read_dict_blocks(
+        &self,
+        blocks: &[DictBlock],
+    ) -> Result<(Vec<Vec<u8>>, Vec<usize>), IndexError> {
         let mut uniq: Vec<&DictBlock> = Vec::new();
         let mut which: Vec<usize> = Vec::with_capacity(blocks.len());
         for blk in blocks {
@@ -340,7 +346,7 @@ impl<F: RangeFetch> Index<F> {
             .await
             .into_iter()
             .collect::<Result<_, _>>()?;
-        Ok(which.iter().map(|&i| fetched[i].clone()).collect())
+        Ok((fetched, which))
     }
 
     /// Resolves `key` to its dictionary entry with at most one ranged dict-block
@@ -376,10 +382,10 @@ impl<F: RangeFetch> Index<F> {
             .filter_map(|(i, &k)| self.dict_block_for(k).map(|b| (i, b)))
             .collect();
         let blocks: Vec<DictBlock> = present.iter().map(|&(_, b)| b).collect();
-        let datas = self.read_dict_blocks(&blocks).await?;
+        let (datas, which) = self.read_dict_blocks(&blocks).await?;
         let mut out = vec![None; keys.len()];
-        for ((i, block), data) in present.iter().zip(&datas) {
-            out[*i] = Self::parse_block(data, block.entries, keys[*i]);
+        for (j, (i, block)) in present.iter().enumerate() {
+            out[*i] = Self::parse_block(&datas[which[j]], block.entries, keys[*i]);
         }
         Ok(out)
     }
@@ -532,11 +538,11 @@ impl<F: RangeFetch> Index<F> {
             Some(blocks) => blocks,
             None => return Ok(Vec::new()), // a key precedes the dictionary -> absent
         };
-        let block_results = self.read_dict_blocks(&blocks).await?;
+        let (datas, which) = self.read_dict_blocks(&blocks).await?;
 
         let mut recs = Vec::with_capacity(keys.len());
-        for ((bytes, blk), &key) in block_results.into_iter().zip(&blocks).zip(&keys) {
-            match Self::parse_block(&bytes, blk.entries, key) {
+        for (i, (&key, blk)) in keys.iter().zip(&blocks).enumerate() {
+            match Self::parse_block(&datas[which[i]], blk.entries, key) {
                 None => return Ok(Vec::new()), // absent key -> empty result
                 Some(rec) => recs.push(rec),
             }
@@ -608,10 +614,10 @@ impl<F: RangeFetch> Index<F> {
             Some(blocks) => blocks,
             None => return Ok(Vec::new()), // a key precedes the dictionary -> absent
         };
-        let block_results = self.read_dict_blocks(&blocks).await?;
+        let (datas, which) = self.read_dict_blocks(&blocks).await?;
         let mut recs = Vec::with_capacity(keys.len());
-        for ((bytes, blk), &key) in block_results.into_iter().zip(&blocks).zip(&keys) {
-            match Self::parse_block(&bytes, blk.entries, key) {
+        for (i, (&key, blk)) in keys.iter().zip(&blocks).enumerate() {
+            match Self::parse_block(&datas[which[i]], blk.entries, key) {
                 None => return Ok(Vec::new()), // absent key -> strict AND empty
                 Some(rec) => recs.push(rec),
             }
@@ -684,10 +690,10 @@ impl<F: RangeFetch> Index<F> {
             .filter_map(|&k| self.dict_block_for(k).map(|blk| (k, blk)))
             .collect();
         let blocks: Vec<DictBlock> = present.iter().map(|(_, blk)| *blk).collect();
-        let block_results = self.read_dict_blocks(&blocks).await?;
+        let (datas, which) = self.read_dict_blocks(&blocks).await?;
         let mut recs = Vec::with_capacity(present.len());
-        for (bytes, (key, blk)) in block_results.into_iter().zip(&present) {
-            if let Some(rec) = Self::parse_block(&bytes, blk.entries, *key) {
+        for (j, (key, blk)) in present.iter().enumerate() {
+            if let Some(rec) = Self::parse_block(&datas[which[j]], blk.entries, *key) {
                 recs.push(rec);
             }
         }
@@ -1355,8 +1361,11 @@ fn threshold(bitmaps: Vec<RoaringBitmap>, min_match: usize) -> Option<RoaringBit
             if k == 1 {
                 c[1] |= b;
             } else {
-                let mut inc = c[k - 1].clone();
-                inc &= b;
+                // `&c[k-1] & b` allocates only the (smaller) intersection rather than
+                // cloning the whole c[k-1] accumulator and then shrinking it in place.
+                // c[k-1] is read before its own step updates it (k processed before
+                // k-1), so the result is identical to the clone-then-AND form.
+                let inc = &c[k - 1] & b;
                 c[k] |= inc;
             }
         }

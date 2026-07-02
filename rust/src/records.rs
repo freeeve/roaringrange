@@ -130,10 +130,15 @@ impl<F: RangeFetch> RecordStore<F> {
         if self.version == 1 || raw.is_empty() {
             return Ok(raw);
         }
-        let (tag, payload) = (raw[0], &raw[1..]);
-        match tag {
-            TAG_RAW => Ok(payload.to_vec()),
-            TAG_ZSTD_DICT => self.inflate_zstd(payload),
+        match raw[0] {
+            // Strip the tag byte in place, reusing `raw`'s buffer, rather than
+            // copying the payload into a fresh Vec on every record of a page.
+            TAG_RAW => {
+                let mut raw = raw;
+                raw.remove(0);
+                Ok(raw)
+            }
+            TAG_ZSTD_DICT => self.inflate_zstd(&raw[1..]),
             _ => Err(IndexError::Malformed(
                 "RRSR record has an unknown frame tag",
             )),

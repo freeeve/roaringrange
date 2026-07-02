@@ -105,9 +105,16 @@ func parseEntries(data []byte, count uint32) ([]indexEntry, error) {
 
 // serializePosting deserializes a portable roaring bitmap and re-serializes it as one
 // canonical portable RoaringBitmap — the v3 RRS posting (mirrors Rust build::serialize_posting).
+//
+// FromBuffer keeps a (copy-on-write) reference into payload rather than copying it,
+// so payload must outlive bm. It does here: bm is only read (ToBytes) and discarded
+// before returning, while payload is a slice of the caller's live index bytes and is
+// never mutated — so the defensive copy the buffer contract would otherwise require
+// is unnecessary, saving a posting-sized allocation per posting across a large
+// transcode. Do not retain bm or mutate it without cloning its containers first.
 func serializePosting(payload []byte) ([]byte, error) {
 	bm := roaring.New()
-	if _, err := bm.FromBuffer(append([]byte(nil), payload...)); err != nil {
+	if _, err := bm.FromBuffer(payload); err != nil {
 		return nil, err
 	}
 	return bm.ToBytes()
