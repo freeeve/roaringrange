@@ -15,3 +15,31 @@
 - Facet filter failure with active checkboxes shows a visible degradation notice, not silently-unfiltered results.
 - Dict URL 404 at boot -> clear boot error, not blank cards later.
 - Redeploy: wasm/web deploy per `deploy.sh` (AWS_PROFILE=openalex-admin), verify live.
+
+## Outcome (DONE)
+
+All in `examples/openalex/web/index.html`; deployed live with reader `13da5a419c` (shared the
+same `deploy.sh` run as task 065). A new `showError(msg)` helper sets the perf summary, hides the
+pager, and -- only when the results area still shows loading skeletons (tracked by a
+`resultsAreSkeletons` flag, cleared by `renderCards`) -- replaces the skeletons with the message
+via `textContent` (never wiping already-rendered mid-scan cards, never injecting markup).
+
+- **Finding 1 (HIGH, server-mode paging):** `goPageServer` now wraps its bare `fetchRecords`
+  in try/catch, and its `lambdaSearch` catch routes to `showError`. Added backstop catches to
+  `pageTo` and `runSearch` so any error escaping a page function surfaces as an error state
+  instead of an unhandled rejection with skeletons stuck on screen. All the pre-existing
+  `goPage`/`goPageRanked` paging catches route through `showError` too.
+- **Finding 2 (facetFilter):** with active filters, a `filterIds` failure now throws (surfaced
+  by the caller / backstop) rather than silently returning the unfiltered list under a "+ facets"
+  summary; with no active filters it still degrades quietly (counts are optional).
+- **Finding 3 (dict ok check):** the zstd dictionary fetch (now started concurrently per task
+  065) checks `resp.ok` and throws on 404/403, caught by the record-store open's try/catch and
+  shown as a clear boot error -- no more handing an error page's bytes to `openWithDict`.
+- **Finding 4 (hybrid arms):** both hybrid blocks capture each arm's error and, when every
+  attempted arm failed, call `showError` instead of fusing empty lists into a "0 results" verdict.
+
+Verified: the extracted module script passes `node --check`; the live HTML contains
+`function showError`, the 3-arg `filterIds` call, and the `resp.ok` dict guard. The interactive
+acceptance checks (devtools offline mid-paging in each mode; a forced filter/dict failure) are
+browser-manual and left for eyeballing on the live demo -- the handling code is deployed and
+verified by inspection.

@@ -15,3 +15,31 @@
 - rangeCacheStats/fetch-count comparison: a ranked query with no active filters during head-streaming issues ~0 facet-count fetches after the fix.
 - Boot waterfall (devtools) shows overlapped opens on the fallback path.
 - wasm-pack rebuild + deploy (remember: stale web/roaringrange.js symptom from memory), demo verified live.
+
+## Outcome (DONE)
+
+Deployed live: reader `roaringrange.13da5a419c.js` (+ `_bg.wasm`) at
+https://openalex.evefreeman.com/ via `deploy.sh` (wasm-pack `--features "wasm zstd vector terms
+splits hotcache"`), CloudFront invalidated. Changes in `rust/src/wasm.rs` +
+`examples/openalex/web/index.html`.
+
+- **Finding 1 (skip wasted facet-count waves):** `filtered_ids` gained a `want_counts` flag; the
+  two `filterIds` bindings thread it. The demo passes `facetHeadsReady`, so during the post-boot
+  head-streaming window (when the counts are discarded at `index.html`) the `counts_full` fetch
+  wave (up to 64 x 5 category reads) is skipped entirely; filtering still runs. Confirmed the
+  deployed glue exposes the 3-arg `filterIds` and the HTML calls it with `facetHeadsReady`.
+- **Finding 2 (parallelize boot):** the zstd record-dictionary download now starts concurrently
+  with the index/facet opens on the bundle-miss boot path (the live default -- there is currently
+  no `.rrhc` object, so the demo boots via the fallback path, which this directly speeds up).
+- **Finding 3 (O(log n) paging):** `WasmBitmap::page` uses rank/`select` instead of
+  `iter().skip(offset)`, so deep-paging a multi-million-doc bitmap no longer re-walks the prefix.
+- **Finding 4 (getter clones):** `FilteredIds`/`RrviHits`/`RrtHits` documented as read-once
+  (each getter copies across the wasm boundary per access).
+- **Finding 5 (counts_for truncation):** both `countsFor` bindings saturate with
+  `u32::try_from(..).unwrap_or(u32::MAX)` instead of `as u32`.
+
+Verified: full-feature wasm compiles; deployed reader assets serve 200 with
+`application/wasm` / `text/javascript`; live HTML references the new hashed reader and the 3-arg
+`filterIds` call. The interactive acceptance checks (devtools `rangeCacheStats` fetch-count with
+no active filters; boot-waterfall overlap) are browser-manual and left for eyeballing on the live
+demo -- the code paths that produce them are deployed and verified by inspection.
