@@ -921,8 +921,16 @@
       let splitRecords = null;      // the split set's RRSR record store (shared with the monolith when SPLIT.rec matches)
       let rrssTerm = null;          // the term-bodied split set reader (lazy-booted on first term+split search)
       let rrb = null;               // RrbIndex — the .rrb BM25 impact sidecar (lazy-booted on first rerank)
-      let bm25Mode = false;         // the "BM25 relevance" toggle — defaults ON for the word modes when an .rrb is configured
-      let bm25Off = false;          // user opted OUT (toggle or ?bm25=0)
+      let bm25Mode = false;         // the "BM25 relevance" toggle — resolved per mode in syncModeUi
+      let bm25Off = null;           // user's explicit bm25 choice: null = none (per-mode default), true = opted out, false = opted in
+      // BM25 relevance reranks a mode's candidates through the shared .rrb (one sidecar
+      // serves every mode via the common doc-ID space). It DEFAULTS ON for the word/term-hybrid
+      // modes and is OPT-IN for trigram, which otherwise showcases the cursor's exact count +
+      // tail paging. bm25ModeFor resolves the effective state from the per-mode default and the
+      // user's explicit choice (bm25Off).
+      const bm25DefaultOnFor = (m) => m === "term" || m === "hybrid-term" || m === "hybrid-tri";
+      const bm25CapableFor = (m) => !!RRB_URL && (bm25DefaultOnFor(m) || m === "trigram");
+      const bm25ModeFor = (m) => bm25CapableFor(m) && (bm25Off === true ? false : bm25Off === false ? true : bm25DefaultOnFor(m));
       let splitMode = false;        // the "Split-set index" toggle: swap the trigram backend to RrssIndex
       // The user's explicit split choice (toggle / ?split=): null = use the mode's
       // default. Trigram defaults ON (when server mode is off) — tier pruning caps
@@ -1034,7 +1042,7 @@
         } else if (mode === "term" || mode === "hybrid-term" || mode === "hybrid-full") {
           add(".rrt", fileSizes.rrt);
         }
-        if (((mode === "term" || mode === "hybrid-term") && bm25Mode || mode === "hybrid-full") && RRB_URL) {
+        if (((bm25CapableFor(mode) && bm25Mode) || mode === "hybrid-full") && RRB_URL) {
           add(".rrb impacts", fileSizes.rrb);
         }
         if (mode.startsWith("hybrid") || mode === "semantic") { add(".rrvi", fileSizes.rrvi); add(".rrm2", fileSizes.rrm2); }
@@ -1130,7 +1138,10 @@
         const serverable = wordMode || mode === "hybrid-tri" || mode === "hybrid-term";
         if (serverable && SERVER_DEFAULT && serverOff) params.set("srv", "0");
         if (wordMode && !serverMode && splitPref === false) params.set("split", "0");
-        if ((mode === "term" || mode === "hybrid-term") && RRB_URL && bm25Off) params.set("bm25", "0");
+        // bm25: encode only the EXCEPTION vs the mode's default (0 = opted out of a
+        // default-on mode, 1 = opted into trigram) so a deep link replays the same ordering.
+        if (bm25CapableFor(mode) && bm25ModeFor(mode) !== bm25DefaultOnFor(mode))
+          params.set("bm25", bm25ModeFor(mode) ? "1" : "0");
         // Gemma (Lambda) embeddings opt-IN on the vector modes (model2vec is the default).
         if ((mode === "semantic" || mode.startsWith("hybrid")) && EMBED_LAMBDA_URL && RRVI_GEMMA_URL && lambdaSemantic)
           params.set("gemma", "1");
@@ -1177,13 +1188,13 @@
           splitMode = (splitPref ?? true) && !serverMode;
           els.splitmode.checked = splitMode;
         }
-        // BM25 relevance applies to the word modes (term + hybrid-term — the
-        // sidecar is keyed by the .rrt's postings) and defaults ON there: a
-        // couple of KB-scale extra waves buy relevance ordering instead of
-        // citation rank alone. ?bm25=0 / the toggle opt out.
-        const bm25Capable = (mode === "term" || mode === "hybrid-term") && !!RRB_URL;
+        // BM25 relevance reranks the mode's candidates through the .rrt-keyed sidecar: a
+        // couple of KB-scale extra waves buy relevance ordering instead of citation rank
+        // alone. Default ON for the word/term-hybrid modes, opt-in for trigram (see
+        // bm25ModeFor). ?bm25=0 / the toggle opt out; ?bm25=1 / the toggle opt trigram in.
+        const bm25Capable = bm25CapableFor(mode);
         els.bm25modeWrap.hidden = !bm25Capable;
-        bm25Mode = bm25Capable && !bm25Off;
+        bm25Mode = bm25ModeFor(mode);
         els.bm25mode.checked = bm25Mode;
         // The Gemma embed toggle only applies to the vector modes: show it there
         // (when configured), never under trigram/term.
@@ -2378,9 +2389,11 @@
           const termArm = searchMode === "hybrid-term";
           const textReady = termArm ? await ensureTermIndex() : !!idx;
           if (mySeq !== searchSeq) return;
-          // BM25-ranked term arm (the Weaviate-style hybrid: lexical relevance +
-          // vector similarity, fused by reciprocal rank).
-          const hybridBm25 = termArm && bm25Mode && textReady && (await ensureRrb());
+          // BM25-ranked text arm (the Weaviate-style hybrid: lexical relevance + vector
+          // similarity, fused by reciprocal rank). The term arm runs a min-match BM25
+          // search; the trigram arm (hybrid-tri) reranks its candidates through the shared
+          // .rrb (same doc-ID space). Both address the .rrt postings, so ensure the term index.
+          const hybridBm25 = bm25Mode && textReady && (await ensureRrb()) && (await ensureTermIndex());
           if (mySeq !== searchSeq) return;
           const t0 = performance.now();
           let sem = null, text = [], semErr = null, textErr = null;
@@ -2389,9 +2402,12 @@
           if (textReady) {
             const tr0 = reqs, tb0 = bytes, tt0 = performance.now();
             try {
-              text = Array.from(termArm
-                ? (hybridBm25 ? (await rterm.searchBm25MinMatch(rrb, q, BM25_M, depth, 2)).ids : await rterm.search(q, depth))
-                : await idx.search(q, depth));
+              if (termArm) {
+                text = Array.from(hybridBm25 ? (await rterm.searchBm25MinMatch(rrb, q, BM25_M, depth, 2)).ids : await rterm.search(q, depth));
+              } else {
+                const cand = Array.from(await idx.search(q, depth));
+                text = hybridBm25 && cand.length ? Array.from(await rterm.rerankIds(rrb, q, Uint32Array.from(cand), depth)) : cand;
+              }
             } catch (e) { textErr = e; }
             txMs = performance.now() - tt0; txReqs = reqs - tr0; txBytes = bytes - tb0;
           }
@@ -2411,7 +2427,7 @@
           if (mySeq !== searchSeq) return;
           cur = null;
           rankedIds = ff.ids;
-          rankedSummary = `hybrid ${termArm ? (hybridBm25 ? "bm25" : "term") : "trigram"}+semantic (RRF)${filters.length ? " + facets" : ""} · ${ff.ids.length} result${ff.ids.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`;
+          rankedSummary = `hybrid ${termArm ? (hybridBm25 ? "bm25" : "term") : (hybridBm25 ? "bm25-tri" : "trigram")}+semantic (RRF)${filters.length ? " + facets" : ""} · ${ff.ids.length} result${ff.ids.length === 1 ? "" : "s"} · ${(performance.now() - t0).toFixed(0)} ms`;
           // Both arms shown side by side: embed + vector fetch (semantic) and the
           // text arm (the existing "ID fetch" row); facets filter the fusion.
           setPerf({
@@ -2425,6 +2441,41 @@
           return;
         }
         setPerf({ embed: null, vsearch: null });   // leaving the vector modes: drop their rows
+        // BM25 relevance rerank (opt-in for trigram): the shared .rrb reranks a bounded client
+        // candidate window (the split set's or the monolith's first `depth` citation-ranked
+        // hits) by lexical relevance through the .rrt postings — one sidecar serves every mode
+        // via the common doc-ID space. This trades the cursor's exact count + tail paging for
+        // relevance ordering (a hit outside the window is invisible to the reranker). Skipped
+        // when no client candidate source is booted (server-only) or a boot fails, falling
+        // through to the normal server/cursor paths below.
+        if (bm25Mode && (idx || (splitMode && rrss)) && (await ensureRrb()) && (await ensureTermIndex())) {
+          if (mySeq !== searchSeq) return;
+          const filters = Array.from(activeFilters);
+          const depth = filters.length ? SEM_K_FILTER : SEM_K;
+          const t0 = performance.now(), r0 = reqs, b0 = bytes;
+          let ids;
+          try {
+            const cand = Array.from((splitMode && rrss) ? await rrss.search(q, depth) : await idx.search(q, depth));
+            // A query the .rrt can't resolve (typos / partial words) returns the candidates
+            // as-is, degrading to citation order rather than erroring.
+            ids = cand.length ? Array.from(await rterm.rerankIds(rrb, q, Uint32Array.from(cand), depth)) : cand;
+          } catch (e) { els.mSummary.textContent = `trigram bm25 error: ${e}`; return; }
+          if (mySeq !== searchSeq) return;
+          const searchMs = performance.now() - t0, searchReqs = reqs - r0, searchBytes = bytes - b0;
+          rankedCapped = ids.length >= depth;
+          const ff = await facetFilter(ids, filters);
+          if (mySeq !== searchSeq) return;
+          cur = null;
+          rankedIds = ff.ids;
+          rankedSummary = `trigram · bm25${(splitMode && rrss) ? " split set" : ""}${filters.length ? " + facets" : ""} · ${ff.ids.length} match${ff.ids.length === 1 ? "" : "es"} · ${(performance.now() - t0).toFixed(0)} ms`;
+          setPerf({
+            search: { ms: searchMs, reqs: searchReqs, bytes: searchBytes },
+            facetcount: filters.length ? { ms: ff.ms, reqs: ff.reqs, bytes: ff.bytes } : null,
+            embed: null, vsearch: null, tail: null, tailresults: null,
+          });
+          await goPageRanked(resetPaging ? 0 : offset);
+          return;
+        }
         // Split-set backend: swap the monolith RRS cursor for the RRSS reader. It returns a flat
         // ranked list (tier/Bloom/facet-pruned), so route through the rankedIds path like the
         // other ranked modes; facet counts come from the split set's own per-split .rrf sidecars
@@ -2808,8 +2859,9 @@
         syncUrl();   // land split=1 immediately — a refresh mid-search must not lose it
         runSearch(true);
       });
-      // BM25 relevance rerank (term + hybrid-term): default ON when the .rrb is
-      // configured; the opt-out persists across mode switches and lands in the URL.
+      // BM25 relevance rerank: default ON for the word/term-hybrid modes, opt-in for
+      // trigram. The explicit choice persists across mode switches and lands in the URL
+      // (bm25Off tri-state: true = opted out, false = opted in).
       els.bm25mode.addEventListener("change", () => {
         bm25Mode = els.bm25mode.checked;
         bm25Off = !bm25Mode;

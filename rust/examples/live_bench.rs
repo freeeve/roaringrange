@@ -18,8 +18,8 @@
 use futures::executor::block_on;
 use roaring::RoaringBitmap;
 use roaringrange::{
-    FacetIndex, FetchError, Index, Model2vec, RangeFetch, SplitFetcher, SplitSet, TermIndex,
-    VectorIndex,
+    search_bm25, FacetIndex, FetchError, ImpactIndex, Index, Model2vec, RangeFetch, SplitFetcher,
+    SplitSet, TermIndex, VectorIndex,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -135,6 +135,7 @@ fn main() {
     const K: usize = 25; // one result page
     const NPROBE: usize = 8;
     const SEM_K: usize = 250;
+    const M: usize = 2000; // BM25 candidate window (rerank the first M citation-ranked hits)
 
     eprintln!("== boot (one-time resident download) from {base} ==");
     macro_rules! boot {
@@ -183,6 +184,29 @@ fn main() {
         "term .rrt",
         TermIndex::open(fetch("openalex-484m-stem.rrt"))
     );
+    // The BM25 impact sidecar (~24 GB on S3; boot fetches only the 64 B header + the
+    // resident sparse entry index). Skip its rows rather than abort if it isn't published.
+    let impacts = {
+        c.reset();
+        let t = Instant::now();
+        match block_on(ImpactIndex::open(fetch("openalex-484m-stem.rrb"))) {
+            Ok(r) => {
+                let (b, q) = c.snap();
+                eprintln!(
+                    "  {:<14} {:>10}  {:>3} reqs  {:>5} ms",
+                    "bm25 .rrb",
+                    fmt_bytes(b),
+                    q,
+                    t.elapsed().as_millis()
+                );
+                Some(r)
+            }
+            Err(e) => {
+                eprintln!("  {:<14} SKIPPED — {e:?}", "bm25 .rrb");
+                None
+            }
+        }
+    };
     let vidx = boot!(
         "vector .rrvi",
         VectorIndex::open(fetch("openalex-484m.rrvi"))
@@ -235,6 +259,25 @@ fn main() {
             .collect()
     };
 
+    // Cross-mode BM25 rerank: resolve the query's words in the .rrt, then rerank candidate
+    // ids from ANY mode (trigram / term / split — one shared doc-ID space) by lexical
+    // relevance through the .rrb. A query the .rrt can't resolve returns the candidates in
+    // their original (citation-rank) order. Counts the .rrt posting + .rrb impact fetches.
+    let bm25_rerank = |query: &str, cands: &[u32]| -> Vec<u32> {
+        let imp = match impacts.as_ref() {
+            Some(i) => i,
+            None => return cands.to_vec(),
+        };
+        match block_on(term.query_postings(query)).expect("query_postings") {
+            Some(postings) => block_on(imp.rerank(&postings, cands, K))
+                .expect("rerank")
+                .into_iter()
+                .map(|s| s.doc_id)
+                .collect(),
+            None => cands.iter().take(K).copied().collect(),
+        }
+    };
+
     println!(
         "{:<26} {:>6} {:>6} {:>11} {:>8}",
         "mode", "hits", "reqs", "bytes", "ms"
@@ -283,6 +326,22 @@ fn main() {
         row("  term mono +facet", &|| {
             facet_filter(&block_on(term.search(qy, K)).unwrap()).len()
         });
+        if let Some(imp) = impacts.as_ref() {
+            // BM25 lexical relevance vs the citation-rank "term mono" row above: the extra
+            // bytes/ms are the .rrb candidate-window fetch + score.
+            row("  term mono +bm25", &|| {
+                block_on(search_bm25(&term, imp, qy, M, K)).unwrap().len()
+            });
+            // Cross-mode: rerank TRIGRAM candidates with the SAME term .rrb (shared doc-ID
+            // space) — trigram search bytes + the rerank's .rrt/.rrb fetches, vs "trigram mono".
+            // Uses the demo's SEM_K candidate window (not M): reranking every candidate's impact
+            // byte costs one .rrb read per (term, candidate), so the window sets the price.
+            if let Some(tri) = tri.as_ref() {
+                row("  trigram mono +bm25", &|| {
+                    bm25_rerank(qy, &block_on(tri.search(qy, SEM_K)).unwrap()).len()
+                });
+            }
+        }
         if let Some(ts) = term_split.as_ref() {
             row("  term split", &|| {
                 block_on(ts.search(&tsres, qy, K)).unwrap().len()
@@ -303,5 +362,35 @@ fn main() {
             let ids: Vec<u32> = hits.iter().map(|h| h.doc_id).collect();
             facet_filter(&ids).len()
         });
+    }
+
+    // Relevance spot-check: the "roaring bitmaps" seminal-paper test. Rank order alone
+    // surfaces the most-cited generic bitmap-compression papers; BM25 reranks by lexical
+    // relevance. Report how the top-K reorders (rank-order vs bm25) as a quantitative signal
+    // that the reranker changes ranking — the title-level correctness was verified manually at
+    // build time (task 032) and is exercised live in the demo. The same .rrb reranks the
+    // trigram candidates too, demonstrating one sidecar serving every mode.
+    if let Some(imp) = impacts.as_ref() {
+        let q = "roaring bitmaps";
+        let ranked = block_on(term.search(q, K)).unwrap();
+        let bm25: Vec<u32> = block_on(search_bm25(&term, imp, q, M, K))
+            .unwrap()
+            .into_iter()
+            .map(|s| s.doc_id)
+            .collect();
+        let top = K.min(ranked.len()).min(bm25.len());
+        let moved = (0..top).filter(|&i| ranked[i] != bm25[i]).count();
+        println!(
+            "\nrelevance spot-check {q:?} (term): top-{top} rank-order vs bm25 differ in {moved} slots"
+        );
+        println!("  rank-order top-5: {:?}", &ranked[..5.min(ranked.len())]);
+        println!("  bm25       top-5: {:?}", &bm25[..5.min(bm25.len())]);
+        if let Some(tri) = tri.as_ref() {
+            let tri_bm25 = bm25_rerank(q, &block_on(tri.search(q, SEM_K)).unwrap());
+            println!(
+                "  trigram→bm25 top-5: {:?}  (same sidecar, trigram candidates)",
+                &tri_bm25[..5.min(tri_bm25.len())]
+            );
+        }
     }
 }
