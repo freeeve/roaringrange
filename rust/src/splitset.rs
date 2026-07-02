@@ -816,7 +816,11 @@ impl SplitSet {
         for ((_si, local), fac) in entries.iter().zip(opened) {
             let facets = match fac {
                 Ok(f) => f,
-                Err(_) => continue, // a split with no facet sidecar contributes nothing
+                // A split with no facet sidecar (the object does not exist) contributes
+                // nothing; a transient/unreadable or corrupt sidecar must NOT be silently
+                // swallowed (that would return wrong totals as Ok), so propagate it.
+                Err(IndexError::Fetch(e)) if e.is_not_found() => continue,
+                Err(e) => return Err(e),
             };
             let counts = facets.counts(local); // Vec<Vec<u64>> aligned to facets.fields
             for (fi, field) in facets.fields().iter().enumerate() {
@@ -1491,7 +1495,10 @@ mod tests {
     impl SplitFetcher for MapResolver {
         type Fetch = MemoryFetch;
         fn fetch_named(&self, name: &str) -> MemoryFetch {
-            MemoryFetch::new(self.0.get(name).cloned().unwrap_or_default())
+            match self.0.get(name) {
+                Some(bytes) => MemoryFetch::new(bytes.clone()),
+                None => MemoryFetch::missing(),
+            }
         }
     }
 
@@ -1735,7 +1742,10 @@ mod tests {
         type Fetch = MemoryFetch;
         fn fetch_named(&self, name: &str) -> MemoryFetch {
             self.opens.set(self.opens.get() + 1);
-            MemoryFetch::new(self.files.get(name).cloned().unwrap_or_default())
+            match self.files.get(name) {
+                Some(bytes) => MemoryFetch::new(bytes.clone()),
+                None => MemoryFetch::missing(),
+            }
         }
     }
 
@@ -1750,7 +1760,10 @@ mod tests {
         type Fetch = MemoryFetch;
         fn fetch_named(&self, name: &str) -> MemoryFetch {
             self.opens.set(self.opens.get() + 1);
-            MemoryFetch::new(self.files.get(name).cloned().unwrap_or_default())
+            match self.files.get(name) {
+                Some(bytes) => MemoryFetch::new(bytes.clone()),
+                None => MemoryFetch::missing(),
+            }
         }
         fn global_bloom_name(&self) -> Option<String> {
             self.bloom.clone()
@@ -2342,6 +2355,114 @@ mod tests {
         assert!(block_on(ss.facet_counts(&resolver, &[]))
             .unwrap()
             .is_empty());
+    }
+
+    /// A [`RangeFetch`] over resident bytes that can simulate a transient transport failure
+    /// (an S3 500, distinct from a 404) — to prove `facet_counts` does not swallow it.
+    #[derive(Clone)]
+    struct MaybeTransport {
+        inner: MemoryFetch,
+        fail: bool,
+    }
+
+    impl RangeFetch for MaybeTransport {
+        async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, crate::FetchError> {
+            if self.fail {
+                return Err(crate::FetchError::Transport("simulated s3 500".into()));
+            }
+            self.inner.read(offset, len).await
+        }
+    }
+
+    /// A resolver that serves real bytes for present files but fails one named file with a
+    /// transient transport error (not a NotFound).
+    struct FlakyResolver {
+        files: HashMap<String, Vec<u8>>,
+        fail: String,
+    }
+
+    impl SplitFetcher for FlakyResolver {
+        type Fetch = MaybeTransport;
+        fn fetch_named(&self, name: &str) -> MaybeTransport {
+            MaybeTransport {
+                inner: match self.files.get(name) {
+                    Some(b) => MemoryFetch::new(b.clone()),
+                    None => MemoryFetch::missing(),
+                },
+                fail: name == self.fail,
+            }
+        }
+    }
+
+    #[test]
+    fn facet_counts_skips_absent_but_propagates_unreadable_sidecar() {
+        // Same two-split fixture (en in split 0, fr in split 1), but exercise the two ways a
+        // per-split .rrf can be unavailable: absent (object 404) vs present-but-corrupt.
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::Tiered,
+            byte_cap: 250,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 8,
+            case_sensitive: false,
+        });
+        let f = |lang: &str| vec![("lang".to_string(), lang.to_string())];
+        b.add_faceted("abc en0", &f("en")).unwrap();
+        b.add_faceted("abc en1", &f("en")).unwrap();
+        b.add_faceted("abc fr0", &f("fr")).unwrap();
+        b.add_faceted("abc fr1", &f("fr")).unwrap();
+        let built = b.finish().unwrap();
+        assert_eq!(built.splits.len(), 2);
+        let ss = open_built(&built);
+
+        let lang_of = |counts: &[FieldCounts]| -> Vec<(String, u64)> {
+            counts
+                .iter()
+                .find(|fc| fc.field == "lang")
+                .map(|fc| fc.categories.clone())
+                .unwrap_or_default()
+        };
+        // The name of the fr split's facet sidecar — the one we make unavailable below.
+        let fr_facet = facet_file_name(&ss.splits[1].data_file);
+
+        // Absent sidecar: omit split 1's .rrf entirely. The resolver returns MemoryFetch::missing()
+        // (a 404), so facet_counts skips that split and still returns split 0's counts as Ok.
+        let mut files: HashMap<String, Vec<u8>> = built
+            .splits
+            .iter()
+            .chain(built.facets.iter())
+            .cloned()
+            .collect();
+        files.remove(&fr_facet);
+        let resolver = MapResolver(files.clone());
+        let counts = block_on(ss.facet_counts(&resolver, &[0, 1, 2, 3])).unwrap();
+        assert_eq!(lang_of(&counts), vec![("en".to_string(), 2)]);
+
+        // Corrupt/unreadable sidecar: present but garbage bytes. FacetIndex::open fails with a
+        // non-NotFound error, which must propagate (silently swallowing it would return wrong
+        // totals as Ok).
+        files.insert(fr_facet.clone(), vec![0xFFu8; 4]);
+        let resolver = MapResolver(files);
+        assert!(block_on(ss.facet_counts(&resolver, &[0, 1, 2, 3])).is_err());
+
+        // Transient transport failure (S3 500) on an otherwise-present sidecar: all files are
+        // available, but the fr split's .rrf read errors transiently. facet_counts must propagate
+        // it rather than drop the split and return short counts.
+        let all: HashMap<String, Vec<u8>> = built
+            .splits
+            .iter()
+            .chain(built.facets.iter())
+            .cloned()
+            .collect();
+        let flaky = FlakyResolver {
+            files: all,
+            fail: fr_facet,
+        };
+        assert!(block_on(ss.facet_counts(&flaky, &[0, 1, 2, 3])).is_err());
     }
 
     #[test]

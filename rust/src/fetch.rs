@@ -25,8 +25,21 @@ pub enum FetchError {
         /// Total available bytes.
         available: u64,
     },
+    /// The backing object does not exist (e.g. HTTP 404, `io::ErrorKind::NotFound`).
+    /// Distinct from [`Transport`](Self::Transport) so a caller can tell "this object
+    /// is legitimately absent" from "the fetch failed transiently" — an absent optional
+    /// sidecar is skipped, a transient failure is propagated.
+    NotFound,
     /// A transport-specific failure, carrying a human-readable message.
     Transport(String),
+}
+
+impl FetchError {
+    /// Whether this error means the object does not exist (vs a transient/transport
+    /// failure or an out-of-range read against an object that does exist).
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, FetchError::NotFound)
+    }
 }
 
 impl fmt::Display for FetchError {
@@ -41,6 +54,7 @@ impl fmt::Display for FetchError {
                 "ranged read [{offset}, {}) exceeds {available} available bytes",
                 offset.saturating_add(*len as u64)
             ),
+            FetchError::NotFound => write!(f, "object not found"),
             FetchError::Transport(msg) => write!(f, "transport error: {msg}"),
         }
     }
@@ -68,12 +82,29 @@ pub trait RangeFetch {
 #[derive(Debug, Clone)]
 pub struct MemoryFetch {
     bytes: Vec<u8>,
+    /// When set, every read returns [`FetchError::NotFound`] — a stand-in for an
+    /// absent object, so a resolver can represent "this sidecar does not exist"
+    /// distinctly from an empty (present-but-truncated) one.
+    missing: bool,
 }
 
 impl MemoryFetch {
     /// Wraps the given bytes.
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes }
+        Self {
+            bytes,
+            missing: false,
+        }
+    }
+
+    /// A fetcher standing in for an object that does not exist: every read returns
+    /// [`FetchError::NotFound`]. Lets a resolver signal a legitimately-absent optional
+    /// sidecar (vs a present-but-corrupt one) so a caller can skip it rather than error.
+    pub fn missing() -> Self {
+        Self {
+            bytes: Vec::new(),
+            missing: true,
+        }
     }
 
     /// Returns the total number of backing bytes.
@@ -89,6 +120,9 @@ impl MemoryFetch {
 
 impl RangeFetch for MemoryFetch {
     async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
+        if self.missing {
+            return Err(FetchError::NotFound);
+        }
         // The offset converts before any arithmetic: an `as usize` cast would
         // truncate an offset >= 2^32 on wasm32 and serve the wrong bytes as Ok.
         let range = usize::try_from(offset)
@@ -228,6 +262,9 @@ impl RangeFetch for FileFetch {
                     )))
                 }
                 Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(FetchError::NotFound)
+                }
                 Err(e) => return Err(FetchError::Transport(e.to_string())),
             }
         }

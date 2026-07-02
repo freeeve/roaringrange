@@ -140,10 +140,13 @@ impl WasmFetch {
             .dyn_into()
             .map_err(|_| FetchError::Transport("fetch returned a non-Response".into()))?;
         if !response.ok() {
-            return Err(FetchError::Transport(format!(
-                "HTTP {} for {url}",
-                response.status()
-            )));
+            // 404 (and 416 on a zero-length object) means the object is absent, not a
+            // transient failure — surface NotFound so a caller can skip an optional sidecar.
+            let status = response.status();
+            if status == 404 || status == 416 {
+                return Err(FetchError::NotFound);
+            }
+            return Err(FetchError::Transport(format!("HTTP {status} for {url}")));
         }
         let buf_promise = response
             .array_buffer()
@@ -211,9 +214,14 @@ impl RangeFetch for WasmFetch {
             .map_err(|_| FetchError::Transport("fetch returned a non-Response".into()))?;
 
         if !response.ok() {
+            // 404 (and 416 on a zero-length object) means the object is absent, not a
+            // transient failure — surface NotFound so a caller can skip an optional sidecar.
+            let status = response.status();
+            if status == 404 || status == 416 {
+                return Err(FetchError::NotFound);
+            }
             return Err(FetchError::Transport(format!(
-                "HTTP {} for range {range}",
-                response.status()
+                "HTTP {status} for range {range}"
             )));
         }
 

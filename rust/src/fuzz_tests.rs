@@ -660,7 +660,10 @@ fn fuzz_rrss_split_search_no_panic() {
     impl SplitFetcher for MapResolver {
         type Fetch = MemoryFetch;
         fn fetch_named(&self, name: &str) -> MemoryFetch {
-            MemoryFetch::new(self.0.get(name).cloned().unwrap_or_default())
+            match self.0.get(name) {
+                Some(bytes) => MemoryFetch::new(bytes.clone()),
+                None => MemoryFetch::missing(),
+            }
         }
     }
 

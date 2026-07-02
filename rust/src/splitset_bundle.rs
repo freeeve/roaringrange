@@ -82,7 +82,10 @@ mod tests {
     impl SplitFetcher for BundleResolver {
         type Fetch = MemoryFetch;
         fn fetch_named(&self, name: &str) -> MemoryFetch {
-            MemoryFetch::new(self.files.get(name).cloned().unwrap_or_default())
+            match self.files.get(name) {
+                Some(bytes) => MemoryFetch::new(bytes.clone()),
+                None => MemoryFetch::missing(),
+            }
         }
         fn boot(&self, split: &Split) -> Option<Vec<u8>> {
             self.hc
