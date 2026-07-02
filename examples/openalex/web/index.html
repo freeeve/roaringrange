@@ -2113,7 +2113,9 @@
         if (!facetSrc) { applyFacetCounts(null); return { ids, ms: 0, reqs: 0, bytes: 0 }; }
         const r0 = reqs, b0 = bytes, t0 = performance.now();
         try {
-          const fr = await facetSrc.filterIds(Uint32Array.from(ids), filters.map((k) => k.split("\t")));
+          // wantCounts = facetHeadsReady: skip the facet-count fetch wave (hundreds of range
+          // GETs) while heads are still streaming, since the counts are discarded below anyway.
+          const fr = await facetSrc.filterIds(Uint32Array.from(ids), filters.map((k) => k.split("\t")), facetHeadsReady);
           applyFacetCounts(facetHeadsReady ? fr.facetCounts() : null);
           return { ids: Array.from(fr.ids), ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 };
         } catch (_) {
@@ -2527,6 +2529,15 @@
         }
         const inl = (name) => { try { return bundle ? bundle.inlined(name) : null; } catch (_) { return null; } };
 
+        // On the bundle-miss path, start the zstd record dictionary download NOW so it
+        // overlaps the index/facet opens below (it is an independent object that only gates
+        // the record store). A bundle hit inlines the dict, so no fetch is issued.
+        const dictInlined = DATASETS[DS].zstd ? inl(`${DATASETS[DS].idx}.dict`) : null;
+        let dictPromise = null;
+        if (DATASETS[DS].zstd && !dictInlined) {
+          dictPromise = fetch(DICT_URL).then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
+        }
+
         // The text index is optional at boot: a dataset whose `.rrs` is still
         // uploading (the full index) boots with trigram disabled but semantic live.
         try {
@@ -2559,8 +2570,7 @@
         // uncompressed and never fetches a dict.
         try {
           if (DATASETS[DS].zstd) {
-            const dict = inl(`${DATASETS[DS].idx}.dict`)
-              || new Uint8Array(await (await fetch(DICT_URL)).arrayBuffer());
+            const dict = dictInlined || await dictPromise;
             const hdr = inl(`${DATASETS[DS].rec}.idx`);
             records = hdr
               ? RrsRecords.fromBootWithDict(hdr, dict, IDX_URL, BIN_URL)

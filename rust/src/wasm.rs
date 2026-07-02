@@ -412,6 +412,7 @@ async fn filtered_ids(
     facets: Option<&FacetIndex<WasmFetch>>,
     ids: Vec<u32>,
     sels: Vec<FilterSel>,
+    want_counts: bool,
 ) -> Result<FilteredIds, JsError> {
     let kept = match facets {
         Some(facets) if !sels.is_empty() => {
@@ -433,20 +434,23 @@ async fn filtered_ids(
         }
         _ => ids,
     };
-    let bitmap: RoaringBitmap = kept.iter().copied().collect();
     // Full counts over head AND tail: `kept` is an arbitrary, corpus-spanning id
     // list, so the in-memory head-only `counts()` would undercount (see task 052).
     // Capped at the top categories per field so a wide sidecar (100K+ categories)
-    // does not issue a fetch per category — the long tail stays head-only.
+    // does not issue a fetch per category — the long tail stays head-only. Skipped
+    // entirely when `want_counts` is false (the caller will not show them, e.g. during
+    // the post-boot head-streaming window): the count wave is hundreds of range GETs,
+    // so computing it just to discard it is pure wasted bandwidth.
     let counts = match facets {
-        Some(f) => {
+        Some(f) if want_counts => {
+            let bitmap: RoaringBitmap = kept.iter().copied().collect();
             let c = f
                 .counts_full(&bitmap, FACET_COUNTS_TOP_PER_FIELD)
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?;
             facets_array_js(f.fields(), &c).into()
         }
-        None => Array::new().into(),
+        _ => Array::new().into(),
     };
     Ok(FilteredIds { ids: kept, counts })
 }
@@ -641,11 +645,23 @@ impl RrsIndex {
     /// vector path reuses the same `RRSF` sidecar the trigram path uses — no
     /// remapping. `filters` is an array of `[field, category]` pairs (within a field categories
     /// OR, across fields they AND); a malformed entry throws. With no sidecar open or no filters,
-    /// the IDs pass through unchanged (counts still computed when a sidecar is open). Resolves to a
-    /// `FilteredIds`.
+    /// the IDs pass through unchanged. `wantCounts` gates the facet-count fetch wave: pass `false`
+    /// when the caller will not display counts (e.g. before the facet heads are resident) to skip
+    /// hundreds of range GETs; filtering still runs. Resolves to a `FilteredIds`.
     #[wasm_bindgen(js_name = filterIds)]
-    pub async fn filter_ids(&self, ids: Vec<u32>, filters: Array) -> Result<FilteredIds, JsError> {
-        filtered_ids(self.facets.as_ref(), ids, filter_sels(&filters)?).await
+    pub async fn filter_ids(
+        &self,
+        ids: Vec<u32>,
+        filters: Array,
+        want_counts: bool,
+    ) -> Result<FilteredIds, JsError> {
+        filtered_ids(
+            self.facets.as_ref(),
+            ids,
+            filter_sels(&filters)?,
+            want_counts,
+        )
+        .await
     }
 
     /// Exact head+tail filtered counts for specific `[field, category]` pairs over
@@ -662,7 +678,10 @@ impl RrsIndex {
                     .counts_for(&result, &pairs)
                     .await
                     .map_err(|e| JsError::new(&e.to_string()))?;
-                Ok(counts.into_iter().map(|n| n as u32).collect())
+                Ok(counts
+                    .into_iter()
+                    .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+                    .collect())
             }
             None => Ok(vec![0u32; pairs.len()]),
         }
@@ -699,7 +718,9 @@ impl CountEstimate {
 }
 
 /// Result of [`RrsIndex::filter_ids`]: the surviving doc IDs (input ranking
-/// order preserved) and search-filtered facet counts over them.
+/// order preserved) and search-filtered facet counts over them. The `ids` and
+/// `facetCounts` getters copy across the wasm boundary on every access, so read each
+/// once into a JS variable rather than re-touching them in a loop.
 #[wasm_bindgen]
 pub struct FilteredIds {
     ids: Vec<u32>,
@@ -755,10 +776,16 @@ impl RrfFacets {
     }
 
     /// Filters a ranked doc-ID list by the selected facets (same contract as
-    /// `RrsIndex.filterIds`). Resolves to a `FilteredIds`.
+    /// `RrsIndex.filterIds`, including the `wantCounts` count-wave gate). Resolves to a
+    /// `FilteredIds`.
     #[wasm_bindgen(js_name = filterIds)]
-    pub async fn filter_ids(&self, ids: Vec<u32>, filters: Array) -> Result<FilteredIds, JsError> {
-        filtered_ids(Some(&self.inner), ids, filter_sels(&filters)?).await
+    pub async fn filter_ids(
+        &self,
+        ids: Vec<u32>,
+        filters: Array,
+        want_counts: bool,
+    ) -> Result<FilteredIds, JsError> {
+        filtered_ids(Some(&self.inner), ids, filter_sels(&filters)?, want_counts).await
     }
 
     /// Exact head+tail filtered counts for specific `[field, category]` pairs over
@@ -776,7 +803,10 @@ impl RrfFacets {
             .counts_for(&result, &pairs)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(counts.into_iter().map(|n| n as u32).collect())
+        Ok(counts
+            .into_iter()
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+            .collect())
     }
 }
 
@@ -1208,9 +1238,24 @@ impl WasmBitmap {
 
     /// Doc IDs in ascending order (== rank order, since doc IDs are popularity-
     /// ranked), skipping `offset` and taking up to `limit`. Resolves to a
-    /// `Uint32Array`.
+    /// `Uint32Array`. Uses rank/`select` (O(limit·log n)) rather than re-walking the
+    /// `offset` prefix each call, so deep-paging a multi-million-doc bitmap does not
+    /// re-iterate everything before the page.
     pub fn page(&self, offset: usize, limit: usize) -> Vec<u32> {
-        self.inner.iter().skip(offset).take(limit).collect()
+        let mut out = Vec::with_capacity(limit);
+        for i in 0..limit {
+            let Some(rank) = offset.checked_add(i) else {
+                break;
+            };
+            let Ok(rank) = u32::try_from(rank) else {
+                break; // rank past u32 range — beyond any real corpus
+            };
+            match self.inner.select(rank) {
+                Some(v) => out.push(v),
+                None => break, // past the last set bit
+            }
+        }
+        out
     }
 }
 
@@ -1620,7 +1665,8 @@ impl RrviIndex {
 
 /// The result of [`RrviIndex::search`]: aligned doc IDs and similarity scores,
 /// best-first. In JavaScript `ids` is a `Uint32Array` and `scores` a
-/// `Float32Array`.
+/// `Float32Array`. Both getters copy across the wasm boundary on every access — read
+/// each once into a JS variable rather than re-touching them in a loop.
 #[cfg(feature = "vector")]
 #[wasm_bindgen]
 pub struct RrviHits {
@@ -1733,7 +1779,8 @@ impl Model2vecEmbedder {
 /// Aligned local doc IDs + BM25 scores from a term-index BM25 search, best-first.
 /// In JavaScript `ids` is a `Uint32Array` and `scores` a `Float32Array` (index `i`
 /// of each is the same hit), mirroring the vector reader's `RrviHits` so the two
-/// scored-search shapes match.
+/// scored-search shapes match. Both getters copy across the wasm boundary on every
+/// access — read each once into a JS variable rather than re-touching them in a loop.
 #[cfg(feature = "terms")]
 #[wasm_bindgen]
 pub struct RrtHits {
