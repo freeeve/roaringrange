@@ -16,11 +16,11 @@ mod embed;
 use embed::Embedder;
 use lambda_http::{run, service_fn, Body, Error, Request, RequestExt, Response};
 use roaring::RoaringBitmap;
+use roaringrange::range_cache::RangeCache;
 use roaringrange::{
     reciprocal_rank_fusion, search_bm25_min_match, FacetIndex, FetchError, ImpactIndex, Index,
     RangeFetch, TermIndex, VectorIndex,
 };
-use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
@@ -37,10 +37,17 @@ const BM25_M: usize = 2000;
 /// (BM25-reranked), mirroring QLL's BM25-min2 lexical arm. `min=1` is OR, `=M` is
 /// strict AND; `2` trades a little precision for multi-word recall.
 const BM25_MIN_MATCH: usize = 2;
-/// Per-object in-container range cache cap. This function is the heaviest reader —
-/// two index families (text + Gemma RRVI) plus facets per query — so it is sized to
-/// the Lambda max (10 GiB), and an 8 GiB cap holds both arms' hot working sets.
+/// Single shared in-container range-cache cap across ALL open S3 objects (text index,
+/// Gemma RRVI, facets). One `Arc<Mutex<RangeCache>>` is shared by every `CachedFetch`,
+/// keyed by `(object_key, offset, len)`, so total cached bytes are bounded by this one
+/// cap no matter how many objects are open (term mode opens four). This function is the
+/// heaviest reader, so it is sized to the Lambda max (10 GiB) with an 8 GiB cap leaving
+/// runtime headroom.
 const CACHE_CAP_BYTES: usize = 8 * 1024 * 1024 * 1024;
+
+/// Top categories per field to price exactly in facet counts — matches the client
+/// `FACET_COUNTS_TOP_PER_FIELD` (wasm.rs) so the server and client facet panels agree.
+const FACET_COUNTS_TOP_PER_FIELD: usize = 64;
 
 #[derive(Clone)]
 struct S3Fetch {
@@ -73,63 +80,20 @@ impl RangeFetch for S3Fetch {
     }
 }
 
-/// A byte-capped LRU cache of range reads keyed by `(offset, len)`, one per S3 object:
-/// a `get` hit promotes the entry to most-recently-used, and the least-recently-used
-/// entry is evicted once the cap is exceeded.
-struct RangeCache {
-    map: HashMap<(u64, usize), Vec<u8>>,
-    order: VecDeque<(u64, usize)>,
-    bytes: usize,
-    cap: usize,
-}
-impl RangeCache {
-    fn new(cap: usize) -> Self {
-        Self {
-            map: HashMap::new(),
-            order: VecDeque::new(),
-            bytes: 0,
-            cap,
-        }
-    }
-    fn get(&mut self, k: &(u64, usize)) -> Option<Vec<u8>> {
-        let v = self.map.get(k)?.clone();
-        if let Some(pos) = self.order.iter().position(|x| x == k) {
-            self.order.remove(pos);
-        }
-        self.order.push_back(*k);
-        Some(v)
-    }
-    fn put(&mut self, k: (u64, usize), v: Vec<u8>) {
-        if self.map.contains_key(&k) {
-            return;
-        }
-        self.bytes += v.len();
-        self.order.push_back(k);
-        self.map.insert(k, v);
-        while self.bytes > self.cap {
-            match self.order.pop_front() {
-                Some(old) => {
-                    if let Some(ov) = self.map.remove(&old) {
-                        self.bytes -= ov.len();
-                    }
-                }
-                None => break,
-            }
-        }
-    }
-}
-
+/// Wraps an `S3Fetch` with a shared bounded range cache. Every fetcher clones the SAME
+/// `Arc<Mutex<RangeCache>>`; the object `key` is folded into the cache key so ranges from
+/// different objects never collide while all share one global byte budget. The crate's
+/// `RangeCache` gives O(log n) LRU (a `BTreeMap` recency index), replacing the earlier
+/// per-object cache whose hit path scanned a `VecDeque` linearly.
 #[derive(Clone)]
 struct CachedFetch<F> {
     inner: F,
+    key: String,
     cache: Arc<Mutex<RangeCache>>,
 }
 impl<F> CachedFetch<F> {
-    fn new(inner: F, cap: usize) -> Self {
-        Self {
-            inner,
-            cache: Arc::new(Mutex::new(RangeCache::new(cap))),
-        }
+    fn new(inner: F, key: String, cache: Arc<Mutex<RangeCache>>) -> Self {
+        Self { inner, key, cache }
     }
 }
 impl<F: RangeFetch> RangeFetch for CachedFetch<F> {
@@ -137,14 +101,14 @@ impl<F: RangeFetch> RangeFetch for CachedFetch<F> {
         if len == 0 {
             return Ok(Vec::new());
         }
-        let key = (offset, len);
-        {
-            if let Some(v) = self.cache.lock().unwrap().get(&key) {
-                return Ok(v);
-            }
+        if let Some(v) = self.cache.lock().unwrap().get(&self.key, offset, len) {
+            return Ok(v);
         }
         let v = self.inner.read(offset, len).await?;
-        self.cache.lock().unwrap().put(key, v.clone());
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(&self.key, offset, len, v.clone());
         Ok(v)
     }
 }
@@ -199,14 +163,19 @@ async fn hybrid() -> Result<&'static Hybrid, Error> {
             let cfg = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let client = aws_sdk_s3::Client::new(&cfg);
             let bucket = std::env::var("INDEX_BUCKET").map_err(|_| "INDEX_BUCKET not set")?;
+            // One shared range cache across every object opened below, bounded by a single
+            // global cap (finding 1: previously one 8 GiB cache PER object -> up to 32 GiB in
+            // term mode, unbounded against the 10 GiB Lambda limit).
+            let cache = Arc::new(Mutex::new(RangeCache::new(CACHE_CAP_BYTES)));
             let open = |key: String| {
                 CachedFetch::new(
                     S3Fetch {
                         client: client.clone(),
                         bucket: bucket.clone(),
-                        key,
+                        key: key.clone(),
                     },
-                    CACHE_CAP_BYTES,
+                    key,
+                    Arc::clone(&cache),
                 )
             };
             let mode = std::env::var("TEXT_MODE").map_err(|_| "TEXT_MODE not set")?;
@@ -348,8 +317,7 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         .map(|(id, _)| id)
         .collect();
 
-    // Facet counts over the fused result, then narrow the returned IDs by a membership read.
-    let fused_bm: RoaringBitmap = fused.iter().copied().collect();
+    // Narrow the fused IDs by a facet membership read when filters are active.
     let filtered: Vec<u32> = if filters.is_empty() {
         fused
     } else {
@@ -357,6 +325,7 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         if resolved.has_empty_arm() {
             Vec::new()
         } else {
+            let fused_bm: RoaringBitmap = fused.iter().copied().collect();
             let mask = resolved
                 .membership_bitmap(&fused_bm)
                 .await
@@ -366,8 +335,18 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
     };
 
     let page: Vec<u32> = filtered.iter().skip(offset).take(limit).copied().collect();
+    // Facet counts over the POST-filter set with head+tail (`counts_full`) semantics, matching
+    // the client `filtered_ids` path (finding 3): the old code counted the PRE-filter fused set
+    // with head-only `counts`, which inflated filtered categories and dropped ids beyond doc
+    // 65535 (see task 052). Computed only on the first page, the only page that shows them.
     let facets = if offset == 0 {
-        facets_value(&h.facets, &h.facets.counts(&fused_bm))
+        let filtered_bm: RoaringBitmap = filtered.iter().copied().collect();
+        let counts = h
+            .facets
+            .counts_full(&filtered_bm, FACET_COUNTS_TOP_PER_FIELD)
+            .await
+            .map_err(|e| Error::from(format!("facet counts: {e}")))?;
+        facets_value(&h.facets, &counts)
     } else {
         serde_json::Value::Array(vec![])
     };
