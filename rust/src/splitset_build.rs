@@ -475,6 +475,39 @@ pub struct SplitBuildConfig {
     pub case_sensitive: bool,
 }
 
+impl SplitBuildConfig {
+    /// A config with the four fundamental parameters set and every optional field at its
+    /// baseline default — flat single cap (no geometric tiering), the `RRS` default
+    /// head-boundary and stride, no stable-key `sortcol`, no term Bloom, and case-folding: the
+    /// historical byte-identical behavior. Set any remaining `pub` field afterward to opt into a
+    /// feature ([`byte_cap_max`](Self::byte_cap_max) for geometric tiers,
+    /// [`bloom_bits_per_key`](Self::bloom_bits_per_key) for the split-skip filter,
+    /// [`sortcol`](Self::sortcol) for [`Policy::StableKey`], [`case_sensitive`](Self::case_sensitive),
+    /// or a custom [`head_boundary`](Self::head_boundary)/[`stride`](Self::stride)).
+    ///
+    /// `byte_cap` must be `> 0` — a `0` cap seals every document into its own split and
+    /// [`SplitSetBuilder::finish`] then errors. `gram_size` is the n-gram window (e.g. `3`).
+    pub fn new(
+        policy: Policy,
+        byte_cap: u64,
+        gram_size: u16,
+        name_prefix: impl Into<String>,
+    ) -> Self {
+        Self {
+            policy,
+            byte_cap,
+            byte_cap_max: 0,
+            gram_size,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: name_prefix.into(),
+            sortcol: None,
+            bloom_bits_per_key: 0,
+            case_sensitive: false,
+        }
+    }
+}
+
 /// A list of emitted files as `(filename, bytes)` — split `RRS` blobs or facet `RRSF` sidecars.
 pub type NamedFiles = Vec<(String, Vec<u8>)>;
 
@@ -846,6 +879,34 @@ pub struct TermSplitBuildConfig {
     pub case_sensitive: bool,
 }
 
+#[cfg(feature = "terms")]
+impl TermSplitBuildConfig {
+    /// A config with the three fundamental parameters set and every optional field at its
+    /// baseline default — flat single cap (no geometric tiering), the default head-boundary, no
+    /// stable-key `sortcol`, no language/stemming/stop-words, and case-folding: the historical
+    /// byte-identical behavior. Set any remaining `pub` field afterward
+    /// ([`byte_cap_max`](Self::byte_cap_max), [`language`](Self::language) with
+    /// [`stem`](Self::stem)/[`stopwords`](Self::stopwords), [`sortcol`](Self::sortcol),
+    /// [`case_sensitive`](Self::case_sensitive)).
+    ///
+    /// `byte_cap` must be nonzero — a `0` cap seals every document into its own split and
+    /// `finish` then errors.
+    pub fn new(policy: Policy, byte_cap: u64, name_prefix: impl Into<String>) -> Self {
+        Self {
+            policy,
+            byte_cap,
+            byte_cap_max: 0,
+            head_boundary: 0,
+            name_prefix: name_prefix.into(),
+            sortcol: None,
+            language: None,
+            stem: false,
+            stopwords: false,
+            case_sensitive: false,
+        }
+    }
+}
+
 /// Bytes charged per new term: the posting block base (`[tail_size u32][head roaring base]`) plus
 /// the front-coded dict-entry framing (shared/suffix-len/head-off/head-size varints) and the block
 /// router's amortized per-term cost. The term's own byte length is added on top — an upper bound,
@@ -1147,6 +1208,88 @@ mod tests {
             hex, GOLDEN_HEX,
             "RRSS manifest layout drifted from the golden"
         );
+    }
+}
+
+/// The `::new` config constructors must reproduce the explicit baseline struct byte-for-byte,
+/// so the ergonomic shorthand never silently changes what gets built.
+#[cfg(test)]
+mod config_new_tests {
+    use super::*;
+
+    fn docs() -> [(&'static str, &'static [(&'static str, &'static str)]); 3] {
+        [
+            ("alpha beta", &[("year", "2020")]),
+            ("beta gamma", &[("year", "2021")]),
+            ("gamma delta", &[("year", "2020")]),
+        ]
+    }
+
+    #[test]
+    fn split_build_config_new_matches_explicit_baseline() {
+        let explicit = SplitBuildConfig {
+            policy: Policy::Tiered,
+            byte_cap: 600,
+            byte_cap_max: 0,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 0,
+            case_sensitive: false,
+        };
+        let via_new = SplitBuildConfig::new(Policy::Tiered, 600, 3, "corpus");
+        let build = |cfg: SplitBuildConfig| -> BuiltSplitSet {
+            let mut b = SplitSetBuilder::new(cfg);
+            for (text, facets) in docs() {
+                let pairs: Vec<(String, String)> = facets
+                    .iter()
+                    .map(|(f, c)| (f.to_string(), c.to_string()))
+                    .collect();
+                b.add_faceted(text, &pairs).unwrap();
+            }
+            b.finish().unwrap()
+        };
+        let a = build(explicit);
+        let b = build(via_new);
+        assert_eq!(a.manifest, b.manifest, "manifest differs");
+        assert_eq!(a.splits, b.splits, "splits differ");
+        assert_eq!(a.facets, b.facets, "facet sidecars differ");
+    }
+
+    #[cfg(feature = "terms")]
+    #[test]
+    fn term_split_build_config_new_matches_explicit_baseline() {
+        let explicit = TermSplitBuildConfig {
+            policy: Policy::Tiered,
+            byte_cap: 600,
+            byte_cap_max: 0,
+            head_boundary: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            language: None,
+            stem: false,
+            stopwords: false,
+            case_sensitive: false,
+        };
+        let via_new = TermSplitBuildConfig::new(Policy::Tiered, 600, "corpus");
+        let build = |cfg: TermSplitBuildConfig| -> BuiltSplitSet {
+            let mut b = TermSplitSetBuilder::new(cfg);
+            for (text, facets) in docs() {
+                let pairs: Vec<(String, String)> = facets
+                    .iter()
+                    .map(|(f, c)| (f.to_string(), c.to_string()))
+                    .collect();
+                b.add_faceted(text, &pairs).unwrap();
+            }
+            b.finish().unwrap()
+        };
+        let a = build(explicit);
+        let b = build(via_new);
+        assert_eq!(a.manifest, b.manifest, "manifest differs");
+        assert_eq!(a.splits, b.splits, "splits differ");
+        assert_eq!(a.facets, b.facets, "facet sidecars differ");
     }
 }
 

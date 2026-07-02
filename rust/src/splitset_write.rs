@@ -73,6 +73,38 @@ pub struct WriterConfig {
     pub case_sensitive: bool,
 }
 
+impl WriterConfig {
+    /// A config with the four fundamental parameters set and every optional field at its baseline
+    /// default — the [`DEFAULT_STRIDE`] sparse-index stride,
+    /// `tier_count` `0`, no stable-key `sortcol`, no term Bloom, and case-folding. Set any
+    /// remaining `pub` field afterward ([`stride`](Self::stride),
+    /// [`tier_count`](Self::tier_count) for a tiered base, [`sortcol`](Self::sortcol),
+    /// [`bloom_bits_per_key`](Self::bloom_bits_per_key), [`case_sensitive`](Self::case_sensitive)).
+    /// [`head_boundary`](Self::head_boundary) is ignored by v3 delta splits.
+    ///
+    /// `gram_size` must match the base split set; `byte_cap` is informational (recorded in the
+    /// manifest).
+    pub fn new(
+        policy: Policy,
+        byte_cap: u64,
+        gram_size: u16,
+        name_prefix: impl Into<String>,
+    ) -> Self {
+        Self {
+            gram_size,
+            head_boundary: 0,
+            stride: 0,
+            byte_cap,
+            name_prefix: name_prefix.into(),
+            policy,
+            tier_count: 0,
+            sortcol: None,
+            bloom_bits_per_key: 0,
+            case_sensitive: false,
+        }
+    }
+}
+
 /// The result of [`SplitSetWriter::flush`]: one immutable delta split and the new manifest.
 /// The client PUTs the split, then the manifest (the atomic cutover), then acks its source.
 pub struct FlushOutput {
@@ -589,6 +621,38 @@ mod tests {
 
     fn open(manifest: &[u8]) -> SplitSet {
         block_on(SplitSet::open(MemoryFetch::new(manifest.to_vec()))).unwrap()
+    }
+
+    /// `WriterConfig::new` must reproduce the explicit baseline struct byte-for-byte: a fresh
+    /// writer built either way, fed the same docs, emits the same flush split + manifest.
+    #[test]
+    fn writer_config_new_matches_explicit_baseline() {
+        use super::WriterConfig;
+        let explicit = WriterConfig {
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            byte_cap: 400,
+            name_prefix: "corpus".to_string(),
+            policy: Policy::Tiered,
+            tier_count: 0,
+            sortcol: None,
+            bloom_bits_per_key: 0,
+            case_sensitive: false,
+        };
+        let via_new = WriterConfig::new(Policy::Tiered, 400, 3, "corpus");
+        let build = |cfg: WriterConfig| -> (String, Vec<u8>, Vec<u8>) {
+            let mut w = SplitSetWriter::new(cfg);
+            w.add_text("abc new0");
+            w.add_text("abc new1");
+            let f = w.flush().unwrap().expect("a flush happened");
+            (f.split_name, f.split_bytes, f.manifest)
+        };
+        assert_eq!(
+            build(explicit),
+            build(via_new),
+            "fresh-writer flush output differs between ::new and the explicit baseline"
+        );
     }
 
     #[test]

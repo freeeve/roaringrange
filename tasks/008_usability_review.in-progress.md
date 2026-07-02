@@ -211,8 +211,15 @@ non-breaking cluster above are DONE and committed (v0.6.0). Each item: what · w
 - **`Model2vec::open(fetch)`** (theme A). The only reader with no async `open` (just
   `from_bytes`). Needs a whole-file fetch — `RangeFetch` has no length, so add a fetch-all/length
   helper. Do NOT rename `Index::from_boot`/`SplitSet::from_bytes` (different concepts — see tier 2).
-- **Build-config `::new(required)` constructors** (theme D). Instead of `Default` (the `byte_cap: 0`
-  footgun), add `SplitBuildConfig::new(...)` etc. so callers needn't spell every field.
+- ~~**Build-config `::new(required)` constructors** (theme D).~~ **DONE 2026-07-02** (commit
+  pending): `SplitBuildConfig::new(policy, byte_cap, gram_size, name_prefix)`,
+  `TermSplitBuildConfig::new(policy, byte_cap, name_prefix)`, and
+  `WriterConfig::new(policy, byte_cap, gram_size, name_prefix)` — the fundamental params
+  positional, every optional field at its historical baseline default (flat cap, no bloom, no
+  sortcol, default head/stride, case-folding); `pub` fields let callers opt into extras after.
+  No `Default` (keeps the `byte_cap: 0` footgun out — `byte_cap` is a required arg). Three
+  byte-identical equivalence tests (`::new` vs the explicit baseline struct) under `splits`/
+  `splits terms`. Rust-only, additive, non-breaking (no wasm/Python/Go surface).
 - **Python `Builder.add_keys`** (theme F). Raw pre-hashed n-gram keys on the split builders; niche.
 - **`Catalog` sortcols re-rank hook** (theme I). The monolith facade has no "search then sort by
   rating"; `SplitSet` does it internally. Add an optional `SortCols` + a re-rank `search` variant, or
