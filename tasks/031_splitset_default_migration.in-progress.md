@@ -117,18 +117,25 @@ for deleting the trigram monolith.
         **exact** corpus total; multi-trigram or deltas/tombstones → a `≤` upper bound
         (`exact=false`). Term-bodied sets return `Unsupported`. 3 core tests
         (exact/bound/short-query + term-body reject); clippy `-D warnings` + wasm32 clean.
-      - **DEMO WIRING DEFERRED** — a UX call for the maintainer. Live probe over the
-        19-split geo set (`examples/probe_split_count.rs`, since removed) measured
-        `count_estimate` at **4.5–6.2 MB / 190–437 requests, COLD** (the geo manifest
-        is summary-stripped → no per-split Bloom, so it cold-opens all 19 splits; each
-        `Index::open` pulls that split's resident sparse index). That's ~1000× the bytes
-        and ~50× the requests of the monolith's KB-scale header count, so firing it
-        EAGERLY on every keystroke-triggered split search (as first drafted) is too
-        costly — and for a common multi-trigram query it only yields a loose,
-        substring-inflated bound (`≤ 2.16M` for "roaring bitmaps", `≤ 19.3M` for
-        "machine learning"). Options for later: an on-demand "[count all]" affordance
-        (mirroring the monolith's expensive "exact count" button), or leave the honest
-        capped `N+`. Meanwhile the count line keeps showing `N+` in split mode.
+        NOT demo-wired eagerly: a live probe over the 19-split geo set measured
+        `count_estimate` at **4.5–6.2 MB / 190–437 requests, COLD** (the geo manifest is
+        summary-stripped → no per-split Bloom, so it cold-opens all 19 splits), ~1000× the
+        monolith's KB-scale header count and only a loose substring-inflated bound for a
+        multi-trigram query — too costly to fire on every keystroke. Kept as an API.
+      - `countExact` — **CORE + WASM + DEMO DONE** (the maintainer's call: "exact count
+        button too"). `SplitSet::count_exact(resolver, query, filter) -> u64` fully
+        intersects every split (`search`/`search_filtered` with an unbounded limit) and
+        counts — the TRUE total, supersession/tombstones included; term bodies OK
+        unfiltered. wasm `RrssIndex.countExact(query, filters) -> number`. The demo shows
+        an on-demand **"exact count"** button in split mode (unfiltered, capped results
+        only), mirroring the monolith's cost-flagged "exact count"; click → full scan →
+        renders the exact total. Robustness fix: the split search paths capped their
+        result-vector PRE-allocation (`Vec::with_capacity(limit.min(PREALLOC_CAP))`) so an
+        `usize::MAX` limit no longer overflows. 1 core test (`count_exact ==
+        search(MAX).len()`); gates clean; bundle rebuilt.
+      - **Paging cursor still deferred**: `RrssIndex.search` returns a flat SEM_K
+        ranked window with no deep-paging cursor. Low value (few page past 250 ranked
+        hits) + a bigger change.
       - **Paging cursor still deferred**: `RrssIndex.search` returns a flat SEM_K
         ranked window with no deep-paging cursor. Low value (few page past 250 ranked
         hits) + a bigger change.

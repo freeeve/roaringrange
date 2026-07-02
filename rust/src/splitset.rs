@@ -58,6 +58,11 @@ pub const SPLIT_FLAG_HAS_TOMBSTONE: u16 = 1 << 0;
 /// then bound the global range present.
 pub const SPLIT_FLAG_ABSOLUTE_IDS: u16 = 1 << 1;
 
+/// Upper bound on the result vector's *pre-allocation* in the search paths. The vector still
+/// grows to hold every hit; this only stops a huge `limit` (e.g. `usize::MAX` from
+/// [`SplitSet::count_exact`]) from asking for an allocation that overflows.
+const PREALLOC_CAP: usize = 1 << 16;
+
 /// Summary TLV tag for a term Bloom filter (skip a split whose vocabulary can't contain a
 /// query n-gram). Matches `SPLITSET.md` §summary blob.
 pub(crate) const SUMMARY_TAG_BLOOM: u8 = 1;
@@ -663,7 +668,10 @@ impl SplitSet {
         // Tiered, base-only: keep the short-circuit — splits are in rank order, so accumulate
         // each surviving split's filtered (rank-ordered) hits until the page is full.
         if self.delta_splits().is_empty() && self.policy == Policy::Tiered {
-            let mut out: Vec<u32> = Vec::with_capacity(limit);
+            // Cap the pre-allocation, not the result: a `count_exact` caller passes
+            // `usize::MAX` and `Vec::with_capacity(usize::MAX)` would overflow. The vec still
+            // grows via `push` to hold every hit.
+            let mut out: Vec<u32> = Vec::with_capacity(limit.min(PREALLOC_CAP));
             for (i, split) in self.base_splits().iter().enumerate() {
                 if out.len() >= limit {
                     break;
@@ -908,6 +916,31 @@ impl SplitSet {
         Ok((total, exact))
     }
 
+    /// The EXACT number of documents matching `query` (ANDed with `filter`), by fully resolving
+    /// the intersection across every split and counting — the on-demand counterpart to
+    /// [`count_estimate`](Self::count_estimate)'s header-only bound.
+    ///
+    /// Unlike `count_estimate` this reads posting **bodies** and materializes the whole match set
+    /// (potentially hundreds of MB for a broad query on a large corpus), so it is meant for a
+    /// deliberate "exact count" action, not an every-keystroke count. It counts exactly what
+    /// [`search`](Self::search)/[`search_filtered`](Self::search_filtered) would page — delta
+    /// supersession and tombstones included. A term-bodied set is fine when `filter` is empty; a
+    /// filtered term-body search is unsupported and errors.
+    pub async fn count_exact<R: SplitFetcher>(
+        &self,
+        resolver: &R,
+        query: &str,
+        filter: &[(String, String)],
+    ) -> Result<u64, IndexError> {
+        let ids = if filter.is_empty() {
+            self.search(resolver, query, usize::MAX).await?
+        } else {
+            self.search_filtered(resolver, query, filter, usize::MAX)
+                .await?
+        };
+        Ok(ids.len() as u64)
+    }
+
     /// Tiered top-K: the base splits are in `(tier, docIdLo)` order — i.e. rank order — and
     /// hold disjoint, increasing global id ranges, so the global top-K is just the
     /// concatenation of each split's local top-`remaining`. The loop **stops opening splits**
@@ -920,7 +953,8 @@ impl SplitSet {
         keys: &[u64],
         limit: usize,
     ) -> Result<Vec<u32>, IndexError> {
-        let mut out: Vec<u32> = Vec::with_capacity(limit);
+        // Cap the pre-allocation (not the result) so a `usize::MAX` limit can't overflow.
+        let mut out: Vec<u32> = Vec::with_capacity(limit.min(PREALLOC_CAP));
         for (i, split) in self.base_splits().iter().enumerate() {
             if out.len() >= limit {
                 break; // tiered short-circuit — the cold tiers leave the hot path
@@ -1623,6 +1657,35 @@ mod tests {
             block_on(ss.count_estimate(&resolver, "ab")).unwrap(),
             (0, true)
         );
+    }
+
+    #[test]
+    fn count_exact_is_the_full_intersection_count() {
+        let mut b = SplitSetBuilder::new(SplitBuildConfig::new(Policy::Tiered, 4096, 3, "corpus"));
+        let n = 60u32;
+        for i in 0..n {
+            b.add_text(&format!("abc unq{i:04}")).unwrap();
+        }
+        let built = b.finish().unwrap();
+        assert!(
+            built.splits.len() > 1,
+            "byte cap should force multiple splits"
+        );
+        let ss = open_built(&built);
+        let resolver = resolver_from(&built, &[]);
+
+        // Every doc contains "abc" -> the exact count is 60 (not the SEM_K-style cap search
+        // pages), and it equals a full unbounded search's length.
+        assert_eq!(block_on(ss.count_exact(&resolver, "abc", &[])).unwrap(), 60);
+        let full = block_on(ss.search(&resolver, "abc", usize::MAX))
+            .unwrap()
+            .len() as u64;
+        assert_eq!(
+            block_on(ss.count_exact(&resolver, "abc", &[])).unwrap(),
+            full
+        );
+        // A query no doc holds -> exactly 0.
+        assert_eq!(block_on(ss.count_exact(&resolver, "zzz", &[])).unwrap(), 0);
     }
 
     #[cfg(feature = "terms")]

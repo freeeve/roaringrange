@@ -2290,6 +2290,34 @@ impl RrssIndex {
         })
     }
 
+    /// The EXACT match count for `query` (ANDed with `filters`) — a full intersection scan across
+    /// every split, the on-demand counterpart to `countEstimate`. Reads posting bodies (can be
+    /// hundreds of MB on a broad query), so it backs a deliberate "exact count" action, not an
+    /// every-keystroke count. `filters` takes the same shape as `searchFiltered` (exclude filters
+    /// are unsupported and throw). Resolves to the count as a number.
+    #[wasm_bindgen(js_name = countExact)]
+    pub async fn count_exact(&self, query: &str, filters: Array) -> Result<f64, JsError> {
+        let sels = filter_sels(&filters)?;
+        if sels.iter().any(|s| s.negate) {
+            return Err(JsError::new(
+                "facet exclude filters are not supported on the split-set index",
+            ));
+        }
+        let pairs = sel_pairs(&sels, true);
+        let resolver = WasmSplitResolver {
+            base: self.base.clone(),
+            bloom: self.bloom.clone(),
+            #[cfg(feature = "hotcache")]
+            hc: self.hc.clone(),
+        };
+        let n = self
+            .inner
+            .count_exact(&resolver, query, &pairs)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(n as f64)
+    }
+
     /// Number of splits named by the manifest (base + delta).
     #[wasm_bindgen(js_name = splitCount)]
     pub fn split_count(&self) -> usize {

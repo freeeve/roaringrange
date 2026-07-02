@@ -1106,6 +1106,11 @@
       // single-trigram query's count is EXACT (and a multi-trigram one bounded)
       // for KBs of reads. { count, exact } or null.
       let countBound = null;
+      // Split mode only: the ranked list is a capped SEM_K window with no cursor, so the true
+      // total is unknown until the user asks. `exactCountable` gates the on-demand "exact count"
+      // button (the split path sets it for an unfiltered query); `exactCount` caches the result.
+      let exactCountable = false;
+      let exactCount = null;   // { count } once counted, else null
       const activeFilters = new Set();   // "field\tcategory"
       const recCache = new Map();        // docID -> record JSON
       const countSpans = new Map();      // "field\tname" -> count <span> (live, updated per search)
@@ -1667,13 +1672,23 @@
           const exact = (serverMode || autoRouted) ? "" :
             ` · <button type="button" id="loadall" title="scans every match — can be 100s of MB" style="background:none;border:none;padding:0;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;text-decoration:underline;text-underline-offset:2px">exact count</button>`;
           els.resultcount.innerHTML = `${lead}${bound}${exact}`;
+        } else if (exactCount) {
+          // Split mode, after the on-demand full scan: the true total is known.
+          els.resultcount.innerHTML =
+            `<b>${fmt(exactCount.count)}</b> result${exactCount.count === 1 ? "" : "s"}` +
+            ` <span style="color:var(--ink-faint);font-size:12px" title="counted by fully intersecting every split — exact">· exact</span>`;
         } else {
           // A depth-capped lexical split/term search gets a "+": the ranked list is a
           // top-N slice, so the count is a lower bound (the browse path counts all docs).
           const more = rankedCapped
             ? `<span title="the split/term search is capped at its ranked depth — there are more matches than shown">+</span>`
             : "";
-          els.resultcount.innerHTML = `<b>${fmt(total)}${more}</b> result${total === 1 ? "" : "s"}`;
+          // Split mode: offer an explicit full-scan count (the split set has no cursor to
+          // materialize the exact total incrementally). Cost-flagged, like the monolith's.
+          const exact = exactCountable
+            ? ` · <button type="button" id="splitexact" title="fully intersects every split — can be 100s of MB" style="background:none;border:none;padding:0;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;text-decoration:underline;text-underline-offset:2px">exact count</button>`
+            : "";
+          els.resultcount.innerHTML = `<b>${fmt(total)}${more}</b> result${total === 1 ? "" : "s"}${exact}`;
         }
       }
 
@@ -1950,6 +1965,32 @@
         }
       }
 
+      /* -------- split mode: the explicit exact count. The split set returns a capped ranked
+         window with no cursor, so the true total needs a full intersection scan across every
+         split (rrss.countExact, potentially 100s of MB — the same opt-in the monolith's "exact
+         count" offers). Unfiltered only; the result caches into `exactCount` for the render. */
+      async function splitExactCount() {
+        if (!rrss) return;
+        const q = els.q.value.trim();
+        if (!q) return;
+        const tok = startLive();
+        try {
+          const seq = searchSeq;
+          els.resultcount.innerHTML =
+            `<b>${fmt(lastTotal)}</b>+ result${lastTotal === 1 ? "" : "s"} <span style="color:var(--ink-faint)">· counting every match…</span>`;
+          const r0 = reqs, b0 = bytes, t0 = performance.now();
+          let n;
+          try { n = Number(await rrss.countExact(q, [])); }
+          catch (e) { els.mSummary.textContent = `exact count error: ${e}`; return; }
+          if (seq !== searchSeq) return;
+          exactCount = { count: n };
+          updateResultsHead();
+          setPerf({ tail: { ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 } });
+        } finally {
+          stopLive(tok);
+        }
+      }
+
       let searchSeq = 0;   // bumped per query so a stale, slower earlier search can bail before rendering
       // Serializes the wasm-using part of searches: a new run awaits the prior run's
       // in-flight arm borrows (rterm/rrb/idx/rrvi/embedder) to release before it
@@ -2205,6 +2246,7 @@
         rankedCapped = false; // only a depth-capped lexical split/term search sets this true
         autoRouted = false;   // each query re-prices; only the trigram path below may set it
         countBound = null;    // header-only count (exact or ≤ bound); trigram strict-AND only
+        exactCountable = false; exactCount = null;   // reset the split-mode on-demand exact count
         // DOI exact-lookup fast path: a DOI-shaped query resolves to the exact work
         // via the lookup sidecar, independent of client/server search mode.
         const bareDoi = lookup ? doiOf(q) : null;
@@ -2515,6 +2557,10 @@
           cur = null;
           rankedIds = sids;
           applyFacetCounts(fc);
+          // The split set has no cursor, so the count line only knows the capped window. Offer an
+          // on-demand exact count (a full intersection scan across every split — potentially 100s
+          // of MB) for the unfiltered case; see updateResultsHead / splitExactCount.
+          exactCountable = rankedCapped && !filters.length;
           rankedSummary = `split set${filters.length ? " + facets" : ""} · ${sids.length} match${sids.length === 1 ? "" : "es"} · ${rrss.splitCount()} splits · ${(performance.now() - t0).toFixed(0)} ms`;
           setPerf({
             search: { ms: searchMs, reqs: searchReqs, bytes: searchBytes },
@@ -2813,6 +2859,7 @@
         }));
       els.resultcount.addEventListener("click", (e) => {
         if (e.target.closest("#loadall")) loadAll();
+        else if (e.target.closest("#splitexact")) splitExactCount();
       });
       els.results.addEventListener("click", (e) => {
         const btn = e.target.closest(".amore");
