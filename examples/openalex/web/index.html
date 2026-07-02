@@ -1531,13 +1531,36 @@
       }
 
       /* -------- results rendering -------- */
+      // True while the results area shows loading skeletons (no real cards yet). showError
+      // only wipes the results area to an error when this holds, so a mid-scan failure after
+      // cards have rendered keeps those cards instead of erasing good results.
+      let resultsAreSkeletons = false;
+
       function skeletons(n) {
         let h = "";
         for (let i = 0; i < n; i++) h += `<div class="card skeleton"><div class="title"></div><div class="meta"></div></div>`;
         els.results.innerHTML = h;
+        resultsAreSkeletons = true;
+      }
+
+      // Surface a search/paging error: always update the perf summary line and hide the pager;
+      // replace the loading skeletons with the message when no real results are on screen. Uses
+      // textContent so an error string can never inject markup.
+      function showError(msg) {
+        els.mSummary.textContent = msg;
+        els.pager.hidden = true;
+        if (resultsAreSkeletons) {
+          els.results.innerHTML = "";
+          const d = document.createElement("div");
+          d.className = "empty";
+          d.textContent = msg;
+          els.results.appendChild(d);
+          resultsAreSkeletons = false;
+        }
       }
 
       function renderCards(map) {
+        resultsAreSkeletons = false;
         if (!lastPage.length) {
           els.results.innerHTML =
             `<div class="empty">` +
@@ -1674,7 +1697,7 @@
         let recMsTotal = 0, recReqsTotal = 0, recBytesTotal = 0;
         let ids;
         try { ids = await c.page(offset, PAGE); }
-        catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
+        catch (e) { if (seq === searchSeq) showError(`error: ${e}`); return; }
         // Progressive fill: page() bounds its tail work per call, so a sparse-result
         // query (total matches ≪ page size, e.g. ~20 hits over 484M docs) returns
         // partial pages while the scan is pending. Each round renders what's found
@@ -1691,7 +1714,7 @@
             if (lastStart < offset) {
               offset = lastStart;
               try { ids = await c.page(offset, PAGE); }
-              catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
+              catch (e) { if (seq === searchSeq) showError(`error: ${e}`); return; }
               continue;
             }
           }
@@ -1700,7 +1723,7 @@
           const recReq0 = reqs, recByte0 = bytes, recT0 = performance.now();
           let map;
           try { map = await fetchRecords(missing); }
-          catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
+          catch (e) { if (seq === searchSeq) showError(`error: ${e}`); return; }
           recMsTotal += performance.now() - recT0;
           recReqsTotal += reqs - recReq0;
           recBytesTotal += bytes - recByte0;
@@ -1738,7 +1761,7 @@
 
           if (!scanning) break;
           try { ids = await c.page(offset, PAGE); }
-          catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
+          catch (e) { if (seq === searchSeq) showError(`error: ${e}`); return; }
         }
       }
 
@@ -1790,7 +1813,7 @@
         let res;
         const t0 = performance.now();
         try { res = await lambdaSearch(q, offset, PAGE, mm, filters); }
-        catch (e) { if (seq === searchSeq) els.mSummary.textContent = `server search error: ${e}`; return; }
+        catch (e) { if (seq === searchSeq) showError(`server search error: ${e}`); return; }
         const lamMs = performance.now() - t0;
         if (seq !== searchSeq) return;
         if (offset === 0) {
@@ -1814,7 +1837,9 @@
 
         const missing = page.filter((id) => !recCache.has(id));
         const recReq0 = reqs, recByte0 = bytes, recT0 = performance.now();
-        const map = await fetchRecords(missing);
+        let map;
+        try { map = await fetchRecords(missing); }
+        catch (e) { if (seq === searchSeq) showError(`error: ${e}`); return; }
         const recMs = performance.now() - recT0, recReqs = reqs - recReq0, recBytes = bytes - recByte0;
         if (seq !== searchSeq) return;
         for (const [id, rec] of map) recCache.set(id, rec);
@@ -1853,7 +1878,7 @@
         const missing = page.filter((id) => !recCache.has(id));
         let map;
         try { map = await fetchRecords(missing); }
-        catch (e) { if (seq === searchSeq) els.mSummary.textContent = `error: ${e}`; return; }
+        catch (e) { if (seq === searchSeq) showError(`error: ${e}`); return; }
         const recMs = performance.now() - recT0, recReqs = reqs - recReq0, recBytes = bytes - recByte0;
         if (seq !== searchSeq) return;   // a newer query superseded this page
         for (const [id, rec] of map) recCache.set(id, rec);
@@ -1879,6 +1904,7 @@
         const seq = searchSeq;
         const r0 = reqs, b0 = bytes, t0 = performance.now();
         try { await (rankedIds ? goPageRanked(o) : (serverMode || autoRouted) ? goPageServer(o) : goPage(o)); }
+        catch (e) { if (seq === searchSeq) showError(`error: ${e}`); }
         finally { pageBusy = false; pagingNav = false; stopLive(tok); }
         if (seq !== searchSeq) return;
         const d = { ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 };
@@ -2118,8 +2144,12 @@
           const fr = await facetSrc.filterIds(Uint32Array.from(ids), filters.map((k) => k.split("\t")), facetHeadsReady);
           applyFacetCounts(facetHeadsReady ? fr.facetCounts() : null);
           return { ids: Array.from(fr.ids), ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 };
-        } catch (_) {
+        } catch (e) {
           applyFacetCounts(null);
+          // With active filters, a filter failure must NOT silently render the unfiltered list
+          // under a "+ facets" summary — surface it so the caller shows an error state. With no
+          // active filters this call only computes optional counts, so degrade quietly.
+          if (filters.length) throw new Error(`facet filter failed: ${e}`);
           return { ids, ms: performance.now() - t0, reqs: reqs - r0, bytes: bytes - b0 };
         }
       }
@@ -2138,7 +2168,8 @@
         try {
           await prev;
           if (mySeq === searchSeq) await runSearchInner(resetPaging, mySeq);
-        } finally { stopLive(tok); release(); }
+        } catch (e) { if (mySeq === searchSeq) showError(`error: ${e}`); }
+        finally { stopLive(tok); release(); }
       }
       async function runSearchInner(resetPaging = true, mySeq = searchSeq) {
         searchMode = document.querySelector('input[name="mode"]:checked')?.value || "term";
@@ -2294,19 +2325,27 @@
             const rrbOk = termOk && (await ensureRrb());
             if (mySeq !== searchSeq) return;
             const t0 = performance.now();
-            let sem = null;
-            if (ok) { try { sem = await semanticIds(q, depth); } catch (_) {} }
+            let sem = null, semErr = null;
+            if (ok) { try { sem = await semanticIds(q, depth); } catch (e) { semErr = e; } }
             const tr0 = reqs, tb0 = bytes, tt0 = performance.now();
-            let tri = [], strict = [], min2 = [];
+            let tri = [], strict = [], min2 = [], textErr = null;
+            const textAttempted = !!idx || rrbOk;
             try {
               if (idx) tri = Array.from(await idx.search(q, depth));
               if (rrbOk) {
                 strict = Array.from((await rterm.searchBm25(rrb, q, BM25_M, depth)).ids);
                 min2 = Array.from((await rterm.searchBm25MinMatch(rrb, q, BM25_M, depth, 2)).ids);
               }
-            } catch (_) {}
+            } catch (e) { textErr = e; }
             const txMs = performance.now() - tt0, txReqs = reqs - tr0, txBytes = bytes - tb0;
             if (mySeq !== searchSeq) return;
+            // If every arm that was actually attempted failed, surface the error instead of
+            // fusing empty lists into a misleading "0 results" verdict.
+            {
+              const attempted = (ok ? 1 : 0) + (textAttempted ? 1 : 0);
+              const failed = (ok && semErr ? 1 : 0) + (textAttempted && textErr ? 1 : 0);
+              if (attempted > 0 && failed === attempted) { showError(`hybrid search error: ${semErr || textErr}`); return; }
+            }
             // One library-backed N-list fusion (no JS reimplementation of RRF).
             const fused = Array.from(reciprocalRankFusion([
               Uint32Array.from(sem ? sem.ids : []),
@@ -2344,8 +2383,8 @@
           const hybridBm25 = termArm && bm25Mode && textReady && (await ensureRrb());
           if (mySeq !== searchSeq) return;
           const t0 = performance.now();
-          let sem = null, text = [];
-          if (ok) { try { sem = await semanticIds(q, depth); } catch (_) {} }
+          let sem = null, text = [], semErr = null, textErr = null;
+          if (ok) { try { sem = await semanticIds(q, depth); } catch (e) { semErr = e; } }
           let txMs = 0, txReqs = 0, txBytes = 0;
           if (textReady) {
             const tr0 = reqs, tb0 = bytes, tt0 = performance.now();
@@ -2353,10 +2392,17 @@
               text = Array.from(termArm
                 ? (hybridBm25 ? (await rterm.searchBm25MinMatch(rrb, q, BM25_M, depth, 2)).ids : await rterm.search(q, depth))
                 : await idx.search(q, depth));
-            } catch (_) {}
+            } catch (e) { textErr = e; }
             txMs = performance.now() - tt0; txReqs = reqs - tr0; txBytes = bytes - tb0;
           }
           if (mySeq !== searchSeq) return;
+          // If every arm that was actually attempted failed, surface the error instead of
+          // fusing two empty lists into a misleading "0 results" verdict.
+          {
+            const attempted = (ok ? 1 : 0) + (textReady ? 1 : 0);
+            const failed = (ok && semErr ? 1 : 0) + (textReady && textErr ? 1 : 0);
+            if (attempted > 0 && failed === attempted) { showError(`hybrid search error: ${semErr || textErr}`); return; }
+          }
           // Fusion runs in the wasm reader (the same reciprocal_rank_fusion every
           // native consumer uses), so the demo can't drift from the library's ranking.
           const fused = Array.from(reciprocalRankFusion(
@@ -2535,7 +2581,10 @@
         const dictInlined = DATASETS[DS].zstd ? inl(`${DATASETS[DS].idx}.dict`) : null;
         let dictPromise = null;
         if (DATASETS[DS].zstd && !dictInlined) {
-          dictPromise = fetch(DICT_URL).then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
+          dictPromise = fetch(DICT_URL).then((r) => {
+            if (!r.ok) throw new Error(`record dictionary fetch failed: HTTP ${r.status}`);
+            return r.arrayBuffer();
+          }).then((b) => new Uint8Array(b));
         }
 
         // The text index is optional at boot: a dataset whose `.rrs` is still
