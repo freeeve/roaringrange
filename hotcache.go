@@ -71,6 +71,11 @@ func WriteHotcache(dst io.Writer, members []MemberSpec, inlineThreshold uint32) 
 		if len(name) > 0xFFFF {
 			return fmt.Errorf("data-file name %q exceeds the 16-bit length limit", m.DataFile)
 		}
+		// nameOff is a u32 into the string blob; reject an overflowing blob rather
+		// than silently wrapping the offset.
+		if uint64(len(stringBlob)) >= 1<<32 {
+			return fmt.Errorf("RRHC string blob exceeds the 32-bit offset limit")
+		}
 		p := placement{nameOff: uint32(len(stringBlob)), nameLen: uint16(len(name))}
 		stringBlob = append(stringBlob, name...)
 		p.inlined = m.BootLen <= inlineThreshold

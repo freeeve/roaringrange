@@ -105,8 +105,14 @@ func WriteSortcols(dst io.Writer, cols []SortColumn) error {
 		off uint32
 		ln  uint16
 	}
+	if len(cols) > math.MaxUint16 {
+		return fmt.Errorf("sortcols: %d columns exceed the 16-bit column count", len(cols))
+	}
 	spans := make([]span, len(cols))
 	for i, c := range cols {
+		if len(c.Name) > math.MaxUint16 {
+			return fmt.Errorf("sortcols: column name %q (%d B) exceeds the 16-bit length limit", c.Name, len(c.Name))
+		}
 		spans[i] = span{off: uint32(len(blob)), ln: uint16(len(c.Name))}
 		blob = append(blob, c.Name...)
 	}

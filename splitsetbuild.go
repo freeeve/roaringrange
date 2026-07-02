@@ -326,11 +326,11 @@ func (b *SplitSetBuilder) Finish() (*BuiltSplitSet, error) {
 		return nil, err
 	}
 	for i, s := range b.specs {
-		cap := capFor(b.cfg.ByteCap, b.cfg.CapMax, i)
-		if s.DocCount == 1 && s.ByteSize > cap {
+		splitCap := capFor(b.cfg.ByteCap, b.cfg.CapMax, i)
+		if s.DocCount == 1 && s.ByteSize > splitCap {
 			return nil, fmt.Errorf(
 				"RRSS split %q: a single document's postings (%d B) exceed the byte cap (%d B)",
-				s.DataFile, s.ByteSize, cap)
+				s.DataFile, s.ByteSize, splitCap)
 		}
 	}
 	var tierCount uint16

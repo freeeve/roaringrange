@@ -71,10 +71,6 @@ pub fn serialize_posting(bm: &RoaringBitmap) -> Vec<u8> {
     v
 }
 
-/// Writes the v3 `RRS` index for the given postings to `w`. Each entry is `(key, posting_bytes)`
-/// — one portable RoaringBitmap per term (from [`serialize_posting`]), no head/tail split.
-/// Entries are sorted by key here (the dictionary must be key-sorted). A `stride` of 0 becomes
-/// [`DEFAULT_STRIDE`]. See `FORMAT.md`.
 /// Narrows a serialized **byte** length to the `u32` an on-disk size field holds,
 /// erroring rather than silently truncating past the 4 GiB format limit. Entity
 /// *counts* are already bounded by the `u32` doc-ID space and need no guard;
@@ -100,6 +96,10 @@ fn write_sparse_index<W: Write, T>(
     Ok(())
 }
 
+/// Writes the v3 `RRS` index for the given postings to `w`. Each entry is `(key, posting_bytes)`
+/// — one portable RoaringBitmap per term (from [`serialize_posting`]), no head/tail split.
+/// Entries are sorted by key here (the dictionary must be key-sorted). A `stride` of 0 becomes
+/// [`DEFAULT_STRIDE`]. See `FORMAT.md`.
 pub fn write_index<W: Write>(
     w: W,
     gram_size: u16,
@@ -123,6 +123,15 @@ pub fn write_index_with<W: Write>(
     case_normalization: bool,
 ) -> io::Result<()> {
     entries.sort_by_key(|e| e.0);
+    // Distinct keys are required: a duplicate would make the byte order depend on the
+    // sort tie-break and leave the dictionary binary search resolving to one arbitrary
+    // of the two. Mirrors the Go WriteIndex guard.
+    if entries.windows(2).any(|w| w[0].0 == w[1].0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "write_index requires distinct n-gram keys",
+        ));
+    }
     let stride = if stride == 0 { DEFAULT_STRIDE } else { stride };
     let ngrams = entries.len() as u32;
     let sparse_count = if ngrams == 0 {
@@ -230,20 +239,24 @@ pub fn write_facets_with<W: Write>(
     }
 
     let mut blob: Vec<u8> = Vec::new();
-    let push = |blob: &mut Vec<u8>, s: &str| -> (u32, u16) {
-        let off = blob.len() as u32;
+    // Errors rather than truncating a name past the u16 length field or the u32 blob
+    // offset (the reader would otherwise resolve a wrapped span). Mirrors the Go writer.
+    let push = |blob: &mut Vec<u8>, s: &str| -> io::Result<(u32, u16)> {
+        let off = u32_len(blob.len(), "facet string blob")?;
+        let len = u16::try_from(s.len())
+            .map_err(|_| io::Error::other("facet name exceeds the 16-bit length limit"))?;
         blob.extend_from_slice(s.as_bytes());
-        (off, s.len() as u16)
+        Ok((off, len))
     };
 
     let mut fos: Vec<FOut> = Vec::with_capacity(fields.len());
     let mut total_cats: u32 = 0;
     for f in fields {
-        let (fno, fnl) = push(&mut blob, &f.name);
+        let (fno, fnl) = push(&mut blob, &f.name)?;
         let cat_start = total_cats;
         let mut cs: Vec<COut> = Vec::with_capacity(f.cats.len());
         for c in f.cats {
-            let (cno, cnl) = push(&mut blob, &c.name);
+            let (cno, cnl) = push(&mut blob, &c.name)?;
             cs.push(COut {
                 key: facet_key(&f.name, &c.name, case_normalization),
                 card: c.card,
@@ -688,14 +701,25 @@ pub fn write_sortcols<W: Write>(mut w: W, cols: Vec<SortColumn>) -> io::Result<(
         ));
     }
 
-    // String blob of column names, in column order.
+    // Column count is a u16 header field; reject rather than truncate. Mirrors the Go writer.
+    if cols.len() > u16::MAX as usize {
+        return Err(io::Error::other(
+            "sortcols column count exceeds the 16-bit limit",
+        ));
+    }
+    // String blob of column names, in column order. Name length (u16) and blob offset
+    // (u32) are on-disk fields; error rather than silently truncating either.
     let mut blob: Vec<u8> = Vec::new();
     let mut name_spans: Vec<(u32, u16)> = Vec::with_capacity(cols.len());
     for c in &cols {
-        let off = blob.len() as u32;
+        let off = u32_len(blob.len(), "sortcols string blob")?;
+        let name_len = u16::try_from(c.name.len()).map_err(|_| {
+            io::Error::other("sortcols column name exceeds the 16-bit length limit")
+        })?;
         blob.extend_from_slice(c.name.as_bytes());
-        name_spans.push((off, c.name.len() as u16));
+        name_spans.push((off, name_len));
     }
+    let blob_len = u32_len(blob.len(), "sortcols string blob")?;
 
     let str_blob_off = HEADER_SIZE_SORTCOLS + cols.len() * COL_ENTRY_SORTCOLS;
     let data_start = (str_blob_off + blob.len()) as u64;
@@ -705,7 +729,7 @@ pub fn write_sortcols<W: Write>(mut w: W, cols: Vec<SortColumn>) -> io::Result<(
     w.write_all(&1u16.to_le_bytes())?; // version
     w.write_all(&(cols.len() as u16).to_le_bytes())?;
     w.write_all(&(rows as u32).to_le_bytes())?;
-    w.write_all(&(blob.len() as u32).to_le_bytes())?;
+    w.write_all(&blob_len.to_le_bytes())?;
 
     // Column table (24 B each) with absolute data offsets, in column order.
     let mut off = data_start;
@@ -930,6 +954,18 @@ mod tests {
         let mut out = Vec::new();
         write_index(&mut out, 3, 2, posts).unwrap();
         out
+    }
+
+    #[test]
+    fn write_index_rejects_duplicate_keys() {
+        // Two entries with the same key would make the sorted byte order tie-break-
+        // dependent and the dictionary binary search ambiguous, so it must error.
+        let posts = vec![
+            (7u64, serialize_posting(&bm(&[0]))),
+            (7u64, serialize_posting(&bm(&[1]))),
+        ];
+        let err = write_index(&mut Vec::new(), 3, 2, posts).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

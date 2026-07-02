@@ -280,11 +280,11 @@ type dictBlockWriter struct {
 	dictLen     uint64
 }
 
-func newDictBlockWriter(cap int) *dictBlockWriter {
-	if cap == 0 {
-		cap = defaultDictBlockCap
+func newDictBlockWriter(blockCap int) *dictBlockWriter {
+	if blockCap == 0 {
+		blockCap = defaultDictBlockCap
 	}
-	return &dictBlockWriter{cap: cap}
+	return &dictBlockWriter{cap: blockCap}
 }
 
 // commonPrefixLen is the byte-wise common prefix length of a and b.
@@ -402,6 +402,11 @@ func WriteTermIndexFull(dst io.Writer, postings map[string]*roaring.Bitmap, head
 		}
 		if headOff >= 1<<(64-termSizeBits) {
 			return fmt.Errorf("postings region exceeds the 40-bit offset limit")
+		}
+		// The tail length is a u32 field; reject an oversized tail rather than
+		// silently truncating it (the head size is validated just above).
+		if uint64(len(tail)) >= 1<<32 {
+			return fmt.Errorf("term %q: tail posting %d B exceeds the 32-bit size limit", term, len(tail))
 		}
 		var tailLen [4]byte
 		binary.LittleEndian.PutUint32(tailLen[:], uint32(len(tail)))

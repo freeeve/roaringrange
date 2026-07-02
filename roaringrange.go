@@ -27,7 +27,7 @@ var (
 	// ErrTruncated is returned when an index ends before its declared structure.
 	ErrTruncated = errors.New("truncated index")
 	// ErrCompressedRecord is returned when a version-2 record store holds a
-	// zstd-compressed frame (tag 1); this reference reader carries no zstd
-	// decoder — use the Rust reader for compressed stores.
-	ErrCompressedRecord = errors.New("compressed record (zstd frame) is not supported by the Go reference reader")
+	// zstd-compressed frame (tag 1) but the store was opened without a dictionary
+	// decoder — open it with OpenRecordStoreWithDict to inflate compressed records.
+	ErrCompressedRecord = errors.New("compressed record (zstd frame) requires opening the store with OpenRecordStoreWithDict")
 )

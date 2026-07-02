@@ -1168,8 +1168,11 @@ impl<F: RangeFetch> Cursor<F> {
     /// Returns the next `n` doc IDs, advancing an internal position. Pages
     /// within the materialized set cost no fetches.
     pub async fn next(&mut self, n: usize) -> Result<Vec<u32>, IndexError> {
-        self.ensure(self.pos + n).await?;
-        let end = (self.pos + n).min(self.results.len());
+        // `n` is caller- (JS-) supplied; saturate so a huge value can't wrap the
+        // usize add (debug panic / release wrap to a short page).
+        let want = self.pos.saturating_add(n);
+        self.ensure(want).await?;
+        let end = want.min(self.results.len());
         let out = self.results[self.pos..end].to_vec();
         self.pos = end;
         Ok(out)
@@ -1182,9 +1185,11 @@ impl<F: RangeFetch> Cursor<F> {
     /// while [`pending_tail`](Self::pending_tail) is still true, and calling
     /// again continues the scan from where it stopped.
     pub async fn page(&mut self, offset: usize, limit: usize) -> Result<Vec<u32>, IndexError> {
-        self.ensure(offset + limit).await?;
+        // `offset`/`limit` are caller- (JS-) supplied; saturate the add so it can't wrap.
+        let want = offset.saturating_add(limit);
+        self.ensure(want).await?;
         let start = offset.min(self.results.len());
-        let end = (offset + limit).min(self.results.len());
+        let end = want.min(self.results.len());
         Ok(self.results[start..end].to_vec())
     }
 

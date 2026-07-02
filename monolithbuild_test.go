@@ -183,6 +183,19 @@ func TestWriteIndexSortsAndGuardsStride(t *testing.T) {
 	}
 }
 
+// TestWriteIndexRejectsDuplicateKeys checks the byte-for-byte guarantee: duplicate
+// keys would make the sorted order tie-break-dependent, so WriteIndex must error
+// (mirrors the Rust write_index guard).
+func TestWriteIndexRejectsDuplicateKeys(t *testing.T) {
+	entries := []IndexEntry{
+		{Key: 7, Posting: mustPosting(t, 0)},
+		{Key: 7, Posting: mustPosting(t, 1)},
+	}
+	if err := WriteIndex(&bytes.Buffer{}, 3, 2, entries); err == nil {
+		t.Fatal("WriteIndex accepted duplicate keys, want error")
+	}
+}
+
 func mustPosting(t *testing.T, ids ...uint32) []byte {
 	t.Helper()
 	out, err := roaring.BitmapOf(ids...).ToBytes()

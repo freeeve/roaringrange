@@ -390,16 +390,16 @@ fn sel_pairs(sels: &[FilterSel], include_only: bool) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Filters a ranked doc-ID list by the selected facet `sels` (includes AND-ed across
-/// fields, excludes subtracted) and returns the survivors (input order preserved) plus
-/// search-filtered counts over them. Shared by the text index and the standalone facet
-/// binding. See [`filter_sels`] for the accepted JS entry shapes (array or object).
 /// How many categories per field `filterIds` prices exactly (head+tail) — the rest
 /// of a wide sidecar's long tail keep their head-only count. A facet panel shows only
 /// the top few per field, so this bounds the per-drill-down fetches to a few hundred
 /// instead of one per category (100K+ on the DeepLibby sidecar).
 const FACET_COUNTS_TOP_PER_FIELD: usize = 64;
 
+/// Filters a ranked doc-ID list by the selected facet `sels` (includes AND-ed across
+/// fields, excludes subtracted) and returns the survivors (input order preserved) plus
+/// search-filtered counts over them. Shared by the text index and the standalone facet
+/// binding. See [`filter_sels`] for the accepted JS entry shapes (array or object).
 async fn filtered_ids(
     facets: Option<&FacetIndex<WasmFetch>>,
     ids: Vec<u32>,
@@ -1411,9 +1411,11 @@ impl RrsSecondaryIndex {
     }
 
     /// Like [`RrsSecondaryIndex::search_cursor`] but ANDs the selected facets into
-    /// the result. `filters` is an array of `[field, category]` pairs (within a field categories
-    /// OR, across fields they AND); a malformed entry throws. Applied only when a secondary
-    /// sidecar is open and `filters` is non-empty.
+    /// the result. `filters` accepts the same entry shapes as the primary index (a
+    /// `[field, category]` array or a `{field, category, exclude?}` object); within a field
+    /// categories OR, across fields they AND. A malformed entry throws. The secondary path has
+    /// no exclude support, so an `exclude: true` selection throws rather than being silently
+    /// ignored. Applied only when a secondary sidecar is open and `filters` is non-empty.
     #[wasm_bindgen(js_name = searchCursorFiltered)]
     pub async fn search_cursor_filtered(
         &self,
@@ -1425,7 +1427,13 @@ impl RrsSecondaryIndex {
             .inner
             .as_ref()
             .ok_or_else(|| JsError::new("secondary index unavailable"))?;
-        let pairs = filter_pairs(&filters)?;
+        let sels = filter_sels(&filters)?;
+        if sels.iter().any(|s| s.negate) {
+            return Err(JsError::new(
+                "facet exclude filters are not supported on the secondary index",
+            ));
+        }
+        let pairs = sel_pairs(&sels, true);
         let inner = sec
             .search_cursor_filtered(&query, max_missing, &pairs)
             .await
@@ -2146,10 +2154,13 @@ impl RrssIndex {
 
     /// Like [`search`](Self::search) but ANDs a facet filter in. Args are `(query, limit,
     /// filters)` — `limit` adjacent to `query`, options trailing, matching
-    /// `RrsIndex.searchCursorFiltered`. `filters` is an array of `[field, category]` pairs (within
-    /// a field categories OR, across fields AND; a malformed entry throws); each surviving split's
-    /// own `‹split›.rrf` sidecar resolves it, and a split lacking a selected field's categories is
-    /// pruned without a fetch. An empty `filters` is exactly [`search`](Self::search).
+    /// `RrsIndex.searchCursorFiltered`. `filters` accepts the same entry shapes as the primary
+    /// index (a `[field, category]` array or a `{field, category, exclude?}` object); within a
+    /// field categories OR, across fields AND; a malformed entry throws. The split path has no
+    /// exclude support, so an `exclude: true` selection throws rather than being silently ignored.
+    /// Each surviving split's own `‹split›.rrf` sidecar resolves the filter, and a split lacking a
+    /// selected field's categories is pruned without a fetch. An empty `filters` is exactly
+    /// [`search`](Self::search).
     #[wasm_bindgen(js_name = searchFiltered)]
     pub async fn search_filtered(
         &self,
@@ -2157,7 +2168,13 @@ impl RrssIndex {
         limit: usize,
         filters: Array,
     ) -> Result<Vec<u32>, JsError> {
-        let pairs = filter_pairs(&filters)?;
+        let sels = filter_sels(&filters)?;
+        if sels.iter().any(|s| s.negate) {
+            return Err(JsError::new(
+                "facet exclude filters are not supported on the split-set index",
+            ));
+        }
+        let pairs = sel_pairs(&sels, true);
         let resolver = WasmSplitResolver {
             base: self.base.clone(),
             bloom: self.bloom.clone(),

@@ -3,7 +3,8 @@
 //! Not another index, but a small artifact that front-loads the boot regions of a
 //! whole *composition* (trigram `RRS` + term `RRTI` + facet `RRSF` + vector `RRVI` +
 //! record `RRSR` + lookup `RRIL` + embedder `RRM2`) so booting the composition costs
-//! **one** ranged read instead of N separate cold opens. It replaces nothing: the
+//! **two small** ranged reads (a tiny header, then the exact remaining bytes) instead
+//! of N separate cold opens. It replaces nothing: the
 //! per-query data files are untouched and per-query reads are unchanged. See
 //! `HOTCACHE.md` for the frozen byte layout and `tasks/006_catalog_hotcache.md` for
 //! the design.
@@ -13,11 +14,12 @@
 //! against the string blob), its boot byte-range **within that data file**, and an
 //! inlined-here-vs-fetch-by-range flag. The small boots (headers, sparse indexes, FSTs,
 //! facet tables, record offsets, `.dict`, lookup map) are copied into the inlined-boot
-//! blob and come back free with the single GET; the few large boots (the RRVI centroids)
+//! blob and come back free with the boot reads; the few large boots (the RRVI centroids)
 //! are referenced by `(bootOff, bootLen)` and fetched from the member's own data file in a
 //! later parallel wave.
 //!
-//! [`Hotcache::open`] does **one** ranged read of the whole `.rrhc` and parses it
+//! [`Hotcache::open`] does two ranged reads of the `.rrhc` (a tiny header, then the exact
+//! remaining bytes) and parses it
 //! resident. It is the only fetch the hotcache itself ever issues; range-referenced large
 //! boots are fetched by the caller (a future `Catalog::open_hotcache`) from each member's
 //! data file, not from the `.rrhc`.
@@ -147,9 +149,10 @@ pub struct Hotcache {
 }
 
 impl Hotcache {
-    /// Boots from one GET of the `.rrhc`: header + manifest + string blob + inlined-boot
-    /// blob, all resident immediately. The only fetch the hotcache issues — range-
-    /// referenced large boots are fetched by the caller from each member's data file.
+    /// Boots with two ranged reads of the `.rrhc` — a tiny header, then the exact
+    /// remaining bytes (manifest + string blob + inlined-boot blob) — all resident
+    /// immediately. The only fetches the hotcache issues; range-referenced large boots
+    /// are fetched by the caller from each member's data file.
     pub async fn open<F: RangeFetch>(rrhc: F) -> Result<Hotcache, IndexError> {
         // One ranged read of the header pins the artifact's section sizes; a second
         // ranged read of exactly the remaining bytes (manifest + strings + inline blob)

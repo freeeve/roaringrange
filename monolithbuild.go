@@ -8,6 +8,7 @@ package roaringrange
 // which exists only to bound peak memory on a 100+ GB build). See rust/src/build.rs.
 
 import (
+	"fmt"
 	"io"
 	"sort"
 
@@ -41,6 +42,14 @@ func WriteIndexWith(dst io.Writer, gramSize uint16, stride int, entries []IndexE
 		priv[i] = indexEntry{key: e.Key, posting: e.Posting}
 	}
 	sort.Slice(priv, func(i, j int) bool { return priv[i].key < priv[j].key })
+	// Distinct keys are required: a duplicate key would make the sorted byte order
+	// depend on the (unstable) tie-break — breaking the byte-for-byte guarantee — and
+	// leave the dictionary binary search resolving to one arbitrary of the two.
+	for i := 1; i < len(priv); i++ {
+		if priv[i].key == priv[i-1].key {
+			return fmt.Errorf("roaringrange: WriteIndex requires distinct n-gram keys, found duplicate %d", priv[i].key)
+		}
+	}
 	return writeIndexWith(dst, gramSize, stride, priv, caseNormalization)
 }
 

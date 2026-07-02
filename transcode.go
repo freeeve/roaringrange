@@ -64,7 +64,7 @@ func TranscodeStride(src io.Reader, dst io.Writer, stride int) error {
 	count := binary.LittleEndian.Uint32(data[8:12])
 	// Each FTSR entry is at least 12 bytes (key + size), so a valid index can
 	// hold no more entries than its byte length allows. Reject a corrupt count
-	// before it drives a multi-GB pre-allocation in parseSplitEntries.
+	// before it drives a multi-GB pre-allocation in parseEntries.
 	if uint64(count) > uint64(len(data)-12)/12 {
 		return ErrTruncated
 	}

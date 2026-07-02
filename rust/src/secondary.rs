@@ -51,7 +51,7 @@ impl<F: RangeFetch + Clone> SecondaryIndex<F> {
     pub async fn open(rrs: F, perm: F) -> Result<Self, IndexError> {
         let index = Index::open(rrs).await?;
         let perm = SortCols::open(perm).await?;
-        let perm_col = perm.column_index(PERM_COLUMN).ok_or(IndexError::BadQuery(
+        let perm_col = perm.column_index(PERM_COLUMN).ok_or(IndexError::Malformed(
             "secondary perm store missing the 'primary' column",
         ))?;
         Ok(Self {
@@ -412,9 +412,10 @@ mod tests {
             }],
         )
         .unwrap();
+        // A perm store missing the "primary" column is a malformed artifact, not a bad query.
         assert!(matches!(
             block_on(SecondaryIndex::open(index, MemoryFetch::new(bad))),
-            Err(IndexError::BadQuery(_))
+            Err(IndexError::Malformed(_))
         ));
     }
 }
