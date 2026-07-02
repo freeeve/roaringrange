@@ -55,9 +55,9 @@ type TermLanguage uint8
 const (
 	// TermLanguageNone builds an unstemmed index with no stop-word list.
 	TermLanguageNone TermLanguage = 0
-	// The Snowball languages, byte values matching the Rust Language::to_u8. Only English
-	// is wired for stemming on the Go build side today (see the task-055 note); every
-	// language has a stop-word list (stopwordFile), so a stop-words index can be built in
+	// The Snowball languages, byte values matching the Rust Language::to_u8. All are wired
+	// for stemming on the Go build side (see stemAlgorithm) and every language has a
+	// stop-word list (stopwordFile), so a stemmed and/or stop-words index can be built in
 	// any of them.
 	TermLanguageEnglish    TermLanguage = 1
 	TermLanguageSpanish    TermLanguage = 2
@@ -222,14 +222,44 @@ func NewTermTokenizerWith(lang TermLanguage, stopwords, caseFold bool) *TermToke
 	return NewTermTokenizerFull(lang, lang != TermLanguageNone, stopwords, caseFold)
 }
 
+// stemAlgorithm maps a TermLanguage to its go-stemmers algorithm. The two enums number their
+// languages differently, so this is an explicit by-name map, never a numeric cast: a wrong
+// entry would stem with the wrong language and silently diverge from the Rust tokenizer. It
+// mirrors the Rust Language::algorithm mapping (rust/src/terms.rs) one-to-one, so a language
+// byte tokenizes byte-identically in both ports. TermLanguageNone and any unsupported byte have
+// no entry (nil stemmer).
+var stemAlgorithm = map[TermLanguage]stemmers.Algorithm{
+	TermLanguageEnglish:    stemmers.English,
+	TermLanguageSpanish:    stemmers.Spanish,
+	TermLanguageArabic:     stemmers.Arabic,
+	TermLanguageDanish:     stemmers.Danish,
+	TermLanguageDutch:      stemmers.Dutch,
+	TermLanguageFinnish:    stemmers.Finnish,
+	TermLanguageFrench:     stemmers.French,
+	TermLanguageGerman:     stemmers.German,
+	TermLanguageGreek:      stemmers.Greek,
+	TermLanguageHungarian:  stemmers.Hungarian,
+	TermLanguageItalian:    stemmers.Italian,
+	TermLanguageNorwegian:  stemmers.Norwegian,
+	TermLanguagePortuguese: stemmers.Portuguese,
+	TermLanguageRomanian:   stemmers.Romanian,
+	TermLanguageRussian:    stemmers.Russian,
+	TermLanguageSwedish:    stemmers.Swedish,
+	TermLanguageTamil:      stemmers.Tamil,
+	TermLanguageTurkish:    stemmers.Turkish,
+}
+
 // NewTermTokenizerFull builds the chain with independent stem and stopwords filters over a
 // shared language (mirrors the Rust Tokenizer::with). The stemmer is created only when stem
-// is set, so an index can strip a language's stop words without stemming. Only English
-// stemming is wired on the Go side today; a non-English stem language leaves the stemmer nil.
+// is set, so an index can strip a language's stop words without stemming. Every go-stemmers
+// language is wired (see stemAlgorithm); a stem request for TermLanguageNone or an unsupported
+// byte leaves the stemmer nil.
 func NewTermTokenizerFull(lang TermLanguage, stem, stopwords, caseFold bool) *TermTokenizer {
 	var st *stemmers.Stemmer
-	if stem && lang == TermLanguageEnglish {
-		st = stemmers.New(stemmers.English)
+	if stem {
+		if algo, ok := stemAlgorithm[lang]; ok {
+			st = stemmers.New(algo)
+		}
 	}
 	return &TermTokenizer{stem: st, stopwords: stopwords, language: lang, caseFold: caseFold}
 }
@@ -378,10 +408,21 @@ func WriteTermIndexWith(dst io.Writer, postings map[string]*roaring.Bitmap, head
 // over a shared language (mirrors the Rust write_term_index_from_postings). stem controls the
 // stemmed header flag; the language byte is recorded when either filter is on, and both
 // filters require a language (a filter on with none set is an error). blockCap of 0 takes the
-// default.
+// default. It is a thin error-only wrapper over WriteTermIndexFullDict for source compatibility.
 func WriteTermIndexFull(dst io.Writer, postings map[string]*roaring.Bitmap, headBoundary uint32, lang TermLanguage, stem, stopwords, caseNormalization bool, blockCap int) error {
+	_, err := WriteTermIndexFullDict(dst, postings, headBoundary, lang, stem, stopwords, caseNormalization, blockCap)
+	return err
+}
+
+// WriteTermIndexFullDict is WriteTermIndexFull that additionally returns the dictionary it wrote:
+// the (term, posting head_off) pairs in byte-lexicographic dictionary order, carrying the *real*
+// head offsets front-coded into the .rrt. Feed the result straight to WriteImpacts to build a
+// BM25 .rrb sidecar that addresses this exact .rrt--the offsets are the ones the reader recovers
+// on lookup, not fabricated. The bytes written to dst are identical to WriteTermIndexFull; only
+// the extra return value differs.
+func WriteTermIndexFullDict(dst io.Writer, postings map[string]*roaring.Bitmap, headBoundary uint32, lang TermLanguage, stem, stopwords, caseNormalization bool, blockCap int) ([]DictEntry, error) {
 	if (stem || stopwords) && lang == TermLanguageNone {
-		return fmt.Errorf("RRTI: stemming and stop-word removal require a language, but none is set")
+		return nil, fmt.Errorf("RRTI: stemming and stop-word removal require a language, but none is set")
 	}
 	terms := make([]string, 0, len(postings))
 	for t := range postings {
@@ -389,24 +430,25 @@ func WriteTermIndexFull(dst io.Writer, postings map[string]*roaring.Bitmap, head
 	}
 	slices.Sort(terms) // byte-lexicographic, the dictionary's required order
 
+	dict := make([]DictEntry, 0, len(terms))
 	var region bytes.Buffer
 	blocks := newDictBlockWriter(blockCap)
 	for _, term := range terms {
 		head, tail, err := splitBitmapHB(postings[term], headBoundary)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		headOff := uint64(region.Len())
 		if len(head) >= 1<<termSizeBits {
-			return fmt.Errorf("term %q: head posting %d B exceeds the 24-bit size limit", term, len(head))
+			return nil, fmt.Errorf("term %q: head posting %d B exceeds the 24-bit size limit", term, len(head))
 		}
 		if headOff >= 1<<(64-termSizeBits) {
-			return fmt.Errorf("postings region exceeds the 40-bit offset limit")
+			return nil, fmt.Errorf("postings region exceeds the 40-bit offset limit")
 		}
 		// The tail length is a u32 field; reject an oversized tail rather than
 		// silently truncating it (the head size is validated just above).
 		if uint64(len(tail)) >= 1<<32 {
-			return fmt.Errorf("term %q: tail posting %d B exceeds the 32-bit size limit", term, len(tail))
+			return nil, fmt.Errorf("term %q: tail posting %d B exceeds the 32-bit size limit", term, len(tail))
 		}
 		var tailLen [4]byte
 		binary.LittleEndian.PutUint32(tailLen[:], uint32(len(tail)))
@@ -414,6 +456,7 @@ func WriteTermIndexFull(dst io.Writer, postings map[string]*roaring.Bitmap, head
 		region.Write(head)
 		region.Write(tail)
 		blocks.push([]byte(term), headOff, uint64(len(head)))
+		dict = append(dict, DictEntry{Term: term, HeadOff: headOff})
 	}
 	bs := blocks.finish()
 
@@ -424,13 +467,13 @@ func WriteTermIndexFull(dst io.Writer, postings map[string]*roaring.Bitmap, head
 	for _, b := range bs {
 		blockLen := uint64(len(b.bytes))
 		if blockLen >= 1<<termSizeBits {
-			return fmt.Errorf("dict block exceeds the 24-bit block-length limit")
+			return nil, fmt.Errorf("dict block exceeds the 24-bit block-length limit")
 		}
 		if b.off >= 1<<(64-termSizeBits) {
-			return fmt.Errorf("dict region exceeds the 40-bit block-offset limit")
+			return nil, fmt.Errorf("dict region exceeds the 40-bit block-offset limit")
 		}
 		if err := builder.Insert(b.lastTerm, b.off<<termSizeBits|blockLen); err != nil {
-			return fmt.Errorf("router fst insert: %w", err)
+			return nil, fmt.Errorf("router fst insert: %w", err)
 		}
 		dictLen += blockLen
 	}
@@ -467,16 +510,18 @@ func WriteTermIndexFull(dst io.Writer, postings map[string]*roaring.Bitmap, head
 	}
 	header = append(header, langByte, 0, 0, 0)
 	if _, err := dst.Write(header); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := dst.Write(routerBytes); err != nil {
-		return err
+		return nil, err
 	}
 	for _, b := range bs {
 		if _, err := dst.Write(b.bytes); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	_, err := dst.Write(region.Bytes())
-	return err
+	if _, err := dst.Write(region.Bytes()); err != nil {
+		return nil, err
+	}
+	return dict, nil
 }

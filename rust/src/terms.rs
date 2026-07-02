@@ -1012,6 +1012,28 @@ mod tests {
         assert!(tokenize("").is_empty());
     }
 
+    /// The Rust stemming tokenizer must reproduce the committed per-language golden that
+    /// `go/terms_stem_test.go` also asserts — pinning both ports' `Language -> stemmer` mapping
+    /// to one golden (regenerate via the `gen_tokenizer_stem_golden` example if it intentionally
+    /// changes). Guards against the Rust tokenizer drifting from the committed file.
+    #[test]
+    fn tokenizer_stem_golden_matches() {
+        let golden = std::fs::read_to_string("../testdata/tokenizer_stem_golden.txt")
+            .expect("read testdata/tokenizer_stem_golden.txt");
+        let mut seen = 0;
+        for line in golden.lines().filter(|l| !l.trim().is_empty()) {
+            let mut cols = line.splitn(3, '\t');
+            let byte: u8 = cols.next().unwrap().parse().expect("language byte");
+            let input = cols.next().expect("input word");
+            let want: Vec<&str> = cols.next().unwrap_or("").split_whitespace().collect();
+            let lang = Language::from_u8(byte).expect("known language byte");
+            let got = Tokenizer::with(Some(lang), true, false, true).tokenize(input);
+            assert_eq!(got, want, "lang {byte} {input:?} drifted from the golden");
+            seen += 1;
+        }
+        assert_eq!(seen, 18, "golden must cover all 18 Snowball languages");
+    }
+
     #[test]
     fn tokenize_with_case_fold_off_keeps_case() {
         // case_fold on (the default) lowercases; off keeps the token verbatim.

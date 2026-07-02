@@ -65,3 +65,47 @@ boolean whole-word (presence, not tf) and English-only stemming, precisely becau
 of the two gaps above. Once (1) lands it can switch to BM25 impacts; once (2) lands
 its `iso639` map (already covering all 18) stems non-English corpora with no
 libcatalog-side change beyond flipping the `stem` flag.
+
+## Outcome (DONE)
+
+Both build-API gaps closed, no frozen on-disk layout touched; full Go suite, Go
+conformance module, and Rust `terms::`/`bm25::` tests all green.
+
+**(1) BM25 sidecar head-offsets now recoverable from a Go build.** Added
+`WriteTermIndexFullDict(...) ([]DictEntry, error)` (`terms.go`) -- the same writer as
+`WriteTermIndexFull`, additionally returning the dictionary in byte-lexicographic order with
+the *real* posting `HeadOff`s it front-codes into the `.rrt`. `WriteTermIndexFull` is now a
+thin error-only wrapper over it, so `WriteTermIndex`/`WriteTermIndexWith` and every existing
+caller (`termsplitsetbuild.go`, `stopwords_test.go`, and the external libcatalog) keep
+compiling unchanged -- strictly more source-compatible than mutating `WriteTermIndexFull`'s
+own signature (the task's option 1), which would have force-broken libcatalog. The bytes
+written to `dst` are identical to before (RRTI split-set goldens still pass).
+
+New round-trip golden `TestBM25SidecarAddressesPairedRRT` (`bm25_test.go`): builds a real
+`.rrt` via `WriteTermIndexFullDict`, feeds the returned dict straight to `WriteImpacts`, then
+proves correctness *independently of the writer's offset math* -- it parses the `.rrt`
+postings region and asserts each returned `HeadOff` lands exactly on that term's posting
+record (head bytes + tail length), then asserts the `.rrb` entries table keys on those same
+offsets in dict order with the posting's cardinality. This replaces the old
+fabricated-offset (`i*16+100`) coverage gap.
+
+**(2) All 18 Snowball languages now stem Go-side.** Added the `stemAlgorithm`
+`TermLanguage -> stemmers.Algorithm` map (`terms.go`) -- an explicit by-name map (the two enums
+number languages differently, so a numeric cast would silently mis-stem), mirroring the Rust
+`Language::algorithm` mapping one-to-one. `NewTermTokenizerFull` builds the stemmer for any
+mapped language (nil only for `TermLanguageNone`/unsupported), replacing the English-only
+hardcode.
+
+Byte-exact-vs-Rust proof: `rust/examples/gen_tokenizer_stem_golden.rs` tokenizes one
+non-trivially-stemming, distinct-rooted word per language through the Rust `Tokenizer::with`
+and emits `testdata/tokenizer_stem_golden.txt`. `TestTokenizerStemMatchesRustGolden`
+(`terms_stem_test.go`) asserts the Go tokenizer reproduces every line, and the symmetric Rust
+`terms::tests::tokenizer_stem_golden_matches` pins the Rust tokenizer to the same committed
+file (guards against either port drifting). `TestStemAlgorithmCoversAllLanguages` asserts the
+map is complete (18 entries), one-to-one (distinct algorithms), builds a non-nil stemmer for
+every byte 1..=18, and stays nil for `TermLanguageNone`.
+
+Files: `terms.go`, `terms_stem_test.go` (new), `bm25_test.go`,
+`rust/examples/gen_tokenizer_stem_golden.rs` (new), `rust/src/terms.rs` (test only),
+`testdata/tokenizer_stem_golden.txt` (new golden). libcatalog can now switch its v1 lexical
+index to BM25 impacts and stem non-English corpora with no further core change.
