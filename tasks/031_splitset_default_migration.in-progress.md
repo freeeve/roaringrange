@@ -105,9 +105,33 @@ for deleting the trigram monolith.
       REMAINING (separate, non-blocking): lite manifest regen — the `?ds=lite`
       config still points at the flat `openalex-trigram-split/`, which keeps working,
       so the flat set stays on S3 for `?ds=lite` + `?split=0` deep links.
-- [ ] Split cursor/count contract: `RrssIndex` exposes ranked lists only — no
-      paging cursor, no `countEstimate`, no `facetCounts`. The demo's count line
-      and facet checkboxes silently degrade in split mode.
+- [~] Split cursor/count contract: `RrssIndex` exposed ranked lists only. **Mostly
+      closed 2026-07-02.**
+      - `facetCounts` — was ALREADY shipped (`SplitSet::facet_counts` + wasm
+        `RrssIndex.facetCounts`, wired in the demo's split path); the item text was
+        stale. Facet checkboxes do NOT degrade in split mode.
+      - `countEstimate` — **CORE + WASM DONE** (`SplitSet::count_estimate(resolver,
+        query) -> (u64, bool)` + wasm `RrssIndex.countEstimate` → `{count, exact}`).
+        Sums each non-Bloom-pruned split's header-only `Index::count_estimate` over the
+        disjoint global id ranges: single-trigram over a base-only, tombstone-free set →
+        **exact** corpus total; multi-trigram or deltas/tombstones → a `≤` upper bound
+        (`exact=false`). Term-bodied sets return `Unsupported`. 3 core tests
+        (exact/bound/short-query + term-body reject); clippy `-D warnings` + wasm32 clean.
+      - **DEMO WIRING DEFERRED** — a UX call for the maintainer. Live probe over the
+        19-split geo set (`examples/probe_split_count.rs`, since removed) measured
+        `count_estimate` at **4.5–6.2 MB / 190–437 requests, COLD** (the geo manifest
+        is summary-stripped → no per-split Bloom, so it cold-opens all 19 splits; each
+        `Index::open` pulls that split's resident sparse index). That's ~1000× the bytes
+        and ~50× the requests of the monolith's KB-scale header count, so firing it
+        EAGERLY on every keystroke-triggered split search (as first drafted) is too
+        costly — and for a common multi-trigram query it only yields a loose,
+        substring-inflated bound (`≤ 2.16M` for "roaring bitmaps", `≤ 19.3M` for
+        "machine learning"). Options for later: an on-demand "[count all]" affordance
+        (mirroring the monolith's expensive "exact count" button), or leave the honest
+        capped `N+`. Meanwhile the count line keeps showing `N+` in split mode.
+      - **Paging cursor still deferred**: `RrssIndex.search` returns a flat SEM_K
+        ranked window with no deep-paging cursor. Low value (few page past 250 ranked
+        hits) + a bigger change.
 - [x] DECISION (2026-06-11): **server (Lambda) is the trigram DEFAULT** on the
       full dataset (~1–3 KB / sub-second warm vs dozens of client reads);
       split set stays the client-side default behind the toggle (`?srv=0`).

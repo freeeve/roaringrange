@@ -2264,6 +2264,32 @@ impl RrssIndex {
         Ok(field_counts_to_js(&counts))
     }
 
+    /// A header-only count estimate for `query` across the whole split set — `{ count, exact }`,
+    /// the same shape as `RrsIndex.countEstimate`. `exact` is true only for a single-n-gram query
+    /// over a base-only, tombstone-free set; otherwise `count` is an upper bound (summed per-split
+    /// minima, or an over-count once deltas/tombstones supersede base docs). Reads only roaring
+    /// descriptive headers (KBs per surviving split); Bloom-pruned splits cost no fetch. The count
+    /// is over the unfiltered query (no facet filter is applied); term-bodied split sets have no
+    /// header-only count primitive and reject with an error. Resolves to `{ count, exact }`.
+    #[wasm_bindgen(js_name = countEstimate)]
+    pub async fn count_estimate(&self, query: &str) -> Result<CountEstimate, JsError> {
+        let resolver = WasmSplitResolver {
+            base: self.base.clone(),
+            bloom: self.bloom.clone(),
+            #[cfg(feature = "hotcache")]
+            hc: self.hc.clone(),
+        };
+        let (count, exact) = self
+            .inner
+            .count_estimate(&resolver, query)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(CountEstimate {
+            count: count as f64,
+            exact,
+        })
+    }
+
     /// Number of splits named by the manifest (base + delta).
     #[wasm_bindgen(js_name = splitCount)]
     pub fn split_count(&self) -> usize {

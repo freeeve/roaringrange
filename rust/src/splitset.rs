@@ -847,6 +847,67 @@ impl SplitSet {
         Ok(fields)
     }
 
+    /// A header-only estimate of how many documents match `query` across the whole set, mirroring
+    /// [`Index::count_estimate`]'s per-split contract and summing over the splits' disjoint global
+    /// id ranges. Returns `(count, exact)`:
+    ///
+    /// - **exact** (`true`) only for a **single-n-gram** query over a **base-only, tombstone-free**
+    ///   set: each split then reports its posting's exact cardinality and the disjoint ranges make
+    ///   the sum the true corpus total.
+    /// - otherwise an **upper bound** (`false`): a multi-n-gram query sums each split's smallest
+    ///   per-key cardinality (an upper bound on that split's strict-AND intersection), and delta
+    ///   splits / tombstones can supersede base docs so the base+delta sum over-counts.
+    ///
+    /// Reads only roaring descriptive headers (KBs per surviving split); Bloom-pruned splits are
+    /// skipped with no fetch. Not valid for fuzzy matching. **Term-bodied** split sets have no
+    /// header-only count primitive and return [`IndexError::Unsupported`] (mirroring
+    /// [`search_split_filtered`](Self::search_split_filtered)'s term gap). Facet filters are not
+    /// applied — the count is over the unfiltered query, like [`Index::count_estimate`].
+    pub async fn count_estimate<R: SplitFetcher>(
+        &self,
+        resolver: &R,
+        query: &str,
+    ) -> Result<(u64, bool), IndexError> {
+        if self.body_kind == BodyKind::Term {
+            return Err(IndexError::Unsupported(
+                "count_estimate is not supported on term-bodied split sets",
+            ));
+        }
+        // The same n-gram keys the search path derives — for Bloom pruning and the single-key
+        // exactness test. Empty (query too short / no recorded gram size) matches nothing, exactly
+        // as `Index::count_estimate` treats it.
+        let keys = ngram_keys_with(query, self.gram_size as usize, self.case_fold);
+        if keys.is_empty() {
+            return Ok((0, true));
+        }
+        // Sum each non-Bloom-pruned split's own header-only count estimate in one concurrent wave;
+        // each split's `Index` re-derives the same keys (shared gram size / case folding).
+        let survivors: Vec<&Split> = self
+            .splits
+            .iter()
+            .filter(|s| !self.pruned_by_bloom(s, &keys))
+            .collect();
+        let counts = join_all(survivors.into_iter().map(|s| async move {
+            match open_split(resolver, s, self.body_kind).await? {
+                SplitBody::Trigram(idx) => idx.count_estimate(query).await.map(|(c, _)| c),
+                #[cfg(feature = "terms")]
+                SplitBody::Term(_) => Err(IndexError::Unsupported(
+                    "count_estimate is not supported on term-bodied split sets",
+                )),
+            }
+        }))
+        .await;
+        let mut total: u64 = 0;
+        for c in counts {
+            total = total.saturating_add(c?);
+        }
+        // Exact only when every split reported an exact count (a single key) AND no supersession
+        // can shrink the base+delta sum.
+        let exact =
+            keys.len() == 1 && self.delta_splits().is_empty() && self.flags & FLAG_TOMBSTONES == 0;
+        Ok((total, exact))
+    }
+
     /// Tiered top-K: the base splits are in `(tier, docIdLo)` order — i.e. rank order — and
     /// hold disjoint, increasing global id ranges, so the global top-K is just the
     /// concatenation of each split's local top-`remaining`. The loop **stops opening splits**
@@ -1516,6 +1577,74 @@ mod tests {
 
     fn open_built(built: &BuiltSplitSet) -> SplitSet {
         block_on(SplitSet::open(MemoryFetch::new(built.manifest.clone()))).unwrap()
+    }
+
+    #[test]
+    fn count_estimate_sums_per_split_and_flags_exactness() {
+        // 60 docs all containing "abc" with a unique per-doc token; a small byte cap forces
+        // several splits so the estimate must sum across them.
+        let mut b = SplitSetBuilder::new(SplitBuildConfig::new(Policy::Tiered, 4096, 3, "corpus"));
+        let n = 60u32;
+        for i in 0..n {
+            b.add_text(&format!("abc unq{i:04}")).unwrap();
+        }
+        let built = b.finish().unwrap();
+        assert!(
+            built.splits.len() > 1,
+            "byte cap should force multiple splits"
+        );
+        let ss = open_built(&built);
+        let resolver = resolver_from(&built, &[]);
+
+        // Single-trigram "abc": every doc matches, base-only, no tombstones -> the summed
+        // per-split cardinalities are the exact corpus total.
+        assert_eq!(
+            block_on(ss.count_estimate(&resolver, "abc")).unwrap(),
+            (60, true)
+        );
+        // A single trigram no doc holds -> 0, still exact.
+        assert_eq!(
+            block_on(ss.count_estimate(&resolver, "zzz")).unwrap(),
+            (0, true)
+        );
+        // A multi-trigram query -> an upper bound (never undercounts the true AND result),
+        // flagged inexact.
+        let true_count = block_on(ss.search(&resolver, "abc unq", 1000))
+            .unwrap()
+            .len() as u64;
+        let (mc, me) = block_on(ss.count_estimate(&resolver, "abc unq")).unwrap();
+        assert!(!me, "a multi-key estimate is an upper bound, not exact");
+        assert!(
+            mc >= true_count,
+            "estimate {mc} must not undercount the true count {true_count}"
+        );
+        // A query too short to form an n-gram -> (0, true), mirroring Index::count_estimate.
+        assert_eq!(
+            block_on(ss.count_estimate(&resolver, "ab")).unwrap(),
+            (0, true)
+        );
+    }
+
+    #[cfg(feature = "terms")]
+    #[test]
+    fn count_estimate_rejects_term_bodied_splits() {
+        use crate::splitset_build::{TermSplitBuildConfig, TermSplitSetBuilder};
+        let mut b =
+            TermSplitSetBuilder::new(TermSplitBuildConfig::new(Policy::Tiered, 4096, "corpus"));
+        for i in 0..10u32 {
+            b.add_text(&format!("alpha beta tok{i}")).unwrap();
+        }
+        let built = b.finish().unwrap();
+        let ss = open_built(&built);
+        let resolver = resolver_from(&built, &[]);
+        // Term bodies have no header-only count primitive -> a clear Unsupported, not a wrong count.
+        assert!(
+            matches!(
+                block_on(ss.count_estimate(&resolver, "alpha")),
+                Err(IndexError::Unsupported(_))
+            ),
+            "term-bodied count_estimate should be Unsupported"
+        );
     }
 
     #[test]
