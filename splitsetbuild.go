@@ -239,16 +239,9 @@ func (b *SplitSetBuilder) seal() error {
 	}
 	// Per-split facet sidecar (RRSF) + facet-presence summary (tag 2), when the split holds facets.
 	// Order matches Rust: the Bloom record (tag 1) first, then the facet-presence record (tag 2).
-	if len(b.openFacets) > 0 {
-		summary = append(summary, tlvRecord(summaryTagFacet, facetPresence(b.openFacets, !b.cfg.CaseSensitive))...)
-		var fbuf bytes.Buffer
-		if err := WriteFacetsWith(&fbuf, openFacetFields(b.openFacets), !b.cfg.CaseSensitive); err != nil {
-			return err
-		}
-		b.facetBlobs = append(b.facetBlobs, NamedSplit{
-			Name:  fmt.Sprintf("%s-s%05d.rrf", b.cfg.NamePrefix, idx),
-			Bytes: fbuf.Bytes(),
-		})
+	var ferr error
+	if summary, ferr = sealFacetSidecar(b.openFacets, summary, &b.facetBlobs, b.cfg.NamePrefix, idx, !b.cfg.CaseSensitive); ferr != nil {
+		return ferr
 	}
 	blob := buf.Bytes()
 	b.specs = append(b.specs, SplitSpec{
@@ -316,6 +309,27 @@ func openFacetFields(facets map[string]map[string]*roaring.Bitmap) []FacetField 
 		fields = append(fields, FacetField{Name: name, Categories: fcats})
 	}
 	return fields
+}
+
+// sealFacetSidecar is the facet half of both split builders' seal: when the open split holds
+// facets it appends the facet-presence TLV (tag 2) to summary and writes the ‹prefix›-s‹idx›.rrf
+// sidecar (appended to facetBlobs), else it leaves both untouched. Returns the extended summary.
+// caseFold is !CaseSensitive. Byte-identical to the inline form (append to a nil summary equals
+// assignment, so it serves both the Bloom-prefixed trigram summary and the term summary).
+func sealFacetSidecar(openFacets map[string]map[string]*roaring.Bitmap, summary []byte, facetBlobs *[]NamedSplit, namePrefix string, idx int, caseFold bool) ([]byte, error) {
+	if len(openFacets) == 0 {
+		return summary, nil
+	}
+	summary = append(summary, tlvRecord(summaryTagFacet, facetPresence(openFacets, caseFold))...)
+	var fbuf bytes.Buffer
+	if err := WriteFacetsWith(&fbuf, openFacetFields(openFacets), caseFold); err != nil {
+		return nil, err
+	}
+	*facetBlobs = append(*facetBlobs, NamedSplit{
+		Name:  fmt.Sprintf("%s-s%05d.rrf", namePrefix, idx),
+		Bytes: fbuf.Bytes(),
+	})
+	return summary, nil
 }
 
 // Finish seals the final open split and serializes the manifest, returning the

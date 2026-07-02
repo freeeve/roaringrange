@@ -172,17 +172,9 @@ func (b *TermSplitSetBuilder) seal() error {
 	}
 	// Summary = facet-presence (tag 2) only; the term Bloom (tag 1) is deferred
 	// for term bodies, matching Rust.
-	var summary []byte
-	if len(b.openFacets) > 0 {
-		summary = tlvRecord(summaryTagFacet, facetPresence(b.openFacets, !b.cfg.CaseSensitive))
-		var fbuf bytes.Buffer
-		if err := WriteFacetsWith(&fbuf, openFacetFields(b.openFacets), !b.cfg.CaseSensitive); err != nil {
-			return err
-		}
-		b.facetBlobs = append(b.facetBlobs, NamedSplit{
-			Name:  fmt.Sprintf("%s-s%05d.rrf", b.cfg.NamePrefix, idx),
-			Bytes: fbuf.Bytes(),
-		})
+	summary, ferr := sealFacetSidecar(b.openFacets, nil, &b.facetBlobs, b.cfg.NamePrefix, idx, !b.cfg.CaseSensitive)
+	if ferr != nil {
+		return ferr
 	}
 	blob := buf.Bytes()
 	b.specs = append(b.specs, SplitSpec{

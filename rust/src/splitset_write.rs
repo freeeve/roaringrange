@@ -32,8 +32,9 @@ use crate::build::{serialize_posting, write_index_with, DEFAULT_STRIDE};
 use crate::index::{deserialize, read_u32, read_u64, IndexError};
 use crate::ngram::ngram_keys_with;
 use crate::splitset::{
-    bloom_build, tlv_record, Policy, SplitSet, FLAG_BLOOM, FLAG_CASE_SENSITIVE, FLAG_TOMBSTONES,
-    SPLIT_FLAG_ABSOLUTE_IDS, SPLIT_FLAG_HAS_TOMBSTONE, SUMMARY_TAG_BLOOM, SUMMARY_TAG_TOMBSTONE,
+    bloom_build, find_tlv, tlv_record, Policy, SplitSet, FLAG_BLOOM, FLAG_CASE_SENSITIVE,
+    FLAG_TOMBSTONES, SPLIT_FLAG_ABSOLUTE_IDS, SPLIT_FLAG_HAS_TOMBSTONE, SUMMARY_TAG_BLOOM,
+    SUMMARY_TAG_TOMBSTONE,
 };
 use crate::splitset_build::{write_splitset, SortColSpec, SplitSetConfig, SplitSpec};
 use roaring::RoaringBitmap;
@@ -515,30 +516,15 @@ fn tombstone_tlv(dead: &RoaringBitmap) -> Vec<u8> {
     let mut posting = Vec::with_capacity(dead.serialized_size());
     dead.serialize_into(&mut posting)
         .expect("serialize tombstone");
-    let mut tlv = Vec::with_capacity(5 + posting.len());
-    tlv.push(SUMMARY_TAG_TOMBSTONE);
-    tlv.extend_from_slice(&(posting.len() as u32).to_le_bytes());
-    tlv.extend_from_slice(&posting);
-    tlv
+    tlv_record(SUMMARY_TAG_TOMBSTONE, &posting)
 }
 
 /// Parses a tombstone posting out of a summary TLV byte region, or `None` if it has none.
 fn parse_tombstone(summary: &[u8]) -> io::Result<Option<RoaringBitmap>> {
-    let mut off = 0usize;
-    while off + 5 <= summary.len() {
-        let tag = summary[off];
-        let len = read_u32(summary, off + 1) as usize;
-        let start = off + 5;
-        let end = start
-            .checked_add(len)
-            .filter(|&e| e <= summary.len())
-            .ok_or_else(|| io::Error::other("RRSS compact: bad summary TLV length"))?;
-        if tag == SUMMARY_TAG_TOMBSTONE {
-            return deserialize(&summary[start..end]).map(Some).map_err(to_io);
-        }
-        off = end;
+    match find_tlv(summary, SUMMARY_TAG_TOMBSTONE).map_err(to_io)? {
+        Some(bytes) => deserialize(bytes).map(Some).map_err(to_io),
+        None => Ok(None),
     }
-    Ok(None)
 }
 
 /// Parses every `(key, full posting)` out of an `RRS` split blob — the all-entries enumerate

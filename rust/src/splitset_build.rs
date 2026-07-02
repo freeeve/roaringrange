@@ -387,6 +387,38 @@ fn facet_fields(
         .collect()
 }
 
+/// Seals a split's facet sidecar, shared by both split builders' `seal`: when the split
+/// indexed any facet values, appends the facet-presence TLV (tag 2) to `summary` (so a
+/// facet-filtered query can skip this split without a fetch), writes the `‹prefix›-s‹idx›.rrf`
+/// sidecar over the categories' local ids, and pushes it to `facet_blobs`. A no-op (leaving
+/// `summary` untouched) when the split has no facets. Byte-identical to the inline form.
+fn seal_facet_sidecar(
+    open_facets: BTreeMap<String, BTreeMap<String, RoaringBitmap>>,
+    summary: &mut Vec<u8>,
+    facet_blobs: &mut NamedFiles,
+    name_prefix: &str,
+    idx: usize,
+    head_boundary: u32,
+    case_normalization: bool,
+) -> io::Result<()> {
+    if open_facets.is_empty() {
+        return Ok(());
+    }
+    summary.extend_from_slice(&tlv_record(
+        SUMMARY_TAG_FACET,
+        &facet_presence(&open_facets, case_normalization),
+    ));
+    let facet_name = format!("{name_prefix}-s{idx:05}.rrf");
+    let mut facet_bytes = Vec::new();
+    write_facets_with(
+        &mut facet_bytes,
+        facet_fields(open_facets, head_boundary),
+        case_normalization,
+    )?;
+    facet_blobs.push((facet_name, facet_bytes));
+    Ok(())
+}
+
 /// Appends a UTF-8 name to `blob` and returns its `(offset, length)` span, erroring if the
 /// offset or length overflows the manifest's 32-/16-bit fields.
 fn push_name(blob: &mut Vec<u8>, name: &str) -> io::Result<(u32, u16)> {
@@ -680,20 +712,15 @@ impl SplitSetBuilder {
         }
         // Seal the split's facet sidecar (its categories over local ids) and the presence list.
         let open_facets = std::mem::take(&mut self.open_facets);
-        if !open_facets.is_empty() {
-            summary.extend_from_slice(&tlv_record(
-                SUMMARY_TAG_FACET,
-                &facet_presence(&open_facets, self.case_normalization),
-            ));
-            let facet_name = format!("{}-s{idx:05}.rrf", self.name_prefix);
-            let mut facet_bytes = Vec::new();
-            write_facets_with(
-                &mut facet_bytes,
-                facet_fields(open_facets, self.head_boundary),
-                self.case_normalization,
-            )?;
-            self.facet_blobs.push((facet_name, facet_bytes));
-        }
+        seal_facet_sidecar(
+            open_facets,
+            &mut summary,
+            &mut self.facet_blobs,
+            &self.name_prefix,
+            idx,
+            self.head_boundary,
+            self.case_normalization,
+        )?;
         self.specs.push(SplitSpec {
             data_file: name.clone(),
             tier,
@@ -1015,20 +1042,15 @@ impl TermSplitSetBuilder {
         // Summary = facet-presence (tag 2) only; the term Bloom (tag 1) is deferred for term bodies.
         let mut summary = Vec::new();
         let open_facets = std::mem::take(&mut self.open_facets);
-        if !open_facets.is_empty() {
-            summary.extend_from_slice(&tlv_record(
-                SUMMARY_TAG_FACET,
-                &facet_presence(&open_facets, self.case_normalization),
-            ));
-            let facet_name = format!("{}-s{idx:05}.rrf", self.name_prefix);
-            let mut facet_bytes = Vec::new();
-            write_facets_with(
-                &mut facet_bytes,
-                facet_fields(open_facets, self.head_boundary),
-                self.case_normalization,
-            )?;
-            self.facet_blobs.push((facet_name, facet_bytes));
-        }
+        seal_facet_sidecar(
+            open_facets,
+            &mut summary,
+            &mut self.facet_blobs,
+            &self.name_prefix,
+            idx,
+            self.head_boundary,
+            self.case_normalization,
+        )?;
         self.specs.push(SplitSpec {
             data_file: name.clone(),
             tier,

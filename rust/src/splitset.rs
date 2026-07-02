@@ -727,6 +727,22 @@ impl SplitSet {
         for r in delta_results {
             delta.extend(r?);
         }
+        self.merge_supersede_rank(resolver, base, delta, limit)
+            .await
+    }
+
+    /// Supersede-and-rank the base+delta merge: drop every tombstoned doc, rank the base
+    /// survivors by policy (Tiered = ascending global id == rank; StableKey = the sort-column
+    /// top-k over all of them), append the delta survivors in ingest order, and truncate to
+    /// `limit`. Shared by the filtered ([`search_filtered`](Self::search_filtered)) and
+    /// unfiltered ([`search_with_delta`](Self::search_with_delta)) merge paths.
+    async fn merge_supersede_rank<R: SplitFetcher>(
+        &self,
+        resolver: &R,
+        mut base: Vec<u32>,
+        mut delta: Vec<u32>,
+        limit: usize,
+    ) -> Result<Vec<u32>, IndexError> {
         let mut dead = RoaringBitmap::new();
         for split in self.splits() {
             if let Some(tb) = self.tombstone(split)? {
@@ -912,38 +928,11 @@ impl SplitSet {
         let base = self
             .search_all(resolver, self.base_splits(), query, keys)
             .await?;
-        let mut delta = self
+        let delta = self
             .search_all(resolver, self.delta_splits(), query, keys)
             .await?;
-
-        // Dead set: the union of every split's tombstone posting (typically the deltas').
-        let mut dead = RoaringBitmap::new();
-        for split in self.splits() {
-            if let Some(tb) = self.tombstone(split)? {
-                dead |= tb;
-            }
-        }
-        let live = |ids: Vec<u32>| -> Vec<u32> {
-            ids.into_iter().filter(|id| !dead.contains(*id)).collect()
-        };
-
-        let mut ranked = match self.policy {
-            Policy::Tiered => {
-                let mut b = live(base);
-                b.sort_unstable(); // global id == rank
-                b
-            }
-            Policy::StableKey => {
-                let b = live(base);
-                let n = b.len();
-                self.rank_stable_key(resolver, b, n).await?
-            }
-        };
-        delta = live(delta);
-        delta.sort_unstable(); // newest tier appended in ingest order
-        ranked.extend(delta);
-        ranked.truncate(limit);
-        Ok(ranked)
+        self.merge_supersede_rank(resolver, base, delta, limit)
+            .await
     }
 
     /// Opens and searches every split in `splits` in one concurrent wave (full strict-AND, no
