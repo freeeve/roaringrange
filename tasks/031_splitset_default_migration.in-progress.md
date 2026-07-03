@@ -49,12 +49,23 @@ for deleting the trigram monolith.
       the unsatisfiable case collapsed to "field not in sidecars", which the
       demo now routes to the post-filter. Revisit only if a truly absent
       (field, cat) filter shows up hot.
-- [ ] Budgeted/progressive tiered descent: a sparse query currently opens splits
-      tier-by-tier with no first-paint bias or scan-cost cap — mirror the
-      monolith cursor's `TAIL_WINDOWS_PER_CALL` contract so the UI can stream.
-      ALSO: visit splits in **parallel waves** (e.g. 8 concurrent) — the 76 s
-      "roaring bitmaps" descent above is latency (243 × ~6 serial round-trips),
-      not bytes (675 KB). Both are prerequisites for term-split default.
+- [~] Budgeted/progressive tiered descent:
+      - **Parallel waves — DONE 2026-07-02.** `search_tiered` (and
+        `search_filtered`'s tiered path) now open the top split alone (so a common
+        top-K query that fills tier 0 keeps the exact `remaining` bandwidth cap and
+        pays no over-open), then descend the tail tiers in bounded concurrent waves
+        of `DESCENT_WAVE` (8). Splits hold disjoint, rank-ordered id ranges, so
+        concatenating each wave in split order and truncating yields the IDENTICAL
+        top-K a serial descent would — a wave only trades a bounded per-wave over-open
+        (≤ `DESCENT_WAVE−1` extra splits, each asked for the full `limit`) for far
+        lower round-trip latency. The lazy global-Bloom gate + per-split Bloom/facet
+        pruning are preserved. Tests: cross-wave rank-order identity at several page
+        sizes + the early-stop test reframed to wave granularity. The latency win
+        manifests in the browser's async `fetch` runtime; a native serial-curl probe
+        can't show it, so correctness (identity) is the tested property.
+      - **Progressive / first-paint streaming still deferred**: mirroring the monolith
+        cursor's `TAIL_WINDOWS_PER_CALL` so the UI streams results needs a cursor-like
+        contract the `RrssIndex` flat-list path lacks (see the paging-cursor item).
 - [~] **Geometric split sizing** (2026-06-11): worst-case descent scales with
       split COUNT (fixed ~4–6 RTTs per split), so retarget from 243×~270 MB
       flat to doubling tiers. Target ≤20 splits per the user's call: base

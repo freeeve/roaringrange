@@ -63,6 +63,13 @@ pub const SPLIT_FLAG_ABSOLUTE_IDS: u16 = 1 << 1;
 /// [`SplitSet::count_exact`]) from asking for an allocation that overflows.
 const PREALLOC_CAP: usize = 1 << 16;
 
+/// How many tail-tier splits a tiered descent opens **concurrently** once the top tier hasn't
+/// filled the page. A deep descent's cost is round-trip latency — each split is a fresh open —
+/// not bytes, so a wave collapses N serial round-trips into `ceil(N / DESCENT_WAVE)`. The top
+/// split is always opened alone first, so a common top-K query that fits in tier 0 keeps the
+/// exact per-split `remaining` bandwidth cap and pays no wave over-open.
+const DESCENT_WAVE: usize = 8;
+
 /// Summary TLV tag for a term Bloom filter (skip a split whose vocabulary can't contain a
 /// query n-gram). Matches `SPLITSET.md` §summary blob.
 pub(crate) const SUMMARY_TAG_BLOOM: u8 = 1;
@@ -672,32 +679,49 @@ impl SplitSet {
             // `usize::MAX` and `Vec::with_capacity(usize::MAX)` would overflow. The vec still
             // grows via `push` to hold every hit.
             let mut out: Vec<u32> = Vec::with_capacity(limit.min(PREALLOC_CAP));
-            for (i, split) in self.base_splits().iter().enumerate() {
+            let splits = self.base_splits();
+            if splits.is_empty() {
+                return Ok(out);
+            }
+            // The top split alone — the common-case bandwidth cap, no wave over-open.
+            if survives(&splits[0])? {
+                out.extend(
+                    self.search_split_filtered(resolver, &splits[0], query, filter, limit)
+                        .await?,
+                );
+                out.truncate(limit);
+            }
+            if out.len() >= limit {
+                return Ok(out);
+            }
+            // Same lazy global-Bloom gate as the unfiltered descent: an empty top tier + a
+            // definitively-absent term ends the descent before opening the tail tiers.
+            if out.is_empty() && !self.global_bloom_says_present(resolver, &keys).await {
+                return Ok(out);
+            }
+            // Tail tiers in bounded concurrent waves — the same disjoint, rank-ordered ranges as
+            // the unfiltered [`search_tiered`], so concatenating each wave in split order and
+            // truncating yields the identical top-K, trading a bounded over-open for latency.
+            // `keys`/`fields` are owned here (unlike `search_tiered`'s slice params), so hand each
+            // future a Copy slice reference rather than moving the vecs.
+            let (keys_r, fields_r) = (keys.as_slice(), fields.as_slice());
+            for wave in splits[1..].chunks(DESCENT_WAVE) {
                 if out.len() >= limit {
                     break;
                 }
-                // Same lazy global-Bloom gate as the unfiltered tiered loop: an empty
-                // top tier + a definitively-absent term ends the descent.
-                if i == 1
-                    && out.is_empty()
-                    && !self.global_bloom_says_present(resolver, &keys).await
-                {
-                    return Ok(out);
-                }
-                if !survives(split)? {
-                    continue;
-                }
-                let remaining = limit - out.len();
-                for id in self
-                    .search_split_filtered(resolver, split, query, filter, remaining)
-                    .await?
-                {
-                    if out.len() >= limit {
-                        break;
+                let hits = join_all(wave.iter().map(|split| async move {
+                    if self.pruned_by_bloom(split, keys_r) || self.facet_pruned(split, fields_r)? {
+                        return Ok::<Vec<u32>, IndexError>(Vec::new());
                     }
-                    out.push(id);
+                    self.search_split_filtered(resolver, split, query, filter, limit)
+                        .await
+                }))
+                .await;
+                for h in hits {
+                    out.extend(h?);
                 }
             }
+            out.truncate(limit);
             return Ok(out);
         }
 
@@ -955,23 +979,48 @@ impl SplitSet {
     ) -> Result<Vec<u32>, IndexError> {
         // Cap the pre-allocation (not the result) so a `usize::MAX` limit can't overflow.
         let mut out: Vec<u32> = Vec::with_capacity(limit.min(PREALLOC_CAP));
-        for (i, split) in self.base_splits().iter().enumerate() {
+        let splits = self.base_splits();
+        if splits.is_empty() {
+            return Ok(out);
+        }
+        // The top split, alone: a common top-K query fills entirely from tier 0, so it pays no
+        // wave over-open and keeps the exact `remaining == limit` bandwidth cap.
+        if !self.pruned_by_bloom(&splits[0], keys) {
+            let idx = open_split(resolver, &splits[0], self.body_kind).await?;
+            let local = idx.search(query, limit).await?;
+            out.extend(local.into_iter().map(|l| splits[0].to_global(l)));
+        }
+        if out.len() >= limit {
+            out.truncate(limit); // tiered short-circuit — tier 0 filled the page
+            return Ok(out);
+        }
+        // An empty top tier is the rare/absent-term signal: consult the optional global Bloom
+        // once (k byte-probes per key) — a term absent from the whole set's vocabulary ends the
+        // descent here instead of opening every tail split.
+        if out.is_empty() && !self.global_bloom_says_present(resolver, keys).await {
+            return Ok(out);
+        }
+        // Descend the tail tiers in bounded concurrent waves. Splits hold disjoint, rank-ordered
+        // id ranges, so concatenating each wave's hits in split order and truncating to `limit`
+        // yields the SAME top-K a serial descent would — waves only trade a bounded over-open
+        // (at most `DESCENT_WAVE - 1` extra splits, each asked for the full `limit` since the
+        // exact remaining isn't known mid-wave) for far lower round-trip latency.
+        for wave in splits[1..].chunks(DESCENT_WAVE) {
             if out.len() >= limit {
-                break; // tiered short-circuit — the cold tiers leave the hot path
+                break;
             }
-            // An empty top tier is the rare/absent-term signal: consult the optional
-            // global Bloom once (k byte-probes per key) — a term absent from the whole
-            // set's vocabulary ends the descent here instead of opening every split.
-            if i == 1 && out.is_empty() && !self.global_bloom_says_present(resolver, keys).await {
-                return Ok(out);
+            let hits = join_all(wave.iter().map(|split| async move {
+                if self.pruned_by_bloom(split, keys) {
+                    return Ok::<Vec<u32>, IndexError>(Vec::new());
+                }
+                let idx = open_split(resolver, split, self.body_kind).await?;
+                let local = idx.search(query, limit).await?;
+                Ok(local.into_iter().map(|l| split.to_global(l)).collect())
+            }))
+            .await;
+            for h in hits {
+                out.extend(h?);
             }
-            if self.pruned_by_bloom(split, keys) {
-                continue; // the split's vocabulary can't contain a query n-gram — no fetch
-            }
-            let remaining = limit - out.len();
-            let idx = open_split(resolver, split, self.body_kind).await?;
-            let local = idx.search(query, remaining).await?;
-            out.extend(local.into_iter().map(|l| split.to_global(l)));
         }
         out.truncate(limit);
         Ok(out)
@@ -1688,6 +1737,33 @@ mod tests {
         assert_eq!(block_on(ss.count_exact(&resolver, "zzz", &[])).unwrap(), 0);
     }
 
+    #[test]
+    fn tiered_descent_across_wave_boundaries_matches_rank_order() {
+        // Enough splits to cross several DESCENT_WAVE boundaries so the parallel-wave descent is
+        // exercised end to end. Every doc matches "abc", so the result must be exact global rank
+        // order (0,1,2,…) no matter where a wave boundary falls or how many splits open at once.
+        let mut b = SplitSetBuilder::new(SplitBuildConfig::new(Policy::Tiered, 2048, 3, "corpus"));
+        let n = 200u32;
+        for i in 0..n {
+            b.add_text(&format!("abc unq{i:05}")).unwrap();
+        }
+        let built = b.finish().unwrap();
+        assert!(
+            built.splits.len() > DESCENT_WAVE + 1,
+            "need multiple waves (got {} splits)",
+            built.splits.len()
+        );
+        let ss = open_built(&built);
+        let resolver = resolver_from(&built, &[]);
+        // Page sizes that fill in tier 0 (phase 1), stop mid-descent across a wave (phase 2),
+        // and exhaust every split — each returns exactly the top-`limit` global ids in rank order.
+        for limit in [3usize, 30, 100, 200] {
+            let got = block_on(ss.search(&resolver, "abc", limit)).unwrap();
+            let want: Vec<u32> = (0..limit.min(n as usize) as u32).collect();
+            assert_eq!(got, want, "limit={limit}");
+        }
+    }
+
     #[cfg(feature = "terms")]
     #[test]
     fn count_estimate_rejects_term_bodied_splits() {
@@ -2298,13 +2374,17 @@ mod tests {
             case_sensitive: false,
         });
         let f = |lang: &str| vec![("lang".to_string(), lang.to_string())];
-        for i in 0..8u32 {
+        // Enough docs to span several DESCENT_WAVE-sized waves, so a bounded page stops whole
+        // waves short of a full descent (the wave descent trades a bounded per-wave over-open for
+        // latency, so early-stop holds at WAVE granularity, not per split).
+        let n = 40u32;
+        for i in 0..n {
             b.add_faceted(&format!("abc en{i}"), &f("en")).unwrap();
         }
         let built = b.finish().unwrap();
         assert!(
-            built.splits.len() >= 3,
-            "need several splits for an early-stop, got {}",
+            built.splits.len() > 2 * DESCENT_WAVE,
+            "need several waves for an early-stop, got {} splits",
             built.splits.len()
         );
         let ss = open_built(&built);
@@ -2321,17 +2401,18 @@ mod tests {
         };
 
         // Full page: every en doc in ascending (rank) order.
-        let full = block_on(ss.search_filtered(&resolver(), "abc", &f("en"), 100)).unwrap();
-        assert_eq!(full, (0..8).collect::<Vec<u32>>());
+        let full = block_on(ss.search_filtered(&resolver(), "abc", &f("en"), 1000)).unwrap();
+        assert_eq!(full, (0..n).collect::<Vec<u32>>());
 
-        // A small page equals the full page truncated -- per-split bounding never drops/reorders.
+        // A small page equals the full page truncated -- per-wave bounding never drops/reorders.
         let r_small = resolver();
         let small = block_on(ss.search_filtered(&r_small, "abc", &f("en"), 3)).unwrap();
         assert_eq!(small, full[..3].to_vec());
 
-        // Early stop: the small page opens strictly fewer splits than the full page.
+        // Early stop: the small page fills within the first wave, so it opens strictly fewer
+        // splits than the full descent across every wave.
         let r_full = resolver();
-        let _ = block_on(ss.search_filtered(&r_full, "abc", &f("en"), 100)).unwrap();
+        let _ = block_on(ss.search_filtered(&r_full, "abc", &f("en"), 1000)).unwrap();
         assert!(
             r_small.opens.get() < r_full.opens.get(),
             "small page opened {} files, full page {}",
