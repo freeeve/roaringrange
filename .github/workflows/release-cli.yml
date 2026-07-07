@@ -7,8 +7,9 @@ name: Release (CLI)
 #
 # Secrets: GITHUB_TOKEN (built in) uploads the release assets;
 # HOMEBREW_TAP_GITHUB_TOKEN (a PAT with contents:write on freeeve/homebrew-tap)
-# lets GoReleaser commit the formula. If the tap token is absent the brew step
-# fails but the binaries still publish — remove the brews block or add the secret.
+# lets GoReleaser commit the cask. When that secret is absent the run passes
+# --skip=homebrew, so the binaries + checksums still publish and the release stays
+# green; add the secret (and re-tag or re-run) to also publish the brew cask.
 on:
   push:
     tags: ['v*']
@@ -30,7 +31,7 @@ jobs:
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: '~> v2'
-          args: release --clean
+          args: release --clean ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN == '' && '--skip=homebrew' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
