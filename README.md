@@ -139,6 +139,34 @@ byte format directly. The n-gram key derivation is reproduced independently in G
 (here), Go (roaringsearch), and Rust (the reader); the `go/conformance/` module is
 the guard that keeps all three byte-compatible.
 
+## Command-line inspector
+
+`roaringrange` is a CLI that inspects any of these files: it auto-detects the format
+from the 4-byte magic and dumps or converts the contents to JSON.
+
+```console
+# macOS / Linux (Homebrew):
+brew install freeeve/tap/roaringrange
+
+# any platform with a Go toolchain:
+go install github.com/freeeve/roaringrange/cmd/roaringrange@latest
+
+# or download a prebuilt binary (macOS/Linux/Windows, amd64/arm64) from
+# https://github.com/freeeve/roaringrange/releases
+```
+
+```console
+roaringrange info    index.rrt                 # header summary for any format
+roaringrange dump    facets.rrf --json         # full structural dump as JSON
+roaringrange dump    terms.rrt  --postings --limit 20
+roaringrange records store.idx store.bin --dict store.dict --id 0
+roaringrange get     terms.rrt  --term roaring # look up one key's posting
+```
+
+`info` and `dump` work on every format (RRSI, RRSR, RRTI, RRVI, RRVR, RRSF, RRSB,
+RRSS, RRHC, RRSC, RRIL); `--postings` includes bitmap/vector contents,
+`--limit/--offset` page large tables.
+
 ## Quick start
 
 **Build an index** — two paths to the same files. Assign doc IDs in descending

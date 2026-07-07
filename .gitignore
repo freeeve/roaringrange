@@ -41,3 +41,6 @@ resume_multipart.py
 
 # built CLI binary
 /roaringrange
+
+# goreleaser build output
+/dist/

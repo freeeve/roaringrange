@@ -1,0 +1,69 @@
+# GoReleaser config for the `roaringrange` inspector CLI (cmd/roaringrange).
+#
+# Runs on a vX.Y.Z tag (see .github/workflows/release-cli.yml) alongside the PyPI
+# wheel release: it builds cross-platform CLI binaries, attaches them + checksums to
+# the GitHub Release for the tag, and updates the Homebrew tap formula. This repo is
+# primarily a Go library + Rust/Python bindings; only the CLI is packaged here.
+#
+# `go install github.com/freeeve/roaringrange/cmd/roaringrange@latest` needs none of
+# this — it builds from source against the module tag directly.
+version: 2
+
+project_name: roaringrange
+
+builds:
+  - id: roaringrange
+    main: ./cmd/roaringrange
+    binary: roaringrange
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: default
+    # tar.gz everywhere except Windows, which gets a .zip.
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+# Homebrew tap (macOS). GoReleaser commits the generated cask to
+# github.com/freeeve/homebrew-tap on each release; users then:
+#   brew install freeeve/tap/roaringrange
+# Casts are macOS-only (Homebrew's preferred form for a prebuilt binary, replacing
+# the deprecated `brews` formula); Linux users use `go install` or the release
+# binaries. One-time setup: create the (public) `freeeve/homebrew-tap` repo and add a
+# HOMEBREW_TAP_GITHUB_TOKEN secret (a PAT with `contents:write` on that repo) to
+# this repo's Actions secrets. Windows is release-binaries-only (no Scoop/winget).
+homebrew_casks:
+  - name: roaringrange
+    repository:
+      owner: freeeve
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/freeeve/roaringrange"
+    description: "Inspect roaringrange index files: dump/convert to JSON"
+    # Skip publishing the cask for pre-release tags (e.g. v1.2.3-rc1).
+    skip_upload: auto
+    # Strip the Gatekeeper quarantine xattr so the unsigned binary runs without a
+    # "cannot be opened" prompt on first launch.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/roaringrange"]
+          end
+
+release:
+  # The tag's GitHub Release is shared with the PyPI workflow; GoReleaser only adds
+  # the CLI archives + checksums and never marks the whole release a failure if it
+  # already exists.
+  mode: append

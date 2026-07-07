@@ -1,0 +1,36 @@
+name: Release (CLI)
+
+# Build and publish the roaringrange inspector CLI (cmd/roaringrange) on a version
+# tag via GoReleaser: cross-platform binaries + checksums attached to the tag's
+# GitHub Release, and a Homebrew tap formula pushed to freeeve/homebrew-tap. Runs
+# alongside the PyPI wheel release (release.yml) on the same v* tag.
+#
+# Secrets: GITHUB_TOKEN (built in) uploads the release assets;
+# HOMEBREW_TAP_GITHUB_TOKEN (a PAT with contents:write on freeeve/homebrew-tap)
+# lets GoReleaser commit the formula. If the tap token is absent the brew step
+# fails but the binaries still publish — remove the brews block or add the secret.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # create/append the GitHub Release and upload assets
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # GoReleaser needs full history + tags for the changelog
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

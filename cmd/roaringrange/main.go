@@ -12,6 +12,11 @@ import (
 	rr "github.com/freeeve/roaringrange"
 )
 
+// version is the CLI version, stamped at release time via
+// -ldflags "-X main.version=...". It stays "dev" for a plain `go build`/`go install`
+// of an untagged tree.
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -27,6 +32,8 @@ func main() {
 		cmdRecords(args)
 	case "get":
 		cmdGet(args)
+	case "version", "--version", "-v":
+		fmt.Println(version)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -48,6 +55,8 @@ usage:
         decode records from an RRSR record store
   roaringrange get <file> [--key K | --term T | --id S | --head-off N] [--limit N]
         look up a single key and print its posting / value
+  roaringrange version
+        print the CLI version
 
 recognized formats: RRSI RRSR RRTI RRVI RRVR RRSF RRSB RRSS RRHC RRSC RRIL
 `)
