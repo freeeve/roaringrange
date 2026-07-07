@@ -38,3 +38,6 @@ python/scripts/embed_gemma_memmap.py
 dash.sh
 upload_s3.py
 resume_multipart.py
+
+# built CLI binary
+/roaringrange

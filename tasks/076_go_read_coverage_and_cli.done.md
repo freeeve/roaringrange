@@ -26,14 +26,20 @@ Testing per reader: Tier-1 round-trip against the writer + Tier-2 decode of the
 Rust-authored `testdata/*_build_golden.txt` where one exists (rril/rrsc/rrhc/rrss/
 rrsb/rrvi). All green (`go test ./...`).
 
-## Part B — CLI `cmd/roaringrange/` (TODO)
+## Part B — CLI `cmd/roaringrange/` (DONE)
 
-Plain package under the root module, stdlib `flag`, subcommand dispatch:
+Plain package under the root module, stdlib `flag` (with an interleaving parser so
+flags may follow positionals), subcommand dispatch. `info_builtin.go` registers the
+pre-existing RRSI/RRSR readers so all 12 formats auto-detect.
 - `info <file>` — auto-detect magic, print `FileInfo` (text/`--json`).
 - `dump <file>` — full structural dump as JSON, `--limit/--offset` paging,
-  `--postings` to include bitmap contents.
+  `--postings` to include bitmap/vector contents.
 - `records <idx> <bin> [--dict d] [--id N | --range a-b]` — decode record store.
 - `get <file>` — single-key lookup (`--key`/`--term`/`--id`/`--head-off`).
+
+CLI smoke test (`main_test.go`) builds the binary and drives info/dump over the
+goldens. Verified end-to-end against materialized golden fixtures for every format
+(incl. stemmed-Unicode RRTI terms and zstd-dict RRSR records).
 
 ## Verification
 
