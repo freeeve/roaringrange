@@ -11,15 +11,18 @@ import (
 
 // cmdGet looks up a single key and prints its posting or value as JSON. The lookup
 // kind is chosen by which flag is set: --key (RRSI n-gram / RRSF facet), --term
-// (RRTI), --id (RRIL identifier), or --head-off (RRSB impacts).
+// (RRTI exact), --prefix (RRTI prefix/autocomplete), --id (RRIL identifier), or
+// --head-off (RRSB impacts).
 func cmdGet(args []string) {
 	fs := newFlagSet("get")
 	key := fs.String("key", "", "n-gram/facet key (uint64) — RRSI or RRSF")
 	term := fs.String("term", "", "term — RRTI")
+	prefix := fs.String("prefix", "", "term prefix — RRTI")
+	terms := fs.Int("terms", 100, "max prefix-matched terms (with --prefix)")
 	id := fs.String("id", "", "identifier — RRIL")
 	headOff := fs.String("head-off", "", "posting head_off (uint64) — RRSB")
 	limit := fs.Int("limit", 0, "max doc ids to print (0 = all)")
-	pos := parse(fs, args, 1, "get <file> [--key K | --term T | --id S | --head-off N]")
+	pos := parse(fs, args, 1, "get <file> [--key K | --term T | --prefix P | --id S | --head-off N]")
 
 	f := openFile(pos[0])
 	defer f.Close()
@@ -33,12 +36,14 @@ func cmdGet(args []string) {
 		printJSON(getByKey(f, format.Magic, parseU64(*key), *limit))
 	case *term != "":
 		printJSON(getTerm(f, *term, *limit))
+	case *prefix != "":
+		printJSON(getPrefix(f, *prefix, *terms, *limit))
 	case *id != "":
 		printJSON(getID(f, *id))
 	case *headOff != "":
 		printJSON(getHeadOff(f, parseU64(*headOff)))
 	default:
-		fail("get needs one of --key / --term / --id / --head-off")
+		fail("get needs one of --key / --term / --prefix / --id / --head-off")
 	}
 }
 
@@ -113,6 +118,28 @@ func getTerm(f *os.File, term string, limit int) any {
 		return map[string]any{"term": term, "found": false}
 	}
 	return merge(map[string]any{"term": term, "found": true}, bitmapResult(bm, limit))
+}
+
+// getPrefix lists up to maxTerms prefix-matched dictionary terms with their
+// cardinalities and the union posting across them.
+func getPrefix(f *os.File, prefix string, maxTerms, limit int) any {
+	ti, err := rr.OpenTermIndex(f)
+	if err != nil {
+		fail("%v", err)
+	}
+	tps, truncated, err := ti.PrefixPostings(prefix, maxTerms)
+	if err != nil {
+		fail("%v", err)
+	}
+	union := roaring.New()
+	matched := make([]map[string]any, len(tps))
+	for i, tp := range tps {
+		matched[i] = map[string]any{"term": tp.Term, "cardinality": tp.Posting.GetCardinality()}
+		union.Or(tp.Posting)
+	}
+	return merge(map[string]any{
+		"prefix": prefix, "found": len(tps) > 0, "terms": matched, "termsTruncated": truncated,
+	}, bitmapResult(union, limit))
 }
 
 func getID(f *os.File, id string) any {

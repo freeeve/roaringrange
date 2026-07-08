@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -8,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/RoaringBitmap/roaring/v2"
+	rr "github.com/freeeve/roaringrange"
 )
 
 // buildCLI compiles the CLI to a temp binary once and returns its path.
@@ -74,6 +78,43 @@ func TestInfoAndDump(t *testing.T) {
 				t.Errorf("dump format = %v, want %s", obj["format"], magic)
 			}
 		})
+	}
+}
+
+// TestGetPrefix builds a small RRTI and checks `get --prefix` lists the matched
+// terms and the union posting as JSON.
+func TestGetPrefix(t *testing.T) {
+	bin := buildCLI(t)
+	postings := map[string]*roaring.Bitmap{
+		"bit":    roaring.BitmapOf(7),
+		"bitmap": roaring.BitmapOf(5, 6),
+		"zeta":   roaring.BitmapOf(4),
+	}
+	var buf bytes.Buffer
+	if err := rr.WriteTermIndexFull(&buf, postings, 65536, rr.TermLanguageNone, false, false, true, 0); err != nil {
+		t.Fatalf("WriteTermIndexFull: %v", err)
+	}
+	p := filepath.Join(t.TempDir(), "terms.rrt")
+	if err := os.WriteFile(p, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "get", p, "--prefix", "BIT").CombinedOutput()
+	if err != nil {
+		t.Fatalf("get --prefix: %v\n%s", err, out)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("get --prefix not valid JSON: %v\n%s", err, out)
+	}
+	if obj["found"] != true {
+		t.Errorf("found = %v, want true:\n%s", obj["found"], out)
+	}
+	if terms, _ := obj["terms"].([]any); len(terms) != 2 {
+		t.Errorf("terms = %v, want the 2 bit* terms:\n%s", obj["terms"], out)
+	}
+	if card, _ := obj["cardinality"].(float64); card != 3 {
+		t.Errorf("cardinality = %v, want 3 (union of bit* postings):\n%s", obj["cardinality"], out)
 	}
 }
 

@@ -53,7 +53,7 @@ usage:
         dump the full structural contents (JSON by default)
   roaringrange records <idx> <bin> [--dict d.dict] [--id N | --range A-B] [--json]
         decode records from an RRSR record store
-  roaringrange get <file> [--key K | --term T | --id S | --head-off N] [--limit N]
+  roaringrange get <file> [--key K | --term T | --prefix P | --id S | --head-off N] [--limit N]
         look up a single key and print its posting / value
   roaringrange version
         print the CLI version

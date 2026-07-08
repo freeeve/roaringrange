@@ -161,6 +161,7 @@ roaringrange dump    facets.rrf --json         # full structural dump as JSON
 roaringrange dump    terms.rrt  --postings --limit 20
 roaringrange records store.idx store.bin --dict store.dict --id 0
 roaringrange get     terms.rrt  --term roaring # look up one key's posting
+roaringrange get     terms.rrt  --prefix roar  # prefix-matched terms + union posting
 ```
 
 `info` and `dump` work on every format (RRSI, RRSR, RRTI, RRVI, RRVR, RRSF, RRSB,

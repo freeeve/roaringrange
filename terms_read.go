@@ -1,9 +1,11 @@
 package roaringrange
 
 import (
+	"bytes"
 	"encoding/binary"
 	"io"
 	"iter"
+	"strings"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	fst "github.com/freeeve/fst-go"
@@ -17,6 +19,13 @@ import (
 // Mirrors rust/src/terms.rs. See TERMS.md.
 
 const rrtiHeaderSize = 40
+
+// maxPrefixTerms is the upper bound on the number of prefix-matching dictionary
+// terms SearchPrefix unions: a 1-2 char prefix over a huge vocabulary would
+// otherwise fan out an unbounded number of posting reads, and the union of this
+// many rank-ordered heads fills any realistic limit. Mirrors the Rust reader's
+// MAX_PREFIX_TERMS; a prefix matching more terms is reported truncated.
+const maxPrefixTerms = 2048
 
 func init() {
 	register(Format{Magic: "RRTI", Name: "terms", Ext: ".rrt", Describe: describeTerms})
@@ -193,6 +202,174 @@ func (t *TermIndex) readPosting(it dictItem) (*roaring.Bitmap, error) {
 	}
 	head.Or(tail)
 	return head, nil
+}
+
+// readHead range-reads a term's tail-size word and head bitmap in one read,
+// returning the head and the tail's location for an optional follow-up read (the
+// head holds the top-ranked docs, so a union that fills its limit from heads
+// alone never pays for the tails).
+func (t *TermIndex) readHead(it dictItem) (head *roaring.Bitmap, tailOff int64, tailSize uint32, err error) {
+	buf, err := boundedRead(t.r, t.postStart+int64(it.headOff), 4+it.headSize)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	head, err = deserializeBitmap(buf[4:])
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return head, t.postStart + int64(it.headOff) + 4 + int64(it.headSize), u32(buf[:4]), nil
+}
+
+// foldPrefix normalizes a query prefix the way the index's tokenizer normalized
+// its terms: lowercased per-rune for a case-folding index, verbatim for a
+// case-sensitive one. The prefix path skips stemming and stop words by design (a
+// prefix is already fuzzy). Mirrors the Rust reader's fold_prefix.
+func (t *TermIndex) foldPrefix(prefix string) string {
+	if t.hdr.CaseSensitive {
+		return prefix
+	}
+	var out []rune
+	for _, r := range prefix {
+		out = appendLowerRune(out, r)
+	}
+	return string(out)
+}
+
+// scanPrefix walks the dictionary forward from the first block that could contain
+// the folded prefix p, range-reading only the blocks spanning the prefix: the
+// router walk skips blocks whose last term sorts before p without fetching them,
+// and both the walk and the fetches stop as soon as a term sorts past the prefix
+// or max entries are found. Returns the matching entries in dictionary order and
+// whether more than max matched. Mirrors the Rust reader's scan_prefix.
+func (t *TermIndex) scanPrefix(p string, max int) (items []dictItem, truncated bool, err error) {
+	if max <= 0 {
+		return nil, false, nil
+	}
+	pb := []byte(p)
+	var scanErr error
+	t.router.Iter(func(key []byte, val uint64) bool {
+		if bytes.Compare(key, pb) < 0 {
+			return true // block's last term sorts before the prefix: skip, no fetch
+		}
+		blockItems, err := t.block(val)
+		if err != nil {
+			scanErr = err
+			return false
+		}
+		for _, it := range blockItems {
+			if it.term < p {
+				continue // before the prefix (only possible in the first fetched block)
+			}
+			if !strings.HasPrefix(it.term, p) {
+				return false // sorted: the prefix range has ended
+			}
+			if len(items) == max {
+				truncated = true
+				return false
+			}
+			items = append(items, it)
+		}
+		return true
+	})
+	if scanErr != nil {
+		return nil, false, scanErr
+	}
+	return items, truncated, nil
+}
+
+// Complete autocompletes prefix: up to maxTerms dictionary terms that start with
+// it, in lexicographic order. The prefix is case-folded the way the index's
+// tokenizer folds (verbatim for a case-sensitive index). Range-reads only the
+// dict blocks spanning the prefix. Mirrors the Rust reader's complete.
+func (t *TermIndex) Complete(prefix string, maxTerms int) ([]string, error) {
+	items, _, err := t.scanPrefix(t.foldPrefix(prefix), maxTerms)
+	if err != nil {
+		return nil, err
+	}
+	terms := make([]string, len(items))
+	for i, it := range items {
+		terms[i] = it.term
+	}
+	return terms, nil
+}
+
+// TermPosting pairs a prefix-matched dictionary term with its full posting.
+type TermPosting struct {
+	Term    string
+	Posting *roaring.Bitmap
+}
+
+// PrefixPostings returns up to limit dictionary terms starting with prefix, in
+// lexicographic order, each with its full posting. truncated is true when more
+// than limit terms matched. The prefix is case-folded the way the index's
+// tokenizer folds; only the dict blocks spanning the prefix and the matched
+// terms' postings are range-read.
+func (t *TermIndex) PrefixPostings(prefix string, limit int) ([]TermPosting, bool, error) {
+	items, truncated, err := t.scanPrefix(t.foldPrefix(prefix), limit)
+	if err != nil {
+		return nil, false, err
+	}
+	out := make([]TermPosting, 0, len(items))
+	for _, it := range items {
+		bm, err := t.readPosting(it)
+		if err != nil {
+			return nil, false, err
+		}
+		out = append(out, TermPosting{Term: it.term, Posting: bm})
+	}
+	return out, truncated, nil
+}
+
+// SearchPrefix returns up to limit doc IDs matching any dictionary term that
+// starts with prefix (the union of every matching term's posting), ascending —
+// which is descending rank under the rank-remapped doc-ID space. At most
+// maxPrefixTerms terms are unioned; truncated is true when the prefix matched
+// more, making the result a bounded approximation of the full union. Head
+// bitmaps are read first and the tails only when the heads underfill limit,
+// mirroring the Rust reader's search_prefix_capped / union_locs.
+func (t *TermIndex) SearchPrefix(prefix string, limit int) (docs []uint32, truncated bool, err error) {
+	if limit <= 0 {
+		return nil, false, nil
+	}
+	items, truncated, err := t.scanPrefix(t.foldPrefix(prefix), maxPrefixTerms)
+	if err != nil {
+		return nil, false, err
+	}
+	type tailLoc struct {
+		off  int64
+		size uint32
+	}
+	acc := roaring.New()
+	var tails []tailLoc
+	for _, it := range items {
+		head, tailOff, tailSize, err := t.readHead(it)
+		if err != nil {
+			return nil, false, err
+		}
+		acc.Or(head)
+		if tailSize > 0 {
+			tails = append(tails, tailLoc{off: tailOff, size: tailSize})
+		}
+	}
+	if acc.GetCardinality() < uint64(limit) {
+		for _, tl := range tails {
+			buf, err := boundedRead(t.r, tl.off, uint64(tl.size))
+			if err != nil {
+				return nil, false, err
+			}
+			tail, err := deserializeBitmap(buf)
+			if err != nil {
+				return nil, false, err
+			}
+			acc.Or(tail)
+		}
+	}
+	docs = make([]uint32, 0, min(uint64(limit), acc.GetCardinality()))
+	di := acc.Iterator()
+	for di.HasNext() && len(docs) < limit {
+		docs = append(docs, di.Next())
+	}
+	return docs, truncated, nil
 }
 
 // LookupTerm returns the doc posting for an exact dictionary token (already in the
