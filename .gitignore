@@ -44,3 +44,7 @@ resume_multipart.py
 
 # goreleaser build output
 /dist/
+
+# task ledger moved to the central taskman store (~/.taskman/roaringrange);
+# a repo-local tasks/ must not re-track
+/tasks/
