@@ -76,7 +76,7 @@ output — a Go-build → Rust-read round-trip is pinned by the Go
 
 ## Optional compression
 Per-record **zstd with a shared dictionary** is implemented as the additive
-**version 2** layout above (see [`tasks/001_record_compression.done.md`](tasks/001_record_compression.done.md)),
+**version 2** layout above,
 inflated inside the `RecordStore` reader. It is opt-in: the raw version-1 store is
 unchanged and the reader reads it byte-for-byte. The index/facet formats are
 unaffected; the record encoding stays the application's choice.

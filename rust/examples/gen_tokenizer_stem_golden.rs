@@ -1,5 +1,5 @@
 //! Generates the per-language tokenizer/stemmer conformance golden for the Go term
-//! tokenizer (task 073). For each Snowball language byte (1..=18) it tokenizes a
+//! tokenizer. For each Snowball language byte (1..=18) it tokenizes a
 //! representative inflected word through the Rust `Tokenizer::with(Some(lang), stem=true,
 //! stopwords=false, case_fold=true)` and prints one TSV line
 //!

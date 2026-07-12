@@ -336,9 +336,9 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
 
     let page: Vec<u32> = filtered.iter().skip(offset).take(limit).copied().collect();
     // Facet counts over the POST-filter set with head+tail (`counts_full`) semantics, matching
-    // the client `filtered_ids` path (finding 3): the old code counted the PRE-filter fused set
-    // with head-only `counts`, which inflated filtered categories and dropped ids beyond doc
-    // 65535 (see task 052). Computed only on the first page, the only page that shows them.
+    // the client `filtered_ids` path: counting the PRE-filter fused set with head-only `counts`
+    // would inflate filtered categories and drop ids beyond doc 65535. Computed only on the
+    // first page, the only page that shows them.
     let facets = if offset == 0 {
         let filtered_bm: RoaringBitmap = filtered.iter().copied().collect();
         let counts = h

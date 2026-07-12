@@ -1,5 +1,5 @@
-//! Generates the RRSC (`.rrsc`) conformance golden for the Go sortcols builder
-//! (task 048): one column of each value type (u16/u32/i32/f32, incl. negative and
+//! Generates the RRSC (`.rrsc`) conformance golden for the Go sortcols builder:
+//! one column of each value type (u16/u32/i32/f32, incl. negative and
 //! zero), printed as `rrsc <hex>`. Saved to go/testdata/rrsc_build_golden.txt and
 //! asserted by both go/sortcols_test.go and Rust build_tests::rrsc_golden_matches.
 //!

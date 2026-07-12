@@ -8,7 +8,7 @@
 > client-side trigram/term backends (geometric per-tier byte caps; see Geometric tiering below).
 > Remaining: only the per-split **time min/max** summary (tag 3); the Bloom, facet-presence,
 > and tombstone summaries and the demo split-set mode have shipped. This document is the frozen
-> byte layout the readers/writers agree on. See `tasks/007_split_set_index.done.md`.
+> byte layout the readers/writers agree on.
 
 A **split set** — an additive member of the roaringrange family (next to the trigram
 `RRS`, term `RRTI`, facet `RRSF`, vector `RRVI`, record `RRSR`, lookup `RRIL`, sort

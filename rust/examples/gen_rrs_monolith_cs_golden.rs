@@ -1,4 +1,4 @@
-//! Generates the **case-sensitive** RRS trigram-monolith conformance golden (task 054): a
+//! Generates the **case-sensitive** RRS trigram-monolith conformance golden: a
 //! fixed mixed-case corpus folded into one v4 `RRSI` index with case normalization OFF, printed
 //! as `rrs_monolith_cs <hex>`. The corpus mixes "Roaring"/"roaring" so case-sensitive keying
 //! produces different trigrams than the default folding path. Saved to

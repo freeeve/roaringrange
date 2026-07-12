@@ -1,4 +1,4 @@
-//! Generates the RRSB (`.rrb`) conformance golden for the Go BM25 builder (task 045).
+//! Generates the RRSB (`.rrb`) conformance golden for the Go BM25 builder.
 //! Builds the sidecar over a fixed corpus and a synthetic dictionary (the corpus's
 //! distinct plain-tokenized terms in lexicographic order, ascending head_offs), then
 //! prints `rrsb <hex>` — saved to `go/testdata/rrsb_build_golden.txt` and asserted by

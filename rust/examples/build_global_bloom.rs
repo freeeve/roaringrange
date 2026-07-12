@@ -1,5 +1,5 @@
 //! Build a **global term-Bloom sidecar** over a split set's whole vocabulary — the
-//! absent-term prune for a summary-stripped manifest (task 028). Reads every local split's
+//! absent-term prune for a summary-stripped manifest. Reads every local split's
 //! dictionary keys (header + dict region only, never the postings), unions them, and writes
 //! the standard Bloom layout (`[k u32][nbits u32][bits]`).
 //!

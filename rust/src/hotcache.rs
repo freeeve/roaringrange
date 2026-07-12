@@ -6,8 +6,7 @@
 //! **two small** ranged reads (a tiny header, then the exact remaining bytes) instead
 //! of N separate cold opens. It replaces nothing: the
 //! per-query data files are untouched and per-query reads are unchanged. See
-//! `HOTCACHE.md` for the frozen byte layout and `tasks/006_catalog_hotcache.md` for
-//! the design.
+//! `HOTCACHE.md` for the frozen byte layout and design.
 //!
 //! Layout (`HOTCACHE.md`): `[header][manifest entries][string blob][inlined-boot blob]`.
 //! Each manifest entry names one member: its type tag, its data-file name (resolved

@@ -1,6 +1,7 @@
 //! Benchmarks `FacetIndex::counts()` (head-only, in-memory, zero-fetch) vs
 //! `counts_full()` (head + tail, range-fetched) over a real `.rrf` facet sidecar —
-//! quantifying the cost task 052's fix added to `FilteredIds.facetCounts()`. It wraps
+//! quantifying the cost the head+tail full-count fix added to `FilteredIds.facetCounts()`.
+//! It wraps
 //! the file fetcher to tally how many range-reads and bytes each path issues (each read
 //! ≈ one browser network round-trip), plus wall-clock.
 //!
@@ -64,7 +65,7 @@ fn main() {
         snap().1
     );
 
-    // Boot B: meta-only (the RrfFacets browse path — task 053). `facets()` (names +
+    // Boot B: meta-only (the RrfFacets browse path). `facets()` (names +
     // full-corpus counts) is ready from this; postings load on demand at filter time.
     let (mr0, mb0) = snap();
     let t = Instant::now();

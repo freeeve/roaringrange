@@ -11,7 +11,7 @@
 //!   cargo run --release --features zstd --example verify_monolith_aligned -- --selftest
 //!
 //! Run it against the **S3-live** records before uploading a rebuilt monolith: that is
-//! the gate that catches a records/monolith divergence (see tasks/044). The
+//! the gate that catches a records/monolith divergence. The
 //! `doc-id == records position` invariant only holds when the build's records match
 //! the records the index is served with.
 

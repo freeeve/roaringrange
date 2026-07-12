@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rebuild the v3 trigram monolith (openalex-full.rrs) + geo split from the S3-LIVE
-# records, so doc-id == records position lines up with records-full/term/vector again
-# (task 044). Runs locally and is resumable (downloads skip already-present files;
+# records, so doc-id == records position lines up with records-full/term/vector again.
+# Runs locally and is resumable (downloads skip already-present files;
 # the builder reuses cached chunk partials).
 #
 #   ./rebuild-monolith.sh           # phase A: download -> build -> VERIFY -> slice, then STOP

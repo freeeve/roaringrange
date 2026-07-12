@@ -357,8 +357,7 @@ the reader at recall@10 ≈ 0.9995). The reader [`VectorIndex`](rust/src/vector.
 is pure Rust with a browser binding (`RrviIndex`, `wasm-pack build --features
 "wasm vector"`). See [`VECTORS.md`](VECTORS.md). Live on the demo: the in-browser
 model2vec query *embedder* (`RrviIndex` + `Model2vecEmbedder`) and term/trigram hybrid
-(reciprocal-rank fusion); an optional EmbeddingGemma Lambda embedder is parked
-([`tasks/004_vector_search`](tasks)).
+(reciprocal-rank fusion); an optional EmbeddingGemma Lambda embedder is parked.
 
 ## Development
 

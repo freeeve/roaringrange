@@ -139,5 +139,4 @@ v2: exact whole-word AND + prefix/autocomplete with the head/tail rank split, ov
 front-coded dictionary range-fetched on demand. Native builder `terms_build`
 (`write_term_index` / `TermIndexBuilder`); reader `terms::TermIndex` (wasm-safe); shared
 front-coding codec `terms_dict`. All behind the non-default `terms` Cargo feature. Fuzzy is
-delegated to the trigram `RRS` index. See `tasks/009_rrti_blocked_dictionary.done.md` and
-`tasks/005_fst_term_index.done.md`.
+delegated to the trigram `RRS` index.

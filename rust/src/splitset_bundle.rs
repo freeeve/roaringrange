@@ -1,5 +1,5 @@
 //! Build-side emitter for an `RRHC` boot bundle over a split set — the reader-path application
-//! of the catalog hotcache (`tasks/006_catalog_hotcache.md` §1).
+//! of the catalog hotcache (see `HOTCACHE.md`).
 //!
 //! A split set names N immutable `RRS` splits; cold-booting it opens each queried split with a
 //! separate header GET (one round trip per split, over a CDN). This emitter writes one `.rrhc`

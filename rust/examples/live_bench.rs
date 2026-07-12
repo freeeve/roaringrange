@@ -368,7 +368,7 @@ fn main() {
     // surfaces the most-cited generic bitmap-compression papers; BM25 reranks by lexical
     // relevance. Report how the top-K reorders (rank-order vs bm25) as a quantitative signal
     // that the reranker changes ranking — the title-level correctness was verified manually at
-    // build time (task 032) and is exercised live in the demo. The same .rrb reranks the
+    // build time and is exercised live in the demo. The same .rrb reranks the
     // trigram candidates too, demonstrating one sidecar serving every mode.
     if let Some(imp) = impacts.as_ref() {
         let q = "roaring bitmaps";

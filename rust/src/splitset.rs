@@ -7,8 +7,7 @@
 //! and a supersession **epoch** per split, plus the **base/delta** boundary and (reserved
 //! for the enrichment step) per-split term-Bloom / facet-presence / time summaries. The
 //! split objects stay plain `RRS`, so one split is exactly today's monolith. See
-//! `SPLITSET.md` for the frozen byte layout and `tasks/007_split_set_index.in-progress.md`
-//! for the design.
+//! `SPLITSET.md` for the frozen byte layout and design.
 //!
 //! Layout (`SPLITSET.md`): `[header][split entries][string blob][summary blob]`.
 //! [`SplitSet::open`] makes the whole manifest resident in two ranged reads (header, then

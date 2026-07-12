@@ -15,7 +15,7 @@ browser ──RrviIndex.search(vector)──▶ S3 range reads ──▶ doc IDs
 Why a Lambda running the model (not Bedrock): the query vector must come from the
 identical model + prompt + pooling as the corpus, and the model is open so it runs
 in our own pay-per-invoke function. Bedrock only offers *closed* embedders
-(Titan/Cohere) → different space + paid corpus pass. See `VECTORS.md` / task 004.
+(Titan/Cohere) → different space + paid corpus pass. See `VECTORS.md`.
 
 ## Runtime: onnxruntime, no torch
 `export_model.py` exports the **transformer** to ONNX with optimum (raw

@@ -13,7 +13,7 @@ offset at zero fetches). Composing N formats means N cold boots over a CDN. The 
 that per-structure boot descriptor generalized **across** formats: one `.rrhc` that inlines
 the small boots and range-references the few large ones (the RRVI centroids), booting any
 composition in 1–2 round trips. Content-hashed and immutable, it is served from the browser
-cache with zero network on warm visits. See `tasks/006_catalog_hotcache.md` for the design.
+cache with zero network on warm visits.
 
 All integers little-endian.
 
@@ -87,8 +87,7 @@ The Tier-2 endgame concatenates every member body into one immutable `.rrsplit` 
 **FOOTER** hotcache (the same header + manifest, with `flags bit0` set) whose `bootOff`
 values become **absolute spans within the single file**, plus a fixed **trailer**
 (`magic "RRHX"` + `footerOff u64` + `footerLen u32`) appended at end-of-file so the reader
-finds the footer with one tiny ranged read of the last bytes. Not implemented in v1 — see
-`tasks/006_catalog_hotcache.md` §3.
+finds the footer with one tiny ranged read of the last bytes. Not implemented in v1.
 
 ## Status
 v1: the Tier-1 manifest bundle. Native builder `hotcache_build::write_hotcache`; reader
@@ -96,4 +95,4 @@ v1: the Tier-1 manifest bundle. Native builder `hotcache_build::write_hotcache`;
 (pure Rust, no new dependency). The per-member `from_boot` constructors shipped
 (`Index`/`FacetIndex`/`RecordStore`/`Lookup::from_boot`, used by the `RRHC` split-set boot
 bundle). Deferred: `Catalog::open_hotcache` wiring and Tier 2's `write_split` / `.rrsplit`
-footer. See `tasks/006_catalog_hotcache.md`.
+footer.

@@ -1,5 +1,5 @@
-//! Generates the RRS trigram-monolith conformance golden for the Go monolith builder
-//! (task 051): a fixed small corpus folded into one v3 `RRSI` index, printed as
+//! Generates the RRS trigram-monolith conformance golden for the Go monolith builder:
+//! a fixed small corpus folded into one v3 `RRSI` index, printed as
 //! `rrs_monolith <hex>`. The corpus shares trigrams across docs (multi-doc postings) and
 //! includes an empty doc, so doc id 3 lands in postings only if the empty doc (id 2) still
 //! advanced the doc-ID space. Saved to go/testdata/rrs_monolith_build_golden.txt and asserted

@@ -1,5 +1,5 @@
 //! Side-by-side benchmark: monolithic `RRS` vs a tiered `RRSS` split set over the **same**
-//! synthetic corpus and query log — the table in `tasks/007_split_set_index.in-progress.md`.
+//! synthetic corpus and query log — the numbers behind the split-set design's pruning claim.
 //!
 //! It builds one corpus twice (a single huge-cap split == today's monolith, and a small-cap
 //! tiered split set), then runs each query through an instrumented in-memory `RangeFetch` that

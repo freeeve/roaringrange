@@ -1,6 +1,6 @@
 //! Head-to-head benchmark: a **trigram** (`RRS`) split set vs a **term/FST** (`RRTI`) split set
-//! over the *same* corpus, query log, and byte cap — the "try both" comparison for
-//! `tasks/007_split_set_index`. Builds the corpus both ways, then runs each query through an
+//! over the *same* corpus, query log, and byte cap — the split-set design's "try both"
+//! comparison. Builds the corpus both ways, then runs each query through an
 //! instrumented in-memory `RangeFetch` that counts bytes and requests, reporting on-S3 size, the
 //! per-query bytes/requests, and the top-K overlap (the two index models match *different* things
 //! — trigram substrings vs whole stemmed tokens — so results can legitimately differ; we report

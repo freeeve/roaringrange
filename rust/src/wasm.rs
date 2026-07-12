@@ -435,7 +435,7 @@ async fn filtered_ids(
         _ => ids,
     };
     // Full counts over head AND tail: `kept` is an arbitrary, corpus-spanning id
-    // list, so the in-memory head-only `counts()` would undercount (see task 052).
+    // list, so the in-memory head-only `counts()` would undercount.
     // Capped at the top categories per field so a wide sidecar (100K+ categories)
     // does not issue a fetch per category — the long tail stays head-only. Skipped
     // entirely when `want_counts` is false (the caller will not show them, e.g. during
@@ -760,7 +760,7 @@ impl RrfFacets {
     /// full-corpus counts the browse UI shows) is ready in a couple of ranged reads
     /// even on a sidecar with 100k+ categories. The head/tail postings are NOT loaded
     /// here; `filterIds`/`facetCounts`/`countsFor` range-fetch exactly the postings
-    /// they touch (see task 053). Resolves to an `RrfFacets`.
+    /// they touch. Resolves to an `RrfFacets`.
     pub async fn open(url: String) -> Result<RrfFacets, JsError> {
         let inner = FacetIndex::open_meta(WasmFetch::new(url))
             .await

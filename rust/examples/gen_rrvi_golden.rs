@@ -1,5 +1,5 @@
 //! Generates the RRVI (`.rrvi`) + RRVR (`.rrvr`) conformance goldens for the Go vector
-//! serializers (task 050): a fixed IVFPQ model assembled with `build_ivfpq_from_parts`
+//! serializers: a fixed IVFPQ model assembled with `build_ivfpq_from_parts`
 //! (no training → fully deterministic, no FMA-sensitive float math) serialized to RRVI,
 //! and a fixed bf16 re-rank blob. Printed as `rrvi <hex>` / `rrvr <hex>`, saved to
 //! `go/testdata/{rrvi,rrvr}_build_golden.txt` and asserted by `go/vector_test.go` and the

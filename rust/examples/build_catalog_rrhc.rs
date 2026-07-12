@@ -1,5 +1,5 @@
 //! Emit the **catalog boot bundle** (`RRHC`) for a monolith composition — the one-GET boot
-//! for the OpenAlex demo's 4–5 cold opens (task 006 step 2). Slices each member's boot
+//! for the OpenAlex demo's 4–5 cold opens. Slices each member's boot
 //! region from the built artifacts and inlines them all:
 //!
 //!   * `RRS`  trigram index — header + sparse index (`rrs_boot_len`)

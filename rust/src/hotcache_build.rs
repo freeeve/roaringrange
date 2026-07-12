@@ -9,8 +9,7 @@
 //! centroids).
 //!
 //! Tier 2 (`write_split`: concatenate every member body into one `.rrsplit` with a FOOTER
-//! hotcache + trailer, offsets rebased per member) is **deferred** — see
-//! `tasks/006_catalog_hotcache.md` §3.
+//! hotcache + trailer, offsets rebased per member) is **deferred**.
 
 use crate::hotcache::MemberTag;
 use std::io::{self, Write};
