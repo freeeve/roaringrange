@@ -1,8 +1,8 @@
-# Rust / wasm-pack build output
-rust/target/
+# Rust / wasm-pack build output. Cargo target dirs everywhere; `target` may be
+# a symlink to a `target.noindex` dir (keeps Spotlight from indexing build output)
+**/target
+**/target.noindex/
 rust/pkg/
-examples/openalex/builder/target/
-examples/search-lambda/target/
 
 # Browser reader: wasm-pack output copied into the demo at deploy time (deploy.sh
 # builds it fresh). Not committed — it's a build artifact, not source.
