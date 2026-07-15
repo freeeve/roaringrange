@@ -6,9 +6,9 @@
 > benchmark, a Go builder (manifest + split `RRS` incl. per-split `RRSF` facets, byte-for-byte
 > conformance), and a wasm binding. The geometric split sets are the demo's **default**
 > client-side trigram/term backends (geometric per-tier byte caps; see Geometric tiering below).
-> Remaining: only the per-split **time min/max** summary (tag 3); the Bloom, facet-presence,
-> and tombstone summaries and the demo split-set mode have shipped. This document is the frozen
-> byte layout the readers/writers agree on.
+> Remaining: only the per-split **time min/max** summary (tag 5); the Bloom, facet-presence,
+> facet-digest, and tombstone summaries and the demo split-set mode have shipped. This document
+> is the frozen byte layout the readers/writers agree on.
 
 A **split set** — an additive member of the roaringrange family (next to the trigram
 `RRS`, term `RRTI`, facet `RRSF`, vector `RRVI`, record `RRSR`, lookup `RRIL`, sort
@@ -102,8 +102,9 @@ split's region the summaries are **TLV** records `[tag u8][len u32 LE][bytes]`:
 |---|---|---|---|
 | `1` | term Bloom filter | `[k u32][nbits u32][⌈nbits/8⌉ bytes]` — skip a split whose vocabulary can't contain a query n-gram | **implemented** |
 | `2` | facet-presence list | `[count u32][key u64]*` (sorted `facet_key`s) — skip a split holding none of a filtered field's categories | **implemented** |
-| `3` | time min/max | two `i64` (or the app's epoch unit) for time-range pruning | reserved |
+| `3` | facet digest | `[k u16][fieldCount u16]`, per field `[nameLen u16][name][catCount u16]`, per category `[nameLen u16][name][count u32][headOff u64][headSize u32][tailSize u32]` — the top-`k` categories per field by full-corpus count, so facet pricing boots from the resident manifest with no sidecar meta read | **implemented** |
 | `4` | tombstone posting | a portable RoaringBitmap of superseded base doc IDs (delta-over-base) | **implemented** |
+| `5` | time min/max | two `i64` (or the app's epoch unit) for time-range pruning | reserved |
 
 The **term Bloom filter** (tag 1) is the biggest fan-out reducer: built over the split's
 n-gram vocabulary with `bloom_bits_per_key` bits per key (`~10` ≈ 1% false positives), it lets
@@ -111,8 +112,8 @@ a query skip any split that definitely lacks one of its n-grams (Bloom filters h
 negatives) — *without a fetch*. It is most decisive for rare/absent terms: a tiered query that
 can't fill its page would otherwise descend through every split. The filter uses double
 hashing over two `splitmix64` derivations of each `u64` key, so it is deterministic and
-reproducible across languages. The facet/time summaries (tags 2–3) remain reserved; the blob
-is empty when no summaries are written, so adding them stays a purely additive write.
+reproducible across languages. The time summary (tag 5) remains reserved; the blob is empty
+when no summaries are written, so adding new tags stays a purely additive write.
 
 ## Policies
 
@@ -257,7 +258,7 @@ split is an `Index`, stable-key rank is `SortCols`, the manifest evolves `RRHC`)
 - **Examples** — `rust/examples/splitset_bench.rs` (the byte/request table) and
   `rust/examples/splitset_ingest.rs` (a worked queue-as-WAL ingestion client over `SplitSetWriter`).
 
-**Deferred**: the per-split **time min/max** summary (tag 3 — for time-range pruning; the blob
+**Deferred**: the per-split **time min/max** summary (tag 5 — for time-range pruning; the blob
 carries it but the builder doesn't write it yet), and the **Python facet** build surface (Rust
 and Go builders emit per-split `RRSF`; the Python builder doesn't yet). The demo "Split set"
 mode shipped (and the geometric trigram/term split sets are the demo's default client-side
