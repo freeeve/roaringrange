@@ -511,6 +511,22 @@ impl SplitBuildConfig {
 /// A list of emitted files as `(filename, bytes)` — split `RRS` blobs or facet `RRSF` sidecars.
 pub type NamedFiles = Vec<(String, Vec<u8>)>;
 
+/// The output of [`TermSplitSetBuilder::finish_parts`]: the sealed splits' manifest metadata
+/// and any blobs not yet taken by `drain_sealed`, **without** a serialized manifest — one
+/// band's contribution to a parallel (multi-worker) build. Bands in ascending global doc-id
+/// order merge into a single manifest via [`merge_term_split_bands`].
+#[cfg(feature = "terms")]
+pub struct TermSplitParts {
+    /// Sealed split metadata in seal order (tiers are band-local until the merge).
+    pub specs: Vec<SplitSpec>,
+    /// Split `RRTI` blobs not yet drained, parallel to the tail of `specs`.
+    pub splits: NamedFiles,
+    /// Facet `RRSF` sidecar blobs not yet drained.
+    pub facets: NamedFiles,
+    /// Whether any document carried a facet (drives the merged manifest's facet flag).
+    pub has_facets: bool,
+}
+
 /// The output of [`SplitSetBuilder::finish`]: the `.rrss` manifest bytes and each split's
 /// `(filename, RRS bytes)`. The caller writes the manifest to `‹prefix›.rrss` and every
 /// split to its filename; nothing is written by the library.
@@ -954,6 +970,9 @@ pub struct TermSplitSetBuilder {
     global_base: u32,
     /// Next global doc id to hand out.
     next_global_id: u32,
+    /// The builder's first global doc id ([`with_global_base`](Self::with_global_base); `0`
+    /// for a whole-corpus build) — subtracted for [`doc_count`](Self::doc_count).
+    global_origin: u32,
     /// Running upper bound on the open split's serialized `RRTI` bytes.
     bytes_upper: u64,
     /// The open split's facet postings: field → category → bitmap of local 0-based doc ids.
@@ -997,6 +1016,7 @@ impl TermSplitSetBuilder {
             open_count: 0,
             global_base: 0,
             next_global_id: 0,
+            global_origin: 0,
             bytes_upper: 0,
             open_facets: BTreeMap::new(),
             has_facets: false,
@@ -1004,6 +1024,24 @@ impl TermSplitSetBuilder {
             blobs: Vec::new(),
             facet_blobs: Vec::new(),
         }
+    }
+
+    /// Starts the builder's global doc-id space at `base` instead of `0` — the per-band knob
+    /// for a parallel build: a worker over rank band `[lo, hi)` builds with
+    /// `with_global_base(lo)` so its manifest entries carry the band's true
+    /// `docIdLo`/`docIdHi` and the `add` methods hand out global ids `lo..`. Local 0-based
+    /// posting ids inside each split are unchanged. Must be called before any document is
+    /// added.
+    pub fn with_global_base(mut self, base: u32) -> Self {
+        assert_eq!(
+            self.doc_count(),
+            0,
+            "global base must be set before any document is added"
+        );
+        self.global_base = base;
+        self.next_global_id = base;
+        self.global_origin = base;
+        self
     }
 
     /// Tokenizes `text` and appends it as one document, returning its global doc id. A token-less
@@ -1133,7 +1171,7 @@ impl TermSplitSetBuilder {
 
     /// Number of documents added so far (across sealed and open splits).
     pub fn doc_count(&self) -> u32 {
-        self.next_global_id
+        self.next_global_id - self.global_origin
     }
 
     /// Streams out the splits sealed since the last call, as `(split RRTI files, facet RRSF
@@ -1146,10 +1184,10 @@ impl TermSplitSetBuilder {
         )
     }
 
-    /// Seals the final open split and serializes the manifest (`body_kind = BodyKind::Term`,
-    /// `gram_size = 0`), returning the manifest bytes and every split's `(filename, RRTI bytes)`.
-    /// Errors if any single document's postings alone exceed the byte cap.
-    pub fn finish(mut self) -> io::Result<BuiltSplitSet> {
+    /// Seals the final open split and rejects the degenerate corpus where a single document's
+    /// postings alone exceed its tier's byte cap — the shared tail of
+    /// [`finish`](Self::finish) and [`finish_parts`](Self::finish_parts).
+    fn seal_and_check(&mut self) -> io::Result<()> {
         self.seal()?;
         for (i, spec) in self.specs.iter().enumerate() {
             let cap = cap_for(self.byte_cap, self.byte_cap_max, i);
@@ -1160,6 +1198,28 @@ impl TermSplitSetBuilder {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// Seals the final open split and returns the band's [`TermSplitParts`] — the manifest
+    /// metadata and remaining blobs, with **no** manifest serialized: the per-worker half of a
+    /// parallel build, combined across bands by [`merge_term_split_bands`]. Errors like
+    /// [`finish`](Self::finish) on a single document whose postings exceed the byte cap.
+    pub fn finish_parts(mut self) -> io::Result<TermSplitParts> {
+        self.seal_and_check()?;
+        Ok(TermSplitParts {
+            specs: self.specs,
+            splits: self.blobs,
+            facets: self.facet_blobs,
+            has_facets: self.has_facets,
+        })
+    }
+
+    /// Seals the final open split and serializes the manifest (`body_kind = BodyKind::Term`,
+    /// `gram_size = 0`), returning the manifest bytes and every split's `(filename, RRTI bytes)`.
+    /// Errors if any single document's postings alone exceed the byte cap.
+    pub fn finish(mut self) -> io::Result<BuiltSplitSet> {
+        self.seal_and_check()?;
         let tier_count = match self.policy {
             Policy::Tiered => self.specs.len().min(u16::MAX as usize) as u16,
             Policy::StableKey => 0,
@@ -1189,6 +1249,103 @@ impl TermSplitSetBuilder {
             facets: self.facet_blobs,
         })
     }
+}
+
+/// Merges per-band [`TermSplitParts`] into one term split set: the fan-in of a parallel
+/// build. `bands` must be in ascending global doc-id order (band `k` built over rank range
+/// `[lo_k, hi_k)` with [`TermSplitSetBuilder::with_global_base`]); each band's specs stay in
+/// their seal order. Splits are renamed into a single global file sequence
+/// (`‹config.name_prefix›-s00000.rrt` …) and, for [`Policy::Tiered`], re-tiered to that
+/// sequence, so the merged manifest is rank-ordered exactly like a serial build's.
+///
+/// Returns the merged set (manifest + whatever blobs the bands still held, under their new
+/// names) and the `(old_name, new_name)` rename plan for split files already streamed to
+/// disk by `drain_sealed`. A facet sidecar shares its split's stem — for each renamed
+/// `‹stem›.rrt` the caller renames an existing `‹stem›.rrf` the same way (blobs still held
+/// are renamed here). Errors if the bands' doc-id ranges overlap or run out of order.
+#[cfg(feature = "terms")]
+pub fn merge_term_split_bands(
+    bands: Vec<TermSplitParts>,
+    config: &TermSplitBuildConfig,
+) -> io::Result<(BuiltSplitSet, Vec<(String, String)>)> {
+    let mut specs: Vec<SplitSpec> = Vec::new();
+    let mut splits: NamedFiles = Vec::new();
+    let mut facets: NamedFiles = Vec::new();
+    let mut renames: Vec<(String, String)> = Vec::new();
+    let mut has_facets = false;
+    let mut next_lo: u32 = 0;
+    let mut seq = 0usize;
+    for band in bands {
+        has_facets |= band.has_facets;
+        // Blob renaming below is keyed by each split's old→new stem.
+        let mut stem_renames: Vec<(String, String)> = Vec::new();
+        for mut spec in band.specs {
+            if seq > 0 && spec.doc_id_lo < next_lo {
+                return Err(io::Error::other(format!(
+                    "RRSS band merge: split {:?} docIdLo {} overlaps the previous split (next expected {})",
+                    spec.data_file, spec.doc_id_lo, next_lo
+                )));
+            }
+            next_lo = spec.doc_id_hi + 1;
+            let new_name = format!("{}-s{seq:05}.rrt", config.name_prefix);
+            if spec.data_file != new_name {
+                renames.push((spec.data_file.clone(), new_name.clone()));
+            }
+            stem_renames.push((
+                spec.data_file.trim_end_matches(".rrt").to_string(),
+                new_name.trim_end_matches(".rrt").to_string(),
+            ));
+            spec.data_file = new_name;
+            spec.tier = match config.policy {
+                Policy::Tiered => seq.min(u16::MAX as usize) as u16,
+                Policy::StableKey => 0,
+            };
+            seq += 1;
+            specs.push(spec);
+        }
+        let renamed = |name: String| -> String {
+            for (old, new) in &stem_renames {
+                if let Some(ext) = name.strip_prefix(old.as_str()) {
+                    return format!("{new}{ext}");
+                }
+            }
+            name
+        };
+        splits.extend(band.splits.into_iter().map(|(n, b)| (renamed(n), b)));
+        facets.extend(band.facets.into_iter().map(|(n, b)| (renamed(n), b)));
+    }
+
+    let tier_count = match config.policy {
+        Policy::Tiered => specs.len().min(u16::MAX as usize) as u16,
+        Policy::StableKey => 0,
+    };
+    let mut flags = 0u16;
+    if has_facets {
+        flags |= FLAG_FACET;
+    }
+    if config.case_sensitive {
+        flags |= FLAG_CASE_SENSITIVE;
+    }
+    let manifest_config = SplitSetConfig {
+        policy: config.policy,
+        tier_count,
+        base_count: specs.len() as u32,
+        byte_cap: config.byte_cap,
+        gram_size: 0, // term-bodied: no n-grams
+        body_kind: BodyKind::Term,
+        sortcol: config.sortcol.clone(),
+        flags,
+    };
+    let mut manifest = Vec::new();
+    write_splitset(&mut manifest, &specs, &manifest_config)?;
+    Ok((
+        BuiltSplitSet {
+            manifest,
+            splits,
+            facets,
+        },
+        renames,
+    ))
 }
 
 #[cfg(test)]

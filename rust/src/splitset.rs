@@ -1894,6 +1894,126 @@ mod tests {
             .is_empty());
     }
 
+    /// The parallel per-band build must be reader-equivalent to the serial build: independent
+    /// builders over contiguous rank bands (each rooted at its band's global base), merged via
+    /// `merge_term_split_bands`, answer every query identically to one serial builder over the
+    /// same corpus — with the splits renamed into one global file sequence and re-tiered to it.
+    #[cfg(feature = "terms")]
+    #[test]
+    fn term_band_merge_is_reader_equivalent_to_serial() {
+        use crate::splitset_build::{
+            merge_term_split_bands, TermSplitBuildConfig, TermSplitSetBuilder,
+        };
+        let config = |prefix: String| TermSplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::Tiered,
+            byte_cap: 600,
+            head_boundary: 0,
+            name_prefix: prefix,
+            sortcol: None,
+            language: None,
+            stem: false,
+            stopwords: false,
+            case_sensitive: false,
+        };
+        let n = 60u32;
+        let text = |i: u32| format!("abc tok{i:04}");
+
+        let mut serial = TermSplitSetBuilder::new(config("corpus".to_string()));
+        for i in 0..n {
+            assert_eq!(serial.add_text(&text(i)).unwrap(), i);
+        }
+        let serial = serial.finish().unwrap();
+        assert!(serial.splits.len() > 1, "cap should force multiple splits");
+
+        // Three contiguous 20-doc rank bands, each through its own builder rooted at its
+        // band's global base — exactly the parallel driver's per-worker build.
+        let mut parts = Vec::new();
+        for band in 0..3u32 {
+            let (lo, hi) = (band * 20, (band + 1) * 20);
+            let mut b =
+                TermSplitSetBuilder::new(config(format!("corpus-w{band:03}"))).with_global_base(lo);
+            for i in lo..hi {
+                assert_eq!(b.add_text(&text(i)).unwrap(), i);
+            }
+            assert_eq!(b.doc_count(), 20);
+            parts.push(b.finish_parts().unwrap());
+        }
+        let (merged, renames) =
+            merge_term_split_bands(parts, &config("corpus".to_string())).unwrap();
+
+        // Every split left its per-worker name for the global sequence; tiers follow it and
+        // the doc-id ranges tile [0, n) in order.
+        assert_eq!(renames.len(), merged.splits.len());
+        assert!(renames.iter().all(|(old, _)| old.contains("-w")));
+        for (i, (name, _)) in merged.splits.iter().enumerate() {
+            assert_eq!(*name, format!("corpus-s{i:05}.rrt"));
+        }
+        let ss = open_built(&merged);
+        assert_eq!(ss.body_kind(), BodyKind::Term);
+        assert_eq!(ss.tier_count() as usize, merged.splits.len());
+        assert_eq!(ss.splits()[0].doc_id_lo, 0);
+        assert_eq!(ss.splits().last().unwrap().doc_id_hi, n - 1);
+        for w in ss.splits().windows(2) {
+            assert_eq!(w[1].doc_id_lo, w[0].doc_id_hi + 1);
+        }
+
+        // Reader equivalence: the merged set answers every query exactly like the serial set.
+        let ss_serial = open_built(&serial);
+        let r_serial = resolver_from(&serial, &[]);
+        let r_merged = resolver_from(&merged, &[]);
+        let queries = [
+            "abc", "tok0000", "tok0019", "tok0020", "tok0042", "tok0059", "zzz",
+        ];
+        for q in queries {
+            for limit in [3usize, 25, 1000] {
+                assert_eq!(
+                    block_on(ss.search(&r_merged, q, limit)).unwrap(),
+                    block_on(ss_serial.search(&r_serial, q, limit)).unwrap(),
+                    "query {q:?} limit {limit} diverged from the serial build"
+                );
+            }
+        }
+    }
+
+    /// Band order is load-bearing for the merged manifest's rank order: overlapping or
+    /// out-of-order bands must be rejected, not silently mis-tiered.
+    #[cfg(feature = "terms")]
+    #[test]
+    fn term_band_merge_rejects_out_of_order_bands() {
+        use crate::splitset_build::{
+            merge_term_split_bands, TermSplitBuildConfig, TermSplitSetBuilder,
+        };
+        let config = |prefix: String| TermSplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::Tiered,
+            byte_cap: 600,
+            head_boundary: 0,
+            name_prefix: prefix,
+            sortcol: None,
+            language: None,
+            stem: false,
+            stopwords: false,
+            case_sensitive: false,
+        };
+        let band = |base: u32, tag: &str| {
+            let mut b =
+                TermSplitSetBuilder::new(config(format!("corpus-{tag}"))).with_global_base(base);
+            for i in base..base + 5 {
+                b.add_text(&format!("abc tok{i:04}")).unwrap();
+            }
+            b.finish_parts().unwrap()
+        };
+        let err = match merge_term_split_bands(
+            vec![band(5, "w001"), band(0, "w000")],
+            &config("corpus".to_string()),
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("out-of-order bands must be rejected"),
+        };
+        assert!(err.to_string().contains("overlaps"), "got: {err}");
+    }
+
     #[test]
     fn stable_key_build_query_ranks_by_sortcol() {
         // Six docs all matching "abc"; a small cap splits them across two splits so the

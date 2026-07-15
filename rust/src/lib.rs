@@ -145,13 +145,15 @@ pub use splitset::bloom_build;
 pub use splitset::{
     BodyKind, FieldCounts, Policy, RemoteBloom, SortColDescriptor, Split, SplitFetcher, SplitSet,
 };
+#[cfg(all(feature = "splits", feature = "terms", not(target_arch = "wasm32")))]
+pub use splitset_build::{
+    merge_term_split_bands, TermSplitBuildConfig, TermSplitParts, TermSplitSetBuilder,
+};
 #[cfg(all(feature = "splits", not(target_arch = "wasm32")))]
 pub use splitset_build::{
     write_splitset, BuiltSplitSet, NamedFiles, SortColSpec, SplitBuildConfig, SplitSetBuilder,
     SplitSetConfig, SplitSpec,
 };
-#[cfg(all(feature = "splits", feature = "terms", not(target_arch = "wasm32")))]
-pub use splitset_build::{TermSplitBuildConfig, TermSplitSetBuilder};
 #[cfg(all(feature = "splits", feature = "hotcache", not(target_arch = "wasm32")))]
 pub use splitset_bundle::write_splitset_bundle;
 #[cfg(all(feature = "splits", not(target_arch = "wasm32")))]

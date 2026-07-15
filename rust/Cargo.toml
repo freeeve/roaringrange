@@ -297,6 +297,11 @@ required-features = ["hotcache"]
 name = "gen_records_zstd_fixture"
 required-features = ["zstd"]
 
+# Generates a synthetic OpenAlex-shaped record store for build benchmarks.
+[[example]]
+name = "gen_synth_records"
+required-features = ["zstd"]
+
 # Generates the RRS trigram-monolith conformance golden for the Go monolith writer (task 051).
 [[example]]
 name = "gen_rrs_monolith_golden"
