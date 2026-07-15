@@ -405,8 +405,33 @@ async fn read_dir_subset<F: RangeFetch>(
     fetch_containers(fetch, d.off, &needed).await
 }
 
+/// A posting's exact byte cost within a key window — the sum of its container lengths at
+/// the window's keys, free to compute from the cached directory. Drives the seed choice
+/// (and the decision to seed at all) in [`intersect_key_window`].
+fn window_cost(d: &TailDir, window: &[u16]) -> u64 {
+    d.dir
+        .iter()
+        .filter(|c| window.binary_search(&c.key).is_ok())
+        .map(|c| c.len as u64)
+        .sum()
+}
+
+/// A window seed only pays for its extra dependent round trip when some other posting is
+/// substantially denser here — then every key the sparse seed rules out skips that
+/// posting's ~8 KB containers. Below this ratio the postings are similar-density (the
+/// `year + common term` shape, where shrink can't skip much) and the single parallel wave
+/// wins on latency.
+const SEED_COST_RATIO: u64 = 4;
+
 /// Strict-AND intersect the cached tail directories over only the container keys
 /// in `window`, reading just those container bodies. Surviving docs, ascending.
+///
+/// When one posting's window bytes are much smaller than another's (a selective trigram
+/// among common ones), it is read first as a **seed** and the rest are fetched only at
+/// the container keys that survive it — the windowed form of [`tail_intersect_and`]'s
+/// smallest-first shrink, trading one extra round trip for skipping the dense postings'
+/// containers in every bucket the seed already rules out. Similar-density postings keep
+/// the single concurrent wave.
 async fn intersect_key_window<F: RangeFetch>(
     fetch: &F,
     dirs: &[TailDir],
@@ -415,7 +440,28 @@ async fn intersect_key_window<F: RangeFetch>(
     if dirs.is_empty() || window.is_empty() {
         return Ok(RoaringBitmap::new());
     }
-    let reads = dirs.iter().map(|d| read_dir_subset(fetch, d, window));
+    let mut seeded: Option<(usize, RoaringBitmap)> = None;
+    let mut surviving: Vec<u16> = Vec::new();
+    if dirs.len() > 1 {
+        let costs: Vec<u64> = dirs.iter().map(|d| window_cost(d, window)).collect();
+        let seed = (0..dirs.len()).min_by_key(|&i| costs[i]).unwrap_or(0);
+        let densest = costs.iter().copied().max().unwrap_or(0);
+        if costs[seed].saturating_mul(SEED_COST_RATIO) <= densest {
+            let acc = read_dir_subset(fetch, &dirs[seed], window).await?;
+            if acc.is_empty() {
+                return Ok(RoaringBitmap::new()); // the seed alone kills the AND
+            }
+            surviving = distinct_high_keys(&acc);
+            seeded = Some((seed, acc));
+        }
+    }
+
+    let keys = if seeded.is_some() { &surviving } else { window };
+    let reads = dirs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| seeded.as_ref().map(|(s, _)| s) != Some(i))
+        .map(|(_, d)| read_dir_subset(fetch, d, keys));
     let results = join_all(reads).await;
     let mut bms = Vec::with_capacity(dirs.len());
     for r in results {
@@ -424,6 +470,9 @@ async fn intersect_key_window<F: RangeFetch>(
             return Ok(RoaringBitmap::new()); // a missing posting kills the AND
         }
         bms.push(b);
+    }
+    if let Some((_, acc)) = &seeded {
+        bms.push(acc.clone());
     }
     bms.sort_by_key(|b| b.len());
     let mut iter = bms.into_iter();
@@ -696,6 +745,91 @@ mod tests {
             }
             assert_eq!(got, want, "batch={batch}");
         }
+    }
+
+    /// A [`MemoryFetch`] wrapper summing the bytes requested, so a test can assert what a
+    /// windowed intersection actually fetched (not just what it returned).
+    #[derive(Clone)]
+    struct ByteCountingFetch {
+        inner: MemoryFetch,
+        bytes: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl RangeFetch for ByteCountingFetch {
+        async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, crate::fetch::FetchError> {
+            self.bytes.set(self.bytes.get() + len);
+            self.inner.read(offset, len).await
+        }
+    }
+
+    /// A selective posting must seed the window (smallest-first shrink): the result equals
+    /// the in-memory AND, and the dense postings' containers are fetched only in the
+    /// buckets the seed leaves alive — not across the whole window.
+    #[test]
+    fn window_seed_skips_dense_containers_where_the_seed_is_empty() {
+        // rare: three docs, in buckets 2, 5, and 9 (5's doc misses the dense postings).
+        // dense a/b: a ~5k-doc bitmap container in every bucket 1..=10 (~8 KB each).
+        let mut rare = RoaringBitmap::new();
+        for d in [2 * 65_536 + 10, 5 * 65_536 + 6_000, 9 * 65_536 + 40] {
+            rare.insert(d);
+        }
+        let mut da = RoaringBitmap::new();
+        let mut db = RoaringBitmap::new();
+        for k in 1..=10u32 {
+            for d in 0..5_000u32 {
+                da.insert(k * 65_536 + d);
+                db.insert(k * 65_536 + d);
+            }
+        }
+        let want = {
+            let mut x = rare.clone();
+            x &= &da;
+            x &= &db;
+            x
+        };
+        assert_eq!(want.len(), 2, "buckets 2 and 9 survive, bucket 5 does not");
+
+        let (sr, sa, sb) = (ser(&rare), ser(&da), ser(&db));
+        let mut buf = Vec::new();
+        let or = buf.len() as u64;
+        buf.extend_from_slice(&sr);
+        let oa = buf.len() as u64;
+        buf.extend_from_slice(&sa);
+        let ob = buf.len() as u64;
+        buf.extend_from_slice(&sb);
+        let total = buf.len();
+        let bytes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let fetch = ByteCountingFetch {
+            inner: MemoryFetch::new(buf),
+            bytes: bytes.clone(),
+        };
+        let tails = vec![(or, sr.len()), (oa, sa.len()), (ob, sb.len())];
+        let dirs = block_on(open_tail_dirs(&fetch, &tails))
+            .unwrap()
+            .expect("seekable layout");
+
+        let window: Vec<u16> = (1..=10).collect();
+        bytes.set(0);
+        let got = block_on(intersect_key_window(&fetch, &dirs, &window)).unwrap();
+        assert_eq!(got, want);
+        // Unseeded, the two dense postings would read all 10 buckets each (~160 KB, most
+        // of `total`). Seeded, they read only the seed's 3 surviving buckets.
+        assert!(
+            bytes.get() < total / 2,
+            "seeded window read {} of {total} bytes — dense containers were not skipped",
+            bytes.get()
+        );
+
+        // An all-dense window (no posting 4x smaller) keeps the single wave and must
+        // still intersect correctly.
+        let dense_dirs = &dirs[1..];
+        let want_dense = {
+            let mut x = da.clone();
+            x &= &db;
+            x
+        };
+        let got_dense = block_on(intersect_key_window(&fetch, dense_dirs, &window)).unwrap();
+        assert_eq!(got_dense, want_dense);
     }
 
     /// A facet-aware TailScan must equal the filtered AND:
