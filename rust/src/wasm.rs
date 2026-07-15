@@ -941,6 +941,50 @@ impl RrsRecords {
         self.inner.is_empty()
     }
 
+    /// Sets the gap (bytes) up to which `getMany`'s two read waves bridge near-adjacent
+    /// ranges into one request. The default (16 KiB) suits low-latency origins; a client on
+    /// a high-RTT CDN can trade read amplification for fewer round trips — e.g. 262144
+    /// (256 KiB) collapses a 50-row page of scattered doc ids to a handful of reads, and the
+    /// bridged bytes land in the shared range cache rather than being wasted.
+    #[wasm_bindgen(js_name = setCoalesceGap)]
+    pub fn set_coalesce_gap(&mut self, bytes: f64) {
+        self.inner.set_coalesce_gap(bytes as u64);
+    }
+
+    /// Makes the entire offset table resident in one ranged read (`8 B × (len+1)` — e.g.
+    /// ~30 MB for a 3.7M-doc store): every subsequent `get`/`getMany` skips its offset-pair
+    /// wave, so a page hydration is a single coalesced `.bin` wave. Prefer
+    /// `preloadIdxPrefix` when only the top of a rank-ordered corpus is hot.
+    #[wasm_bindgen(js_name = preloadIdx)]
+    pub async fn preload_idx(&mut self) -> Result<(), JsError> {
+        self.inner
+            .preload_idx()
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Makes the offset table resident for doc ids `[0, first)` (clamped to the store's
+    /// length) — the hot prefix of a rank-ordered corpus, where doc id == rank and result
+    /// pages concentrate at low ids. Ids past the prefix fall back to ranged reads.
+    #[wasm_bindgen(js_name = preloadIdxPrefix)]
+    pub async fn preload_idx_prefix(&mut self, first: u32) -> Result<(), JsError> {
+        self.inner
+            .preload_idx_prefix(first)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Hands the store an already-fetched copy of the `.idx` file's leading bytes (header +
+    /// offset table, possibly a truncated prefix) — the zero-fetch counterpart of
+    /// `preloadIdx` for bytes that arrived out of band (an RRHC bundle member, an
+    /// application cache). The header must match the open store; throws on a mismatch.
+    #[wasm_bindgen(js_name = setResidentIdx)]
+    pub fn set_resident_idx(&mut self, bytes: Vec<u8>) -> Result<(), JsError> {
+        self.inner
+            .set_resident_idx(bytes)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     /// Raw record bytes for doc `id` as a `Uint8Array`, or `undefined` (a JS
     /// `null`) when `id` is out of range. One Range read of the offset pair, one
     /// of the record slice.

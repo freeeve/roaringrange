@@ -54,6 +54,19 @@ pub struct RecordStore<F: RangeFetch> {
     version: u16,
     /// Shared zstd dictionary for inflating tag-1 frames, when set.
     dict: Option<Vec<u8>>,
+    /// Gap (bytes) up to which [`get_many`](Self::get_many)'s waves coalesce
+    /// near-adjacent ranges into one read. See [`set_coalesce_gap`](Self::set_coalesce_gap).
+    coalesce_gap: u64,
+    /// Resident prefix of the offset index, when preloaded. See
+    /// [`preload_idx`](Self::preload_idx).
+    resident_idx: Option<ResidentIdx>,
+}
+
+/// A resident prefix of the `.idx` file: `bytes` mirrors `idx[0, 16 + (upto+1)*8)` (header +
+/// offset table), so any doc id `< upto` resolves its offset pair with no fetch.
+struct ResidentIdx {
+    upto: u32,
+    bytes: Vec<u8>,
 }
 
 impl<F: RangeFetch> RecordStore<F> {
@@ -91,6 +104,8 @@ impl<F: RangeFetch> RecordStore<F> {
             count,
             version,
             dict: None,
+            coalesce_gap: crate::fetch::COALESCE_GAP,
+            resident_idx: None,
         })
     }
 
@@ -118,6 +133,77 @@ impl<F: RangeFetch> RecordStore<F> {
     /// Whether the store holds no records.
     pub fn is_empty(&self) -> bool {
         self.count == 0
+    }
+
+    /// Sets the gap (bytes) up to which [`get_many`](Self::get_many)'s two read waves bridge
+    /// near-adjacent ranges into one request. The default (16 KiB, the library-wide
+    /// [`crate::fetch::COALESCE_GAP`]) suits low-latency origins; a client on a high-RTT CDN
+    /// can trade read amplification for fewer round trips — e.g. a 256 KiB gap collapses a
+    /// 50-row page of scattered doc ids to a handful of reads, and the bridged bytes land in
+    /// the shared range cache rather than being wasted.
+    pub fn set_coalesce_gap(&mut self, gap: u64) {
+        self.coalesce_gap = gap;
+    }
+
+    /// Makes the **entire offset table resident** (one ranged read of `8 B × (len+1)` — e.g.
+    /// ~30 MB for a 3.7M-doc store), so every subsequent [`get`](Self::get) /
+    /// [`get_many`](Self::get_many) skips its offset-pair wave entirely and a page hydration
+    /// becomes a single coalesced `.bin` wave. Prefer
+    /// [`preload_idx_prefix`](Self::preload_idx_prefix) when only the top of a rank-ordered
+    /// corpus is hot.
+    pub async fn preload_idx(&mut self) -> Result<(), IndexError> {
+        self.preload_idx_prefix(self.count).await
+    }
+
+    /// Makes the offset table resident for doc ids `[0, first)` (clamped to the store's
+    /// length) — the hot **prefix** of a rank-ordered corpus, where doc id == rank and low
+    /// ids dominate result pages. Ids past the prefix fall back to ranged reads as before.
+    /// One ranged read of `16 + (first+1)*8` bytes; replaces any previous preload.
+    pub async fn preload_idx_prefix(&mut self, first: u32) -> Result<(), IndexError> {
+        let upto = first.min(self.count);
+        let len = usize::try_from(HEADER_SIZE as u64 + (upto as u64 + 1) * 8)
+            .map_err(|_| IndexError::Malformed("RRSR offset table exceeds the address space"))?;
+        let bytes = self.idx.read(0, len).await?;
+        self.resident_idx = Some(ResidentIdx { upto, bytes });
+        Ok(())
+    }
+
+    /// Hands the store an already-fetched copy of the `.idx` file's leading bytes (header +
+    /// offset table, possibly truncated to a prefix) — the zero-fetch counterpart of
+    /// [`preload_idx`](Self::preload_idx) for bytes that arrived out of band (an `RRHC`
+    /// bundle member, an application-level cache). The header must match the open store
+    /// (magic, version, count); the covered prefix is derived from the byte length.
+    pub fn set_resident_idx(&mut self, bytes: Vec<u8>) -> Result<(), IndexError> {
+        if bytes.len() < HEADER_SIZE + 8 {
+            return Err(IndexError::Malformed(
+                "resident RRSR idx shorter than header + one offset",
+            ));
+        }
+        if &bytes[0..4] != MAGIC {
+            let mut m = [0u8; 4];
+            m.copy_from_slice(&bytes[0..4]);
+            return Err(IndexError::BadMagic(m));
+        }
+        if read_u16(&bytes, 4) != self.version || read_u32(&bytes, 8) != self.count {
+            return Err(IndexError::Malformed(
+                "resident RRSR idx header disagrees with the open store",
+            ));
+        }
+        // m offsets are present; id needs off[id] and off[id+1], so ids [0, m-1) resolve.
+        let m = ((bytes.len() - HEADER_SIZE) / 8) as u64;
+        let upto = (m.saturating_sub(1)).min(self.count as u64) as u32;
+        self.resident_idx = Some(ResidentIdx { upto, bytes });
+        Ok(())
+    }
+
+    /// Doc `id`'s offset pair from the resident index, or `None` when no preload covers it.
+    fn resident_pair(&self, id: u32) -> Option<(u64, u64)> {
+        let r = self.resident_idx.as_ref()?;
+        if id >= r.upto {
+            return None;
+        }
+        let base = HEADER_SIZE + id as usize * 8;
+        Some((read_u64(&r.bytes, base), read_u64(&r.bytes, base + 8)))
     }
 
     /// Decodes one stored record's bytes into the record payload. For a version-1
@@ -229,12 +315,16 @@ impl<F: RangeFetch> RecordStore<F> {
         if id >= self.count {
             return Ok(None);
         }
-        let pair = self
-            .idx
-            .read(HEADER_SIZE as u64 + id as u64 * 8, 16)
-            .await?;
-        let start = read_u64(&pair, 0);
-        let end = read_u64(&pair, 8);
+        let (start, end) = match self.resident_pair(id) {
+            Some(pair) => pair,
+            None => {
+                let pair = self
+                    .idx
+                    .read(HEADER_SIZE as u64 + id as u64 * 8, 16)
+                    .await?;
+                (read_u64(&pair, 0), read_u64(&pair, 8))
+            }
+        };
         if end < start {
             return Err(IndexError::Malformed(
                 "RRSR record offset pair has end < start",
@@ -253,23 +343,26 @@ impl<F: RangeFetch> RecordStore<F> {
     /// docs sit adjacently in both files — so the reads run as two **coalesced**
     /// waves (every offset pair, then every record slice), each merging
     /// near-adjacent ranges into single requests: a 25-doc page costs a handful
-    /// of round trips instead of 50. An out-of-range id yields `None`.
+    /// of round trips instead of 50. An out-of-range id yields `None`. Ids covered
+    /// by a resident offset table ([`preload_idx`](Self::preload_idx)) skip wave 1
+    /// entirely; [`set_coalesce_gap`](Self::set_coalesce_gap) tunes how aggressively
+    /// each wave merges.
     pub async fn get_many(&self, ids: &[u32]) -> Result<Vec<Option<Vec<u8>>>, IndexError> {
-        use crate::fetch::{read_coalesced, COALESCE_GAP};
+        use crate::fetch::read_coalesced;
         // Wave 1: the 16-byte offset pairs (zero-length marker = skip the read;
         // the id-bounds check below decides the output, so the marker can't be
-        // confused with a real empty record).
+        // confused with a real empty record). Resident-covered ids need no read.
         let pair_ranges: Vec<(u64, usize)> = ids
             .iter()
             .map(|&id| {
-                if id < self.count {
+                if id < self.count && self.resident_pair(id).is_none() {
                     (HEADER_SIZE as u64 + id as u64 * 8, 16)
                 } else {
                     (0, 0)
                 }
             })
             .collect();
-        let pairs = read_coalesced(&self.idx, &pair_ranges, COALESCE_GAP).await?;
+        let pairs = read_coalesced(&self.idx, &pair_ranges, self.coalesce_gap).await?;
 
         // Wave 2: the record slices.
         let mut rec_ranges: Vec<(u64, usize)> = Vec::with_capacity(ids.len());
@@ -278,8 +371,10 @@ impl<F: RangeFetch> RecordStore<F> {
                 rec_ranges.push((0, 0));
                 continue;
             }
-            let start = read_u64(&pairs[i], 0);
-            let end = read_u64(&pairs[i], 8);
+            let (start, end) = match self.resident_pair(id) {
+                Some(pair) => pair,
+                None => (read_u64(&pairs[i], 0), read_u64(&pairs[i], 8)),
+            };
             if end < start {
                 return Err(IndexError::Malformed(
                     "RRSR record offset pair has end < start",
@@ -290,7 +385,7 @@ impl<F: RangeFetch> RecordStore<F> {
             })?;
             rec_ranges.push((start, len));
         }
-        let blobs = read_coalesced(&self.bin, &rec_ranges, COALESCE_GAP).await?;
+        let blobs = read_coalesced(&self.bin, &rec_ranges, self.coalesce_gap).await?;
 
         let mut out = Vec::with_capacity(ids.len());
         for (&id, blob) in ids.iter().zip(blobs) {
@@ -341,6 +436,154 @@ mod tests {
         let many = block_on(store.get_many(&[2, 0])).unwrap();
         assert_eq!(many[0].as_deref().unwrap(), b"third");
         assert_eq!(many[1].as_deref().unwrap(), br#"{"id":"A","c":9}"#);
+    }
+
+    /// A [`MemoryFetch`] wrapper counting reads, so tests can assert which waves fetch
+    /// (e.g. that a resident offset table eliminates `.idx` reads).
+    #[derive(Clone)]
+    struct CountingFetch {
+        inner: MemoryFetch,
+        reads: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl RangeFetch for CountingFetch {
+        async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, crate::fetch::FetchError> {
+            self.reads.set(self.reads.get() + 1);
+            self.inner.read(offset, len).await
+        }
+    }
+
+    /// Builds a v1 store over `n` records of `size` bytes each (byte value = id), returning
+    /// counting-fetch handles for both files plus their read counters.
+    fn counting_store(
+        n: u32,
+        size: usize,
+    ) -> (
+        RecordStore<CountingFetch>,
+        std::rc::Rc<std::cell::Cell<usize>>,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    ) {
+        let recs: Vec<Vec<u8>> = (0..n).map(|i| vec![i as u8; size]).collect();
+        let mut bin = Vec::new();
+        let mut idx = Vec::new();
+        write_records(&mut bin, &mut idx, &recs).unwrap();
+        let idx_reads = std::rc::Rc::new(std::cell::Cell::new(0));
+        let bin_reads = std::rc::Rc::new(std::cell::Cell::new(0));
+        let store = block_on(RecordStore::open(
+            CountingFetch {
+                inner: MemoryFetch::new(idx),
+                reads: idx_reads.clone(),
+            },
+            CountingFetch {
+                inner: MemoryFetch::new(bin),
+                reads: bin_reads.clone(),
+            },
+        ))
+        .unwrap();
+        (store, idx_reads, bin_reads)
+    }
+
+    /// A full offset-table preload must eliminate the `.idx` wave: `get`/`get_many` after
+    /// `preload_idx` read only the `.bin`, with results identical to the cold path.
+    #[test]
+    fn preload_idx_eliminates_offset_reads() {
+        let (mut store, idx_reads, _) = counting_store(100, 8);
+        block_on(store.preload_idx()).unwrap();
+        idx_reads.set(0);
+
+        let many = block_on(store.get_many(&[5, 50, 99, 200])).unwrap();
+        assert_eq!(many[0].as_deref().unwrap(), &[5u8; 8][..]);
+        assert_eq!(many[1].as_deref().unwrap(), &[50u8; 8][..]);
+        assert_eq!(many[2].as_deref().unwrap(), &[99u8; 8][..]);
+        assert!(many[3].is_none());
+        assert_eq!(block_on(store.get(7)).unwrap().unwrap(), vec![7u8; 8]);
+        assert_eq!(idx_reads.get(), 0, "resident table must serve every pair");
+    }
+
+    /// A prefix preload serves ids below the boundary residently and falls back to ranged
+    /// reads above it — same results either way.
+    #[test]
+    fn preload_idx_prefix_covers_only_the_prefix() {
+        let (mut store, idx_reads, _) = counting_store(100, 8);
+        block_on(store.preload_idx_prefix(10)).unwrap();
+
+        idx_reads.set(0);
+        assert_eq!(block_on(store.get(2)).unwrap().unwrap(), vec![2u8; 8]);
+        assert_eq!(idx_reads.get(), 0, "id below the prefix is resident");
+        assert_eq!(block_on(store.get(50)).unwrap().unwrap(), vec![50u8; 8]);
+        assert_eq!(idx_reads.get(), 1, "id past the prefix pays its read");
+
+        idx_reads.set(0);
+        let many = block_on(store.get_many(&[2, 50])).unwrap();
+        assert_eq!(many[0].as_deref().unwrap(), &[2u8; 8][..]);
+        assert_eq!(many[1].as_deref().unwrap(), &[50u8; 8][..]);
+        assert_eq!(idx_reads.get(), 1, "only the uncovered id fetches");
+    }
+
+    /// `set_resident_idx` accepts out-of-band idx bytes (full or a truncated prefix) after
+    /// validating the header, and rejects garbage rather than serving wrong offsets.
+    #[test]
+    fn set_resident_idx_validates_and_covers_prefix() {
+        let recs: Vec<Vec<u8>> = (0..10u32).map(|i| vec![i as u8; 8]).collect();
+        let mut bin = Vec::new();
+        let mut idx = Vec::new();
+        write_records(&mut bin, &mut idx, &recs).unwrap();
+        let idx_reads = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut store = block_on(RecordStore::open(
+            CountingFetch {
+                inner: MemoryFetch::new(idx.clone()),
+                reads: idx_reads.clone(),
+            },
+            CountingFetch {
+                inner: MemoryFetch::new(bin),
+                reads: std::rc::Rc::new(std::cell::Cell::new(0)),
+            },
+        ))
+        .unwrap();
+
+        // A truncated prefix (offsets off[0..=2]) covers ids [0, 2).
+        store
+            .set_resident_idx(idx[..HEADER_SIZE + 3 * 8].to_vec())
+            .unwrap();
+        idx_reads.set(0);
+        assert_eq!(block_on(store.get(1)).unwrap().unwrap(), vec![1u8; 8]);
+        assert_eq!(idx_reads.get(), 0);
+        assert_eq!(block_on(store.get(2)).unwrap().unwrap(), vec![2u8; 8]);
+        assert_eq!(idx_reads.get(), 1, "uncovered id falls back");
+
+        // Garbage is rejected: wrong magic, mismatched header, too short.
+        let mut bad = idx.clone();
+        bad[0] = b'X';
+        assert!(store.set_resident_idx(bad).is_err());
+        let mut wrong_count = idx.clone();
+        wrong_count[8..12].copy_from_slice(&999u32.to_le_bytes());
+        assert!(store.set_resident_idx(wrong_count).is_err());
+        assert!(store.set_resident_idx(idx[..HEADER_SIZE].to_vec()).is_err());
+    }
+
+    /// The coalesce gap is a real knob: scattered ids whose records sit farther apart than
+    /// the default 16 KiB gap cost one `.bin` read each, and widening the gap collapses them
+    /// into a single request.
+    #[test]
+    fn set_coalesce_gap_trades_reads_for_amplification() {
+        // Records of 5 KB: ids 0 and 5 are ~20 KB apart in .bin — past the 16 KiB default.
+        let (mut store, _, bin_reads) = counting_store(10, 5000);
+        bin_reads.set(0);
+        let many = block_on(store.get_many(&[0, 5])).unwrap();
+        assert_eq!(many[0].as_deref().unwrap(), &[0u8; 5000][..]);
+        assert_eq!(many[1].as_deref().unwrap(), &[5u8; 5000][..]);
+        assert_eq!(bin_reads.get(), 2, "beyond the default gap: one read each");
+
+        store.set_coalesce_gap(1 << 20);
+        bin_reads.set(0);
+        let many = block_on(store.get_many(&[0, 5])).unwrap();
+        assert_eq!(many[0].as_deref().unwrap(), &[0u8; 5000][..]);
+        assert_eq!(many[1].as_deref().unwrap(), &[5u8; 5000][..]);
+        assert_eq!(
+            bin_reads.get(),
+            1,
+            "a wide gap bridges the pair into one read"
+        );
     }
 
     #[test]
