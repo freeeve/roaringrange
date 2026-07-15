@@ -354,6 +354,36 @@ pub(crate) struct HeadBlock {
     pub(crate) tail_size: usize,
 }
 
+/// The byte length of an `RRTI` index's **boot region** — the 40-byte header plus the
+/// resident block-router FST, the `[0, dictStart)` prefix [`TermIndex::from_boot`] consumes.
+/// `header` must hold at least the header; validates the magic, version, and the router
+/// length bound (the same checks [`TermIndex::open`] performs), so a bundle builder can
+/// slice a split's boot region without opening the index. Mirrored by Go's `rrtiBootLen`.
+pub fn rrti_boot_len(header: &[u8]) -> Result<usize, IndexError> {
+    if header.len() < HEADER_SIZE {
+        return Err(IndexError::Malformed("short RRTI header"));
+    }
+    if &header[0..4] != MAGIC {
+        let mut m = [0u8; 4];
+        m.copy_from_slice(&header[0..4]);
+        return Err(IndexError::BadMagic(m));
+    }
+    let version = read_u16(header, 4);
+    if version != VERSION {
+        return Err(IndexError::BadVersion(version));
+    }
+    // `router_len` is untrusted: reject an implausible value before any fetch or
+    // allocation so a crafted header can't drive a multi-GB resident read (native)
+    // or truncate the `as usize` cast (wasm32). See `MAX_RESIDENT_ROUTER`.
+    let router_len = read_u64(header, 16);
+    if router_len > MAX_RESIDENT_ROUTER {
+        return Err(IndexError::Malformed("RRTI router FST length implausible"));
+    }
+    HEADER_SIZE
+        .checked_add(router_len as usize)
+        .ok_or(IndexError::Malformed("RRTI boot region length overflows"))
+}
+
 /// A range-fetchable `RRTI` term index. Boot holds only the small **router FST**
 /// (mapping each dict block's last term to its byte range — O(#blocks), not
 /// O(vocab)); each query range-fetches the front-coded dict blocks and the posting
@@ -382,32 +412,40 @@ impl<F: RangeFetch> TermIndex<F> {
     /// queries fetch only the dict blocks and posting blocks they need.
     pub async fn open(fetch: F) -> Result<Self, IndexError> {
         let header = fetch.read(0, HEADER_SIZE).await?;
-        if header.len() < HEADER_SIZE {
-            return Err(IndexError::Malformed("short RRTI header"));
+        let boot_len = rrti_boot_len(&header)?;
+        let router_bytes = fetch
+            .read(HEADER_SIZE as u64, boot_len - HEADER_SIZE)
+            .await?;
+        Self::from_parts(&header, router_bytes, fetch)
+    }
+
+    /// Boots from a **resident** copy of the boot region (`[0, rrti_boot_len)`: header +
+    /// router FST — e.g. an `RRHC` bundle member) with zero fetches; per-query dict-block
+    /// and posting reads still go to `fetch`. The split-set bundle counterpart of
+    /// [`crate::index::Index::from_boot`].
+    pub fn from_boot(boot: &[u8], fetch: F) -> Result<Self, IndexError> {
+        let boot_len = rrti_boot_len(boot)?;
+        if boot.len() < boot_len {
+            return Err(IndexError::Malformed("RRTI boot region truncated"));
         }
-        if &header[0..4] != MAGIC {
-            let mut m = [0u8; 4];
-            m.copy_from_slice(&header[0..4]);
-            return Err(IndexError::BadMagic(m));
-        }
-        let version = read_u16(&header, 4);
-        if version != VERSION {
-            return Err(IndexError::BadVersion(version));
-        }
-        let flags = read_u16(&header, 6);
-        let term_count = read_u32(&header, 8);
-        let head_boundary = read_u32(&header, 12);
-        let router_len = read_u64(&header, 16);
-        let dict_len = read_u64(&header, 24);
+        Self::from_parts(
+            &boot[..HEADER_SIZE],
+            boot[HEADER_SIZE..boot_len].to_vec(),
+            fetch,
+        )
+    }
+
+    /// Assembles the index from a validated header and its router bytes — the shared tail
+    /// of [`open`](Self::open) and [`from_boot`](Self::from_boot). The caller has run the
+    /// header through [`rrti_boot_len`] (magic/version/router-bound checks) already.
+    fn from_parts(header: &[u8], router_bytes: Vec<u8>, fetch: F) -> Result<Self, IndexError> {
+        let flags = read_u16(header, 6);
+        let term_count = read_u32(header, 8);
+        let head_boundary = read_u32(header, 12);
+        let router_len = read_u64(header, 16);
+        let dict_len = read_u64(header, 24);
         // blockCap (offset 32) is informational; the language byte is at offset 36.
         let tokenizer = Tokenizer::from_header(flags, header[36]);
-        // `router_len` is untrusted: reject an implausible value before the fetch
-        // so a crafted header can't drive a multi-GB resident allocation (native)
-        // or truncate the `as usize` cast (wasm32). See `MAX_RESIDENT_ROUTER`.
-        if router_len > MAX_RESIDENT_ROUTER {
-            return Err(IndexError::Malformed("RRTI router FST length implausible"));
-        }
-        let router_bytes = fetch.read(HEADER_SIZE as u64, router_len as usize).await?;
         let router =
             Map::new(router_bytes).map_err(|_| IndexError::Malformed("RRTI invalid router FST"))?;
         // `Map::new` validates the header/footer but not every interior node, so a

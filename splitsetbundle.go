@@ -16,6 +16,43 @@ import (
 	"io"
 )
 
+// maxResidentRouter mirrors the Rust terms::MAX_RESIDENT_ROUTER bound: an RRTI header
+// whose router length exceeds it is implausible (corruption-shaped), rejected before any
+// slice math trusts it.
+const maxResidentRouter = 512 << 20
+
+// rrtiBootLen returns the byte length of a term split's RRTI boot region — the 40-byte
+// header plus the resident block-router FST, the [0, dictStart) prefix a from-boot open
+// consumes — with the same checks as the Rust terms::rrti_boot_len: short header, bad
+// magic, unexpected version, implausible router length.
+func rrtiBootLen(split []byte) (uint64, error) {
+	if len(split) < rrtiHeaderSize {
+		return 0, ErrTruncated
+	}
+	if string(split[0:4]) != "RRTI" {
+		return 0, ErrMagic
+	}
+	if u16(split[4:6]) != rrtiVersion {
+		return 0, ErrVersion
+	}
+	routerLen := u64(split[16:24])
+	if routerLen > maxResidentRouter {
+		return 0, ErrTruncated
+	}
+	return rrtiHeaderSize + routerLen, nil
+}
+
+// splitBoot dispatches one split on its leading magic — trigram RRS or term RRTI — to its
+// member tag and boot length, mirroring the Rust split_boot.
+func splitBoot(s NamedSplit) (MemberTag, uint64, error) {
+	if len(s.Bytes) >= 4 && string(s.Bytes[0:4]) == "RRTI" {
+		bootLen, err := rrtiBootLen(s.Bytes)
+		return MemberRrti, bootLen, err
+	}
+	bootLen, err := rrsBootLen(s.Bytes)
+	return MemberRrs, bootLen, err
+}
+
 // rrsBootLen returns the byte length of a split's RRS boot region — the header plus the
 // sparse index, the [0, dictStart) prefix a from-boot open consumes — parsed from the
 // split's leading bytes with the same checks as the Rust index::rrs_boot_len: short header,
@@ -48,8 +85,10 @@ func rrsBootLen(split []byte) (uint64, error) {
 }
 
 // WriteSplitsetBundle writes an .rrhc boot bundle over built to dst — byte-for-byte with
-// the Rust write_splitset_bundle: one inlined RRS member per split (in seal/rank order, so
-// the top tiers come first), each carrying its split's boot region.
+// the Rust write_splitset_bundle: one inlined member per split (in seal/rank order, so the
+// top tiers come first), each carrying its split's boot region. Both split bodies are
+// handled by their leading magic: a trigram RRS boot (header + sparse index) or a term
+// RRTI boot (header + router FST).
 //
 // maxSplits caps how many splits are inlined (0 = all): a corpus with a large top tier
 // inlines only the splits a top-K query is likely to open, keeping the first GET small.
@@ -63,7 +102,7 @@ func WriteSplitsetBundle(dst io.Writer, built *BuiltSplitSet, maxSplits int, inl
 	}
 	specs := make([]MemberSpec, 0, take)
 	for _, s := range built.Splits[:take] {
-		bootLen, err := rrsBootLen(s.Bytes)
+		tag, bootLen, err := splitBoot(s)
 		if err != nil {
 			return fmt.Errorf("split %q: %w", s.Name, err)
 		}
@@ -72,7 +111,7 @@ func WriteSplitsetBundle(dst io.Writer, built *BuiltSplitSet, maxSplits int, inl
 				s.Name, bootLen, len(s.Bytes))
 		}
 		specs = append(specs, MemberSpec{
-			Tag:       MemberRrs,
+			Tag:       tag,
 			DataFile:  s.Name,
 			BootOff:   0,
 			BootLen:   uint32(bootLen),

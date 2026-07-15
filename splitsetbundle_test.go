@@ -87,3 +87,39 @@ func TestWriteSplitsetBundleInlinesBootsCapsAndValidates(t *testing.T) {
 		t.Fatal("malformed split header must error")
 	}
 }
+
+// A TERM split set bundles too (task 086): RRTI members with header + router-FST boot
+// regions, byte-for-byte with the Rust writer over the shared term fixture.
+func TestWriteSplitsetBundleTermSplitsMatchSharedGolden(t *testing.T) {
+	built := termConformanceBuild(t)
+	var buf bytes.Buffer
+	if err := WriteSplitsetBundle(&buf, built, 0, 1<<20); err != nil {
+		t.Fatalf("WriteSplitsetBundle(term): %v", err)
+	}
+	if want := loadGoldenBytes(t, "rrhc_term_bundle"); !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("term bundle bytes drift from the shared golden: got %d bytes, want %d",
+			buf.Len(), len(want))
+	}
+
+	hc, err := OpenHotcache(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("OpenHotcache(term): %v", err)
+	}
+	members := hc.Members()
+	if len(members) != len(built.Splits) {
+		t.Fatalf("got %d members, want one per split (%d)", len(members), len(built.Splits))
+	}
+	for i, m := range members {
+		s := built.Splits[i]
+		bootLen, err := rrtiBootLen(s.Bytes)
+		if err != nil {
+			t.Fatalf("rrtiBootLen(%s): %v", s.Name, err)
+		}
+		if m.Tag != MemberRrti || m.DataFile != s.Name || uint64(m.BootLen) != bootLen {
+			t.Fatalf("member %d = %+v, want RRTI member %q boot [0, %d)", i, m, s.Name, bootLen)
+		}
+		if !bytes.Equal(m.BootBytes, s.Bytes[:bootLen]) {
+			t.Fatalf("member %q inlined boot differs from the split's boot region", s.Name)
+		}
+	}
+}

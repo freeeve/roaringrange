@@ -44,7 +44,7 @@ pub fn write_splitset_bundle<W: Write>(
     };
     let mut specs = Vec::with_capacity(take);
     for (name, bytes) in built.splits.iter().take(take) {
-        let boot_len = rrs_boot_len(bytes).map_err(|e| io::Error::other(e.to_string()))?;
+        let (tag, boot_len) = split_boot(name, bytes)?;
         if boot_len > bytes.len() {
             return Err(io::Error::other(format!(
                 "split {name}: boot region {boot_len} B exceeds the split's {} B",
@@ -52,7 +52,7 @@ pub fn write_splitset_bundle<W: Write>(
             )));
         }
         specs.push(MemberSpec {
-            tag: MemberTag::Rrs,
+            tag,
             data_file: name.clone(),
             boot_off: 0,
             boot_len: boot_len as u32,
@@ -60,6 +60,28 @@ pub fn write_splitset_bundle<W: Write>(
         });
     }
     write_hotcache(w, &specs, inline_threshold)
+}
+
+/// One split's member tag and boot length, dispatched on the split's leading magic: a
+/// trigram `RRS` boot (header + sparse index) or — behind the `terms` feature — an `RRTI`
+/// term-split boot (header + router FST). A term split in a build without `terms` is a
+/// clear error rather than a bad-magic mystery.
+fn split_boot(name: &str, bytes: &[u8]) -> io::Result<(MemberTag, usize)> {
+    if bytes.len() >= 4 && &bytes[0..4] == b"RRTI" {
+        #[cfg(feature = "terms")]
+        {
+            let boot_len = crate::terms::rrti_boot_len(bytes)
+                .map_err(|e| io::Error::other(format!("split {name}: {e}")))?;
+            return Ok((MemberTag::Rrti, boot_len));
+        }
+        #[cfg(not(feature = "terms"))]
+        return Err(io::Error::other(format!(
+            "split {name}: a term (RRTI) split needs the `terms` feature"
+        )));
+    }
+    let boot_len =
+        rrs_boot_len(bytes).map_err(|e| io::Error::other(format!("split {name}: {e}")))?;
+    Ok((MemberTag::Rrs, boot_len))
 }
 
 #[cfg(test)]
@@ -180,6 +202,123 @@ mod tests {
         write_splitset_bundle(&mut rrhc, &built, 0, 1 << 20).unwrap();
         let hc = block_on(Hotcache::open(MemoryFetch::new(rrhc))).unwrap();
         assert!(hc.members().is_empty());
+    }
+
+    /// Builds a tiered TERM split set over 30 "abc"-bearing docs; the small byte cap forces
+    /// several `RRTI` splits so the term bundle has more than one member.
+    #[cfg(feature = "terms")]
+    fn built_term_corpus() -> crate::splitset_build::BuiltSplitSet {
+        use crate::splitset_build::{TermSplitBuildConfig, TermSplitSetBuilder};
+        let mut b = TermSplitSetBuilder::new(TermSplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::Tiered,
+            byte_cap: 600,
+            head_boundary: 0,
+            name_prefix: "tcorpus".to_string(),
+            sortcol: None,
+            language: None,
+            stem: false,
+            stopwords: false,
+            case_sensitive: false,
+        });
+        for i in 0..30u32 {
+            b.add_text(&format!("abc tok{i:04}")).unwrap();
+        }
+        let built = b.finish().unwrap();
+        assert!(built.splits.len() > 1, "byte cap should force >1 split");
+        built
+    }
+
+    /// A TERM split set bundles the same way (task 086): every `RRTI` boot (header + router
+    /// FST) inlined by name under `MemberTag::Rrti`, and querying through the bundle —
+    /// splits booted via [`TermIndex::from_boot`], no header fetch — equals the cold path.
+    #[cfg(feature = "terms")]
+    #[test]
+    fn term_bundle_inlines_rrti_boots_and_query_matches_cold() {
+        let built = built_term_corpus();
+        let files: HashMap<String, Vec<u8>> = built.splits.iter().cloned().collect();
+
+        let mut rrhc = Vec::new();
+        write_splitset_bundle(&mut rrhc, &built, 0, 1 << 20).unwrap();
+        let hc = block_on(Hotcache::open(MemoryFetch::new(rrhc))).unwrap();
+        assert_eq!(hc.members().len(), built.splits.len());
+        assert!(hc
+            .members()
+            .iter()
+            .all(|m| m.inlined && m.tag == crate::hotcache::MemberTag::Rrti));
+        for (name, bytes) in &built.splits {
+            let boot_len = crate::terms::rrti_boot_len(bytes).unwrap();
+            assert_eq!(
+                hc.inlined_by_name(name).unwrap(),
+                &bytes[..boot_len],
+                "{name} boot must be its RRTI header + router FST"
+            );
+        }
+
+        let ss = block_on(SplitSet::open(MemoryFetch::new(built.manifest.clone()))).unwrap();
+        let resolver = BundleResolver { files, hc };
+        assert_eq!(
+            block_on(ss.search(&resolver, "abc", 5)).unwrap(),
+            vec![0, 1, 2, 3, 4]
+        );
+        assert_eq!(
+            block_on(ss.search(&resolver, "tok0007", 10)).unwrap(),
+            vec![7]
+        );
+        let all = block_on(ss.search(&resolver, "abc", 1000)).unwrap();
+        assert_eq!(all, (0..30).collect::<Vec<u32>>());
+    }
+
+    /// Cross-language conformance for the TERM bundle: the Go `WriteSplitsetBundle` must
+    /// reproduce these bytes from the shared term fixture (`termConformanceBuild`).
+    #[cfg(feature = "terms")]
+    fn shared_term_golden_bundle() -> Vec<u8> {
+        let built = crate::splitset_build::term_conformance_build();
+        let mut rrhc = Vec::new();
+        write_splitset_bundle(&mut rrhc, &built, 0, 1 << 20).unwrap();
+        rrhc
+    }
+
+    #[cfg(feature = "terms")]
+    fn shared_term_golden_path() -> &'static str {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/rrhc_term_bundle_build_golden.txt"
+        )
+    }
+
+    /// Asserted by Go's `splitsetbundle_test.go` against the same golden.
+    #[cfg(feature = "terms")]
+    #[test]
+    fn term_bundle_matches_shared_golden() {
+        let hex: String = shared_term_golden_bundle()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let text =
+            std::fs::read_to_string(shared_term_golden_path()).expect("read term bundle golden");
+        assert_eq!(
+            text.trim(),
+            format!("rrhc_term_bundle {hex}"),
+            "term split-set bundle drifted from the shared golden"
+        );
+    }
+
+    /// Regenerate with
+    /// `cargo test --features "splits hotcache terms" regen_term_bundle_golden -- --ignored`.
+    #[cfg(feature = "terms")]
+    #[test]
+    #[ignore]
+    fn regen_term_bundle_golden() {
+        let hex: String = shared_term_golden_bundle()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        std::fs::write(
+            shared_term_golden_path(),
+            format!("rrhc_term_bundle {hex}\n"),
+        )
+        .expect("write term bundle golden");
     }
 
     /// Serializes the bundle over the shared split-set conformance fixture — the corpus both

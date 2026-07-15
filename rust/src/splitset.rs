@@ -1335,11 +1335,10 @@ impl<F: RangeFetch> SplitBody<F> {
     }
 }
 
-/// Opens `split` via `resolver` according to `body_kind`. A trigram split uses its inlined boot
-/// bytes ([`SplitFetcher::boot`]) when present (a zero-round-trip [`Index::from_boot`]) and a
-/// fetched [`Index::open`] otherwise; a term split always cold-opens via [`TermIndex::open`]
-/// (the term index has no boot path yet). Errors if a term split is named but the `terms`
-/// feature is off.
+/// Opens `split` via `resolver` according to `body_kind`. Either body uses its inlined boot
+/// bytes ([`SplitFetcher::boot`]) when present — a zero-round-trip [`Index::from_boot`] /
+/// [`TermIndex::from_boot`] — and a fetched cold open otherwise. Errors if a term split is
+/// named but the `terms` feature is off.
 async fn open_split<R: SplitFetcher>(
     resolver: &R,
     split: &Split,
@@ -1348,7 +1347,10 @@ async fn open_split<R: SplitFetcher>(
     let fetch = resolver.fetch_named(&split.data_file);
     if body_kind == BodyKind::Term {
         #[cfg(feature = "terms")]
-        return Ok(SplitBody::Term(TermIndex::open(fetch).await?));
+        return Ok(SplitBody::Term(match resolver.boot(split) {
+            Some(boot) => TermIndex::from_boot(&boot, fetch)?,
+            None => TermIndex::open(fetch).await?,
+        }));
         #[cfg(not(feature = "terms"))]
         return Err(IndexError::Malformed(
             "term-bodied split set requires the `terms` feature",
