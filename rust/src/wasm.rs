@@ -2264,6 +2264,31 @@ impl RrssIndex {
         Ok(field_counts_to_js(&counts))
     }
 
+    /// Exact head+tail counts over `ids` for specific `[field, category]` pairs, summed across
+    /// the splits the IDs fall in — the on-demand companion to `facetCounts`, which prices only
+    /// the top categories per field. Use it to price a long-tail category the user expands or
+    /// searches for (each pair costs ~one small fetch per contributing split). Returns one
+    /// count per pair, in order (`Uint32Array`); an unknown pair yields 0.
+    #[wasm_bindgen(js_name = countsFor)]
+    pub async fn counts_for(&self, ids: Vec<u32>, pairs: Array) -> Result<Vec<u32>, JsError> {
+        let pairs = filter_pairs(&pairs)?;
+        let resolver = WasmSplitResolver {
+            base: self.base.clone(),
+            bloom: self.bloom.clone(),
+            #[cfg(feature = "hotcache")]
+            hc: self.hc.clone(),
+        };
+        let counts = self
+            .inner
+            .facet_counts_for(&resolver, &ids, &pairs)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(counts
+            .into_iter()
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+            .collect())
+    }
+
     /// A header-only count estimate for `query` across the whole split set — `{ count, exact }`,
     /// the same shape as `RrsIndex.countEstimate`. `exact` is true only for a single-n-gram query
     /// over a base-only, tombstone-free set; otherwise `count` is an upper bound (summed per-split

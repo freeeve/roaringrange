@@ -49,6 +49,13 @@ pub const FLAG_TOMBSTONES: u16 = 1 << 3;
 /// manifest byte-identical. Mirrors the per-split `RRS` v4 / `RRSF` / `RRTI` case-sensitive flags.
 pub const FLAG_CASE_SENSITIVE: u16 = 1 << 4;
 
+/// Per-field cap on the categories [`SplitSet::facet_counts`] prices exactly per split (by
+/// full-corpus frequency — what a facet UI shows). Matches the facet reader's lazy top-N head
+/// load, so the split path and the monolith boot agree on how much of a wide field is priced;
+/// a long-tail category past the cap is fetched on demand via
+/// [`SplitSet::facet_counts_for`].
+pub const FACET_COUNT_TOP_PER_FIELD: usize = 128;
+
 /// Per-split flag bit: this split carries a tombstone posting in its summary region.
 pub const SPLIT_FLAG_HAS_TOMBSTONE: u16 = 1 << 0;
 /// Per-split flag bit: the split stores **absolute global** doc IDs (`global = local`) rather
@@ -805,55 +812,59 @@ impl SplitSet {
     /// counts each split's local matches against its own `‹split›.rrf`, and **sums by field and
     /// category name**. Fields and categories appear in first-seen order; a category with a zero
     /// count is omitted (the caller renders missing keys as `0`). Splits a result ID never lands
-    /// in — and those lacking a facet sidecar — contribute nothing. One `.rrf` open per
-    /// contributing split (counts are over each split's head postings, like the monolith's
-    /// in-memory facet counts).
+    /// in — and those lacking a facet sidecar — contribute nothing.
+    ///
+    /// Reads are KB-scale per contributing split: the sidecar boots **meta-only** and the top
+    /// [`FACET_COUNT_TOP_PER_FIELD`] categories per field (by full-corpus frequency — what a
+    /// facet UI shows) are priced exactly at container granularity, head **and** tail (so a
+    /// result spanning a split's tail buckets is no longer undercounted). The long tail past
+    /// the cap is omitted; price an expanded long-tail category on demand with
+    /// [`facet_counts_for`](Self::facet_counts_for). The whole `.rrf` is never downloaded.
     pub async fn facet_counts<R: SplitFetcher>(
         &self,
         resolver: &R,
         ids: &[u32],
     ) -> Result<Vec<FieldCounts>, IndexError> {
-        // Group the global result IDs by the split they belong to, as split-local IDs.
-        let mut per_split: BTreeMap<usize, RoaringBitmap> = BTreeMap::new();
-        for &gid in ids {
-            if let Some((si, split)) = self
-                .splits
-                .iter()
-                .enumerate()
-                .find(|(_, s)| s.contains(gid))
-            {
-                per_split.entry(si).or_default().insert(split.to_local(gid));
-            }
-        }
+        self.facet_counts_top(resolver, ids, FACET_COUNT_TOP_PER_FIELD)
+            .await
+    }
 
-        // Open every contributing split's `.rrf` in one concurrent wave (each open costs ~MBs of
-        // head region), then aggregate in split order so field/category first-seen order is
-        // deterministic. Grouping IDs by split is done; the opens are the round trips.
-        let entries: Vec<(usize, RoaringBitmap)> = per_split.into_iter().collect();
-        let names: Vec<String> = entries
-            .iter()
-            .map(|(si, _)| facet_file_name(&self.splits[*si].data_file))
-            .collect();
-        let opened = join_all(
-            names
-                .iter()
-                .map(|n| FacetIndex::open(resolver.fetch_named(n))),
-        )
-        .await;
+    /// [`facet_counts`](Self::facet_counts) with an explicit per-field pricing cap:
+    /// `top_per_field` is how many categories per field (ranked by full-corpus frequency) each
+    /// split prices exactly; `0` prices **every** category (exact everywhere — fine for narrow
+    /// sidecars, ruinous over HTTP on wide ones).
+    pub async fn facet_counts_top<R: SplitFetcher>(
+        &self,
+        resolver: &R,
+        ids: &[u32],
+        top_per_field: usize,
+    ) -> Result<Vec<FieldCounts>, IndexError> {
+        // Group the global result IDs by the split they belong to, as split-local IDs, then
+        // boot each contributing sidecar meta-only and price its counts in one concurrent
+        // wave. join_all preserves split order, so field/category first-seen order stays
+        // deterministic.
+        let entries = self.ids_by_split(ids);
+        let futs = entries.iter().map(|(si, local)| {
+            let name = facet_file_name(&self.splits[*si].data_file);
+            async move {
+                let facets = FacetIndex::open_meta(resolver.fetch_named(&name)).await?;
+                let counts = facets.counts_full(local, top_per_field).await?;
+                Ok::<_, IndexError>((facets, counts))
+            }
+        });
 
         // Aggregate each contributing split's counts into name-keyed fields (first-seen order).
         let mut fields: Vec<FieldCounts> = Vec::new();
         let mut field_pos: BTreeMap<String, usize> = BTreeMap::new();
-        for ((_si, local), fac) in entries.iter().zip(opened) {
-            let facets = match fac {
-                Ok(f) => f,
+        for fac in join_all(futs).await {
+            let (facets, counts) = match fac {
+                Ok(v) => v,
                 // A split with no facet sidecar (the object does not exist) contributes
                 // nothing; a transient/unreadable or corrupt sidecar must NOT be silently
                 // swallowed (that would return wrong totals as Ok), so propagate it.
                 Err(IndexError::Fetch(e)) if e.is_not_found() => continue,
                 Err(e) => return Err(e),
             };
-            let counts = facets.counts(local); // Vec<Vec<u64>> aligned to facets.fields
             for (fi, field) in facets.fields().iter().enumerate() {
                 let fp = *field_pos.entry(field.name.clone()).or_insert_with(|| {
                     fields.push(FieldCounts {
@@ -876,6 +887,60 @@ impl SplitSet {
             }
         }
         Ok(fields)
+    }
+
+    /// Exact head+tail counts within `ids` for specific named `(field, category)` pairs, summed
+    /// across the splits the IDs fall in — the split-set companion to
+    /// [`FacetIndex::counts_for`], for pricing a long-tail category the per-field cap of
+    /// [`facet_counts`](Self::facet_counts) left out (e.g. one the user expands or searches
+    /// for). Each pair costs ~one head + one tail-container fetch per contributing split. A
+    /// pair no sidecar carries counts `0`. Returns one count per input pair, in order.
+    pub async fn facet_counts_for<R: SplitFetcher>(
+        &self,
+        resolver: &R,
+        ids: &[u32],
+        pairs: &[(String, String)],
+    ) -> Result<Vec<u64>, IndexError> {
+        let entries = self.ids_by_split(ids);
+        let futs = entries.iter().map(|(si, local)| {
+            let name = facet_file_name(&self.splits[*si].data_file);
+            async move {
+                let facets = FacetIndex::open_meta(resolver.fetch_named(&name)).await?;
+                facets.counts_for(local, pairs).await
+            }
+        });
+        let mut totals = vec![0u64; pairs.len()];
+        for r in join_all(futs).await {
+            match r {
+                Ok(v) => {
+                    for (t, n) in totals.iter_mut().zip(v) {
+                        *t += n;
+                    }
+                }
+                // Same sidecar-absence discipline as facet_counts: missing contributes nothing,
+                // anything else must not silently zero a count.
+                Err(IndexError::Fetch(e)) if e.is_not_found() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(totals)
+    }
+
+    /// Groups global result `ids` by the split they fall in, as split-local ID bitmaps — the
+    /// shared head of the facet-count paths. IDs no split contains are dropped.
+    fn ids_by_split(&self, ids: &[u32]) -> Vec<(usize, RoaringBitmap)> {
+        let mut per_split: BTreeMap<usize, RoaringBitmap> = BTreeMap::new();
+        for &gid in ids {
+            if let Some((si, split)) = self
+                .splits
+                .iter()
+                .enumerate()
+                .find(|(_, s)| s.contains(gid))
+            {
+                per_split.entry(si).or_default().insert(split.to_local(gid));
+            }
+        }
+        per_split.into_iter().collect()
     }
 
     /// A header-only estimate of how many documents match `query` across the whole set, mirroring
@@ -2747,6 +2812,204 @@ mod tests {
         assert!(block_on(ss.facet_counts(&resolver, &[]))
             .unwrap()
             .is_empty());
+    }
+
+    /// A [`RangeFetch`] that logs every `(file, offset, len)` read to a shared list, so a test
+    /// can assert byte discipline — what was fetched, not just what was returned.
+    #[derive(Clone)]
+    struct RecordingFetch {
+        inner: MemoryFetch,
+        name: String,
+        log: std::rc::Rc<std::cell::RefCell<Vec<(String, u64, usize)>>>,
+    }
+
+    impl RangeFetch for RecordingFetch {
+        async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, crate::FetchError> {
+            self.log.borrow_mut().push((self.name.clone(), offset, len));
+            self.inner.read(offset, len).await
+        }
+    }
+
+    /// A [`MapResolver`] that records every read each handed-out fetch performs.
+    struct RecordingResolver {
+        files: HashMap<String, Vec<u8>>,
+        log: std::rc::Rc<std::cell::RefCell<Vec<(String, u64, usize)>>>,
+    }
+
+    impl SplitFetcher for RecordingResolver {
+        type Fetch = RecordingFetch;
+        fn fetch_named(&self, name: &str) -> RecordingFetch {
+            RecordingFetch {
+                inner: match self.files.get(name) {
+                    Some(b) => MemoryFetch::new(b.clone()),
+                    None => MemoryFetch::missing(),
+                },
+                name: name.to_string(),
+                log: self.log.clone(),
+            }
+        }
+    }
+
+    /// Results landing in a split's tail buckets (local id >= 65536) must be counted exactly —
+    /// the old head-only path silently undercounted them — and the pricing must stay
+    /// container-granular: no single read may span the sidecar's whole postings region (the
+    /// eager whole-`.rrf` download this path used to issue per contributing split).
+    #[test]
+    fn facet_counts_prices_tail_buckets_without_whole_sidecar_reads() {
+        // 70k docs in ONE split (huge cap), alternating two categories, so the sidecar's
+        // postings have a real head (bucket 0) and tail (bucket 1) part.
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::Tiered,
+            byte_cap: 64 << 20,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 0,
+            case_sensitive: false,
+        });
+        for i in 0..70_000u32 {
+            let cat = if i % 2 == 0 { "even" } else { "odd" };
+            b.add_faceted("abc", &[("par".to_string(), cat.to_string())])
+                .unwrap();
+        }
+        let built = b.finish().unwrap();
+        assert_eq!(built.splits.len(), 1, "one split so local id == global id");
+
+        let files: HashMap<String, Vec<u8>> = built
+            .splits
+            .iter()
+            .chain(built.facets.iter())
+            .cloned()
+            .collect();
+        let rrf = files.get("corpus-s00000.rrf").expect("facet sidecar");
+        let meta_len = crate::facet::rrsf_boot_len(&rrf[..24]).unwrap();
+        let region_len = rrf.len() - meta_len;
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let resolver = RecordingResolver {
+            files,
+            log: log.clone(),
+        };
+        let ss = open_built(&built);
+
+        // Ids span bucket 0 AND bucket 1: even ids 0, 65536 / odd ids 1, 65537, 69999.
+        let counts = block_on(ss.facet_counts(&resolver, &[0, 1, 65536, 65537, 69_999])).unwrap();
+        let m: HashMap<String, u64> = counts
+            .iter()
+            .find(|fc| fc.field == "par")
+            .expect("par field")
+            .categories
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(m.get("even"), Some(&2), "tail id 65536 must be counted");
+        assert_eq!(
+            m.get("odd"),
+            Some(&3),
+            "tail ids 65537/69999 must be counted"
+        );
+
+        // Byte discipline: every .rrf read is a header/meta/posting-container slice — none
+        // spans the whole postings region the way the old eager open did.
+        let reads = log.borrow();
+        let rrf_reads: Vec<_> = reads
+            .iter()
+            .filter(|(n, _, _)| n.ends_with(".rrf"))
+            .collect();
+        assert!(!rrf_reads.is_empty());
+        for (_, _, len) in &rrf_reads {
+            assert!(
+                *len < region_len,
+                "a {len}-byte .rrf read spans the whole {region_len}-byte postings region"
+            );
+        }
+    }
+
+    /// The per-field pricing cap and its on-demand companion: `facet_counts_top` prices only
+    /// the top categories per field (by full-corpus frequency) and omits the long tail, and
+    /// `facet_counts_for` prices a named long-tail pair exactly (0 for an unknown pair).
+    #[test]
+    fn facet_counts_top_caps_pricing_and_counts_for_prices_the_long_tail() {
+        // One split; field "tag" with six categories of strictly descending frequency
+        // (t0 x6, t1 x5, ... t5 x1 — 21 docs), so the top-N selection is deterministic.
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::Tiered,
+            byte_cap: 1 << 20,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 0,
+            case_sensitive: false,
+        });
+        let mut n = 0u32;
+        for t in 0..6u32 {
+            for _ in 0..(6 - t) {
+                b.add_faceted("abc", &[("tag".to_string(), format!("t{t}"))])
+                    .unwrap();
+                n += 1;
+            }
+        }
+        let built = b.finish().unwrap();
+        assert_eq!(built.splits.len(), 1);
+        let files: HashMap<String, Vec<u8>> = built
+            .splits
+            .iter()
+            .chain(built.facets.iter())
+            .cloned()
+            .collect();
+        let resolver = MapResolver(files);
+        let ss = open_built(&built);
+        let ids: Vec<u32> = (0..n).collect();
+
+        // Capped at 3: only the three most frequent categories are priced; t3..t5 are omitted
+        // even though the result matches them.
+        let counts = block_on(ss.facet_counts_top(&resolver, &ids, 3)).unwrap();
+        let tags: HashMap<String, u64> = counts
+            .iter()
+            .find(|fc| fc.field == "tag")
+            .expect("tag field")
+            .categories
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(tags.get("t0"), Some(&6));
+        assert_eq!(tags.get("t1"), Some(&5));
+        assert_eq!(tags.get("t2"), Some(&4));
+        assert!(!tags.contains_key("t3") && !tags.contains_key("t5"));
+
+        // The default cap prices this narrow field fully.
+        let counts = block_on(ss.facet_counts(&resolver, &ids)).unwrap();
+        let tags: HashMap<String, u64> = counts
+            .iter()
+            .find(|fc| fc.field == "tag")
+            .unwrap()
+            .categories
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(tags.len(), 6);
+        assert_eq!(tags.get("t5"), Some(&1));
+
+        // On-demand exact pricing of named pairs, unknown pairs count 0.
+        let pairs = vec![
+            ("tag".to_string(), "t5".to_string()),
+            ("tag".to_string(), "t3".to_string()),
+            ("tag".to_string(), "zzz".to_string()),
+        ];
+        assert_eq!(
+            block_on(ss.facet_counts_for(&resolver, &ids, &pairs)).unwrap(),
+            vec![1, 3, 0]
+        );
+        // A subset of ids prices against that subset only.
+        assert_eq!(
+            block_on(ss.facet_counts_for(&resolver, &ids[..6], &pairs)).unwrap(),
+            vec![0, 0, 0]
+        );
     }
 
     /// A [`RangeFetch`] over resident bytes that can simulate a transient transport failure
