@@ -57,9 +57,11 @@ pub struct RecordStore<F: RangeFetch> {
     /// Gap (bytes) up to which [`get_many`](Self::get_many)'s waves coalesce
     /// near-adjacent ranges into one read. See [`set_coalesce_gap`](Self::set_coalesce_gap).
     coalesce_gap: u64,
-    /// Resident prefix of the offset index, when preloaded. See
-    /// [`preload_idx`](Self::preload_idx).
-    resident_idx: Option<ResidentIdx>,
+    /// Resident prefix of the offset index, when preloaded. Behind an `RwLock` so the
+    /// preload methods take `&self`: on the wasm side an exclusive borrow held across the
+    /// preload's network await would make any concurrent `get`/`get_many` throw ("recursive
+    /// use of an object"), and natively the store stays `Sync` for rayon builders.
+    resident_idx: std::sync::RwLock<Option<ResidentIdx>>,
 }
 
 /// A resident prefix of the `.idx` file: `bytes` mirrors `idx[0, 16 + (upto+1)*8)` (header +
@@ -105,7 +107,7 @@ impl<F: RangeFetch> RecordStore<F> {
             version,
             dict: None,
             coalesce_gap: crate::fetch::COALESCE_GAP,
-            resident_idx: None,
+            resident_idx: std::sync::RwLock::new(None),
         })
     }
 
@@ -151,7 +153,7 @@ impl<F: RangeFetch> RecordStore<F> {
     /// becomes a single coalesced `.bin` wave. Prefer
     /// [`preload_idx_prefix`](Self::preload_idx_prefix) when only the top of a rank-ordered
     /// corpus is hot.
-    pub async fn preload_idx(&mut self) -> Result<(), IndexError> {
+    pub async fn preload_idx(&self) -> Result<(), IndexError> {
         self.preload_idx_prefix(self.count).await
     }
 
@@ -159,12 +161,12 @@ impl<F: RangeFetch> RecordStore<F> {
     /// length) — the hot **prefix** of a rank-ordered corpus, where doc id == rank and low
     /// ids dominate result pages. Ids past the prefix fall back to ranged reads as before.
     /// One ranged read of `16 + (first+1)*8` bytes; replaces any previous preload.
-    pub async fn preload_idx_prefix(&mut self, first: u32) -> Result<(), IndexError> {
+    pub async fn preload_idx_prefix(&self, first: u32) -> Result<(), IndexError> {
         let upto = first.min(self.count);
         let len = usize::try_from(HEADER_SIZE as u64 + (upto as u64 + 1) * 8)
             .map_err(|_| IndexError::Malformed("RRSR offset table exceeds the address space"))?;
         let bytes = self.idx.read(0, len).await?;
-        self.resident_idx = Some(ResidentIdx { upto, bytes });
+        *self.resident_idx.write().expect("resident idx lock") = Some(ResidentIdx { upto, bytes });
         Ok(())
     }
 
@@ -173,7 +175,7 @@ impl<F: RangeFetch> RecordStore<F> {
     /// [`preload_idx`](Self::preload_idx) for bytes that arrived out of band (an `RRHC`
     /// bundle member, an application-level cache). The header must match the open store
     /// (magic, version, count); the covered prefix is derived from the byte length.
-    pub fn set_resident_idx(&mut self, bytes: Vec<u8>) -> Result<(), IndexError> {
+    pub fn set_resident_idx(&self, bytes: Vec<u8>) -> Result<(), IndexError> {
         if bytes.len() < HEADER_SIZE + 8 {
             return Err(IndexError::Malformed(
                 "resident RRSR idx shorter than header + one offset",
@@ -192,13 +194,14 @@ impl<F: RangeFetch> RecordStore<F> {
         // m offsets are present; id needs off[id] and off[id+1], so ids [0, m-1) resolve.
         let m = ((bytes.len() - HEADER_SIZE) / 8) as u64;
         let upto = (m.saturating_sub(1)).min(self.count as u64) as u32;
-        self.resident_idx = Some(ResidentIdx { upto, bytes });
+        *self.resident_idx.write().expect("resident idx lock") = Some(ResidentIdx { upto, bytes });
         Ok(())
     }
 
     /// Doc `id`'s offset pair from the resident index, or `None` when no preload covers it.
     fn resident_pair(&self, id: u32) -> Option<(u64, u64)> {
-        let r = self.resident_idx.as_ref()?;
+        let guard = self.resident_idx.read().expect("resident idx lock");
+        let r = guard.as_ref()?;
         if id >= r.upto {
             return None;
         }
@@ -584,6 +587,75 @@ mod tests {
             1,
             "a wide gap bridges the pair into one read"
         );
+    }
+
+    /// A hydration must be able to overlap an in-flight preload (the browse-at-load shape):
+    /// the preload methods take `&self`, so both borrow the shared store concurrently — with
+    /// `&mut self` this test would not compile, and the wasm binding threw "recursive use of
+    /// an object" (task 092).
+    #[test]
+    fn preload_overlaps_get_many() {
+        use futures::task::LocalSpawnExt;
+
+        /// Serves after parking once, so the awaited read is genuinely in flight.
+        #[derive(Clone)]
+        struct YieldingFetch(MemoryFetch);
+        impl RangeFetch for YieldingFetch {
+            async fn read(
+                &self,
+                offset: u64,
+                len: usize,
+            ) -> Result<Vec<u8>, crate::fetch::FetchError> {
+                let mut parked = false;
+                std::future::poll_fn(|cx| {
+                    if parked {
+                        std::task::Poll::Ready(())
+                    } else {
+                        parked = true;
+                        cx.waker().wake_by_ref();
+                        std::task::Poll::Pending
+                    }
+                })
+                .await;
+                self.0.read(offset, len).await
+            }
+        }
+
+        let recs: Vec<Vec<u8>> = (0..20u32).map(|i| vec![i as u8; 8]).collect();
+        let mut bin = Vec::new();
+        let mut idx = Vec::new();
+        write_records(&mut bin, &mut idx, &recs).unwrap();
+        let store = std::rc::Rc::new(
+            block_on(RecordStore::open(
+                YieldingFetch(MemoryFetch::new(idx)),
+                YieldingFetch(MemoryFetch::new(bin)),
+            ))
+            .unwrap(),
+        );
+
+        let mut pool = futures::executor::LocalPool::new();
+        let spawner = pool.spawner();
+        let done = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let (s1, d1) = (store.clone(), done.clone());
+        spawner
+            .spawn_local(async move {
+                s1.preload_idx_prefix(10).await.unwrap();
+                d1.set(d1.get() + 1);
+            })
+            .unwrap();
+        let (s2, d2) = (store.clone(), done.clone());
+        spawner
+            .spawn_local(async move {
+                let got = s2.get_many(&[3, 15]).await.unwrap();
+                assert_eq!(got[0].as_deref().unwrap(), &[3u8; 8][..]);
+                assert_eq!(got[1].as_deref().unwrap(), &[15u8; 8][..]);
+                d2.set(d2.get() + 1);
+            })
+            .unwrap();
+        pool.run();
+        assert_eq!(done.get(), 2, "preload and hydration both complete");
+        // The preload landed: a covered id now resolves residently.
+        assert!(store.resident_pair(3).is_some());
     }
 
     #[test]

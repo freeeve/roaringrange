@@ -747,18 +747,45 @@ impl<F: RangeFetch> FacetIndex<F> {
             }
         }
 
-        // Wave C: every needed container across all categories, coalesced.
-        let mut c_ranges: Vec<(u64, usize)> = Vec::new();
+        // Wave C: every needed container across all categories. Two-tier bridging: WITHIN
+        // one category's posting, skipped containers between two needed ones are bridged up
+        // to INTRA_CATEGORY_GAP (an over-read bounded to ~2 skipped 8 KB containers), so a
+        // result spanning alternating buckets costs one read per category rather than one
+        // per container; ACROSS categories only PRICING_GAP applies, keeping the zipf
+        // dead-byte chaining out. A flat small gap drained a head split as ~100
+        // container-sized reads (~35 s over CDN RTTs); a flat large one fetched hundreds of
+        // KB of unrelated tiny postings.
+        const INTRA_CATEGORY_GAP: u64 = 16 * 1024;
+        let mut spans: Vec<(u64, usize)> = Vec::new();
+        let mut locs: Vec<Vec<(usize, usize)>> = vec![Vec::new(); targets.len()];
         for (i, t) in tails.iter().enumerate() {
             if let Tail::Containers(needed) = t {
                 let off = cat(&targets[i]).range.tail_off;
+                // Only this category's own last span may extend at the wide gap.
+                let mut my_last: Option<usize> = None;
                 for c in needed {
-                    c_ranges.push((off + c.start as u64, c.len));
+                    let abs = off + c.start as u64;
+                    let mut placed = false;
+                    if let Some(li) = my_last {
+                        let (s, l) = &mut spans[li];
+                        if abs <= *s + *l as u64 + INTRA_CATEGORY_GAP {
+                            let new_end = abs + c.len as u64;
+                            if new_end > *s + *l as u64 {
+                                *l = (new_end - *s) as usize;
+                            }
+                            locs[i].push((li, (abs - *s) as usize));
+                            placed = true;
+                        }
+                    }
+                    if !placed {
+                        spans.push((abs, c.len));
+                        my_last = Some(spans.len() - 1);
+                        locs[i].push((spans.len() - 1, 0));
+                    }
                 }
             }
         }
-        let bodies = read_coalesced(&self.fetch, &c_ranges, PRICING_GAP).await?;
-        let mut k = 0usize;
+        let bodies = read_coalesced(&self.fetch, &spans, PRICING_GAP).await?;
         for (i, t) in tails.iter().enumerate() {
             let Tail::Containers(needed) = t else {
                 continue;
@@ -769,11 +796,8 @@ impl<F: RangeFetch> FacetIndex<F> {
             // Re-frame this target's fetched containers into a standalone bitmap.
             let sel: Vec<(u16, u32, &[u8])> = needed
                 .iter()
-                .map(|c| {
-                    let b = bodies[k].as_slice();
-                    k += 1;
-                    (c.key, c.card, b)
-                })
+                .zip(&locs[i])
+                .map(|(c, &(si, rel))| (c.key, c.card, &bodies[si][rel..rel + c.len]))
                 .collect();
             let bm = crate::index::deserialize(&assemble(&sel))?;
             counts[i] += result.intersection_len(&bm);
