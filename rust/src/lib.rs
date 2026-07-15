@@ -88,6 +88,11 @@ pub mod splitset_bundle;
 /// Container-level ranged reads into tail postings (search-fetch reduction).
 mod posting;
 
+/// Cooperative in-flight window for the browser fetch layer (target-independent so the
+/// queueing logic unit-tests natively; only the wasm reader instantiates one).
+#[cfg(any(feature = "wasm", test))]
+mod fetch_window;
+
 /// Native build-side writers for the `RRS`/`RRSF` formats (excluded from wasm).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod build;

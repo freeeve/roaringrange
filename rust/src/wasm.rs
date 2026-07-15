@@ -18,6 +18,7 @@
 use crate::catalog::Catalog;
 use crate::facet::{FacetIndex, Field, FilterSel};
 use crate::fetch::{FetchError, RangeFetch};
+use crate::fetch_window::FetchGate;
 use crate::index::{Cursor, Index};
 use crate::lookup::Lookup;
 use crate::range_cache::RangeCache;
@@ -28,19 +29,52 @@ use crate::sortcols::SortCols;
 use crate::terms::TermIndex;
 #[cfg(feature = "vector")]
 use crate::vector::VectorIndex;
+use futures::future::{LocalBoxFuture, Shared};
+use futures::FutureExt;
 use js_sys::{Array, ArrayBuffer, Float64Array, Object, Reflect, Uint32Array, Uint8Array};
 use roaring::RoaringBitmap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
+
+/// A ranged read in flight, shareable by every concurrent caller of the same range.
+type InFlightRead = Shared<LocalBoxFuture<'static, Result<Vec<u8>, FetchError>>>;
 
 thread_local! {
     /// Process-wide range cache shared by every [`WasmFetch`]. `None` until the client opts in via
     /// [`set_range_cache_mb`]; resized or cleared by the same call. The wasm runtime is
     /// single-threaded, so a thread-local `Rc<RefCell<_>>` is all the sharing this needs.
     static RANGE_CACHE: RefCell<Option<Rc<RefCell<RangeCache>>>> = const { RefCell::new(None) };
+    /// The in-flight window (see [`set_fetch_window`]): how many network reads run at once.
+    static FETCH_GATE: Rc<FetchGate> = FetchGate::new(DEFAULT_FETCH_WINDOW);
+    /// Singleflight table: identical concurrent `(url, offset, len)` misses share ONE network
+    /// fetch instead of each hitting the origin (the range cache only memoizes *completed*
+    /// reads, so without this two overlapping waves double-fetch the same range).
+    static IN_FLIGHT: RefCell<HashMap<(String, u64, usize), InFlightRead>> =
+        RefCell::new(HashMap::new());
+    /// One reused `Headers` object for every ranged read: the `Range` value is set and the
+    /// `Request` snapshotted synchronously (no await between), so sharing it is race-free on
+    /// the single-threaded runtime and saves a JS allocation per read.
+    static RANGE_HEADERS: Headers = Headers::new().expect("Headers::new");
+}
+
+/// Default cap on concurrent network reads. Browsers serialize HTTP/1.1 at ~6 connections per
+/// origin anyway; bounding our side keeps a big `join_all` wave from flooding the browser's
+/// opaque queue (where latency-critical reads can land behind dozens of speculative ones) and
+/// bounds transient buffer memory. HTTP/2+ multiplexes, but the bound still orders our reads.
+const DEFAULT_FETCH_WINDOW: usize = 8;
+
+/// Sets how many network reads the wasm fetch layer keeps in flight at once (`0` =
+/// unbounded); the rest queue locally in FIFO order. Default 8. Excess concurrency beyond the
+/// browser's per-origin connection budget only queues inside the browser where it cannot be
+/// reordered; queueing locally instead keeps big read fans (a 50-record hydration, a
+/// facet-pricing wave) from delaying the reads a later interaction is blocked on.
+#[wasm_bindgen(js_name = setFetchWindow)]
+pub fn set_fetch_window(max_in_flight: u32) {
+    FETCH_GATE.with(|g| g.set_limit(max_in_flight as usize));
 }
 
 /// A handle to the shared range cache, if the client has enabled one.
@@ -176,83 +210,116 @@ impl RangeFetch for WasmFetch {
         // Serve from the shared range cache when the client enabled one; a re-typed query
         // re-requests the same (url, offset, len), so this skips the network round-trip. The
         // borrow is released before any await (RefCell is not held across `.await`).
-        let cache = current_range_cache();
-        if let Some(cache) = &cache {
+        if let Some(cache) = current_range_cache() {
             if let Some(bytes) = cache.borrow_mut().get(&self.url, offset, len) {
                 return Ok(bytes);
             }
         }
-        let end = match offset.checked_add(len as u64) {
-            Some(sum) => sum - 1,
-            None => {
-                return Err(FetchError::Transport(format!(
-                    "range {offset}+{len} overflows u64"
-                )))
+        // Singleflight: a concurrent identical miss joins the read already in flight instead
+        // of double-fetching it. The completing poll retires the table entry; by then the
+        // range cache holds the bytes, so later identical reads hit the cache path above.
+        let key = (self.url.clone(), offset, len);
+        let shared = IN_FLIGHT.with(|m| {
+            let mut m = m.borrow_mut();
+            if let Some(f) = m.get(&key) {
+                return f.clone();
             }
-        };
-        let range = format!("bytes={offset}-{end}");
-
-        let headers = Headers::new().map_err(|e| FetchError::Transport(js_err(&e)))?;
-        headers
-            .set("Range", &range)
-            .map_err(|e| FetchError::Transport(js_err(&e)))?;
-
-        let opts = RequestInit::new();
-        opts.set_method("GET");
-        opts.set_mode(RequestMode::Cors);
-        opts.set_headers(headers.as_ref());
-
-        let request = Request::new_with_str_and_init(&self.url, &opts)
-            .map_err(|e| FetchError::Transport(js_err(&e)))?;
-
-        let promise = WasmFetch::global_fetch(&request)?;
-        let resp_value = JsFuture::from(promise)
-            .await
-            .map_err(|e| FetchError::Transport(js_err(&e)))?;
-        let response: Response = resp_value
-            .dyn_into()
-            .map_err(|_| FetchError::Transport("fetch returned a non-Response".into()))?;
-
-        if !response.ok() {
-            // 404 (and 416 on a zero-length object) means the object is absent, not a
-            // transient failure — surface NotFound so a caller can skip an optional sidecar.
-            let status = response.status();
-            if status == 404 || status == 416 {
-                return Err(FetchError::NotFound);
+            let owner_key = key.clone();
+            let fut = async move {
+                let out = network_read(&owner_key.0, owner_key.1, owner_key.2).await;
+                IN_FLIGHT.with(|m| m.borrow_mut().remove(&owner_key));
+                out
             }
-            return Err(FetchError::Transport(format!(
-                "HTTP {status} for range {range}"
-            )));
-        }
-
-        let buf_promise = response
-            .array_buffer()
-            .map_err(|e| FetchError::Transport(js_err(&e)))?;
-        let buf_value = JsFuture::from(buf_promise)
-            .await
-            .map_err(|e| FetchError::Transport(js_err(&e)))?;
-        let array_buffer: ArrayBuffer = buf_value
-            .dyn_into()
-            .map_err(|_| FetchError::Transport("array_buffer was not an ArrayBuffer".into()))?;
-        let bytes = Uint8Array::new(&array_buffer).to_vec();
-        // The reader trusts RangeFetch to return exactly `len` bytes — every
-        // header/offset parser slices on that guarantee. A CDN/origin that ignores
-        // the Range header (200 full body, or a 206 that clamps/coalesces) would
-        // otherwise feed a wrong-length buffer into those parsers. Enforce it here.
-        if bytes.len() != len {
-            return Err(FetchError::Transport(format!(
-                "range {range} returned {} bytes, expected {len} (origin may not honor Range requests)",
-                bytes.len()
-            )));
-        }
-        // Populate the cache (clone is a memcpy, far cheaper than the network read it spares).
-        if let Some(cache) = &cache {
-            cache
-                .borrow_mut()
-                .insert(&self.url, offset, len, bytes.clone());
-        }
-        Ok(bytes)
+            .boxed_local()
+            .shared();
+            m.insert(key.clone(), fut.clone());
+            fut
+        });
+        shared.await
     }
+}
+
+/// The network half of a [`WasmFetch`] read — singleflight-shared and window-gated: waits for
+/// a fetch slot, issues the ranged GET, enforces the exact-length contract, and populates the
+/// shared range cache.
+async fn network_read(url: &str, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
+    let _permit = FETCH_GATE.with(Rc::clone).acquire().await;
+    let end = match offset.checked_add(len as u64) {
+        Some(sum) => sum - 1,
+        None => {
+            return Err(FetchError::Transport(format!(
+                "range {offset}+{len} overflows u64"
+            )))
+        }
+    };
+    let range = format!("bytes={offset}-{end}");
+
+    let opts = RequestInit::new();
+    opts.set_method("GET");
+    opts.set_mode(RequestMode::Cors);
+    // Every ranged read here is demand-driven (a search or hydration is blocked on it), so
+    // hint the browser to schedule it ahead of default-priority page traffic. Set via
+    // `Reflect` so the hint is independent of web-sys's unstable API surface; a browser
+    // without fetch priorities ignores the extra field.
+    let _ = Reflect::set(
+        &opts,
+        &JsValue::from_str("priority"),
+        &JsValue::from_str("high"),
+    );
+    // The shared Headers object is set and snapshotted into the Request with no await in
+    // between, so concurrent reads cannot observe each other's Range value.
+    let request = RANGE_HEADERS.with(|h| -> Result<Request, FetchError> {
+        h.set("Range", &range)
+            .map_err(|e| FetchError::Transport(js_err(&e)))?;
+        opts.set_headers(h.as_ref());
+        Request::new_with_str_and_init(url, &opts).map_err(|e| FetchError::Transport(js_err(&e)))
+    })?;
+
+    let promise = WasmFetch::global_fetch(&request)?;
+    let resp_value = JsFuture::from(promise)
+        .await
+        .map_err(|e| FetchError::Transport(js_err(&e)))?;
+    let response: Response = resp_value
+        .dyn_into()
+        .map_err(|_| FetchError::Transport("fetch returned a non-Response".into()))?;
+
+    if !response.ok() {
+        // 404 (and 416 on a zero-length object) means the object is absent, not a
+        // transient failure — surface NotFound so a caller can skip an optional sidecar.
+        let status = response.status();
+        if status == 404 || status == 416 {
+            return Err(FetchError::NotFound);
+        }
+        return Err(FetchError::Transport(format!(
+            "HTTP {status} for range {range}"
+        )));
+    }
+
+    let buf_promise = response
+        .array_buffer()
+        .map_err(|e| FetchError::Transport(js_err(&e)))?;
+    let buf_value = JsFuture::from(buf_promise)
+        .await
+        .map_err(|e| FetchError::Transport(js_err(&e)))?;
+    let array_buffer: ArrayBuffer = buf_value
+        .dyn_into()
+        .map_err(|_| FetchError::Transport("array_buffer was not an ArrayBuffer".into()))?;
+    let bytes = Uint8Array::new(&array_buffer).to_vec();
+    // The reader trusts RangeFetch to return exactly `len` bytes — every
+    // header/offset parser slices on that guarantee. A CDN/origin that ignores
+    // the Range header (200 full body, or a 206 that clamps/coalesces) would
+    // otherwise feed a wrong-length buffer into those parsers. Enforce it here.
+    if bytes.len() != len {
+        return Err(FetchError::Transport(format!(
+            "range {range} returned {} bytes, expected {len} (origin may not honor Range requests)",
+            bytes.len()
+        )));
+    }
+    // Populate the cache (clone is a memcpy, far cheaper than the network read it spares).
+    if let Some(cache) = current_range_cache() {
+        cache.borrow_mut().insert(url, offset, len, bytes.clone());
+    }
+    Ok(bytes)
 }
 
 /// The single object shape behind every facet accessor: a JS `Array` of
