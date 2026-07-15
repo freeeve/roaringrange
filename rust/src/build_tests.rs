@@ -456,6 +456,64 @@ fn counts_full_batches_reads_into_few_waves() {
     assert!(reads.get() <= 4, "counts_for reads = {}", reads.get());
 }
 
+/// The facet digest round-trips (top-k by count, deterministic ties, ranges straight from
+/// the sidecar's own meta) and prices exactly like the full meta: a `FacetMeta` built from
+/// the parsed digest yields the same exact counts as a whole-meta boot, without any meta
+/// read.
+#[test]
+fn facet_digest_round_trips_and_prices_like_the_full_meta() {
+    use crate::facet::{facet_digest, parse_facet_digest, FacetMeta};
+    // "tag": five categories with distinct sizes (t0 densest, head+tail docs); "y": two.
+    let cat = |seed: u32, n: u32| -> RoaringBitmap {
+        (0..n).flat_map(|i| [seed + i, BUCKET + seed + i]).collect()
+    };
+    let tags: Vec<(String, RoaringBitmap)> = (0..5u32)
+        .map(|t| (format!("t{t}"), cat(t * 100, 5 - t)))
+        .collect();
+    let years: Vec<(String, RoaringBitmap)> = vec![
+        ("2020".to_string(), cat(600, 3)),
+        ("2021".to_string(), cat(700, 2)),
+    ];
+    let rrsf = build_rrsf(&[
+        (
+            "tag",
+            tags.iter().map(|(n, b)| (n.as_str(), b.clone())).collect(),
+        ),
+        (
+            "y",
+            years.iter().map(|(n, b)| (n.as_str(), b.clone())).collect(),
+        ),
+    ]);
+
+    let digest = facet_digest(&rrsf, 3).unwrap();
+    let (k, fields) = parse_facet_digest(&digest).unwrap();
+    assert_eq!(k, 3);
+    assert_eq!(fields.len(), 2);
+    let names: Vec<&str> = fields[0]
+        .categories
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(names, ["t0", "t1", "t2"], "top-3 by count, count-desc");
+    assert_eq!(fields[1].categories.len(), 2, "small field fully covered");
+
+    // Pricing parity: digest-built meta vs whole-meta boot, exact counts, same result.
+    let result: RoaringBitmap = (0..5u32)
+        .flat_map(|t| [t * 100, BUCKET + t * 100 + 1])
+        .chain([600, BUCKET + 601])
+        .collect();
+    let from_digest = FacetMeta::from_fields(fields).attach(MemoryFetch::new(rrsf.clone()));
+    let full = block_on(FacetIndex::open_meta(MemoryFetch::new(rrsf))).unwrap();
+    let pairs: Vec<(String, String)> = [("tag", "t0"), ("tag", "t2"), ("y", "2020")]
+        .iter()
+        .map(|(f, c)| (f.to_string(), c.to_string()))
+        .collect();
+    let got = block_on(from_digest.counts_for(&result, &pairs)).unwrap();
+    let want = block_on(full.counts_for(&result, &pairs)).unwrap();
+    assert_eq!(got, want);
+    assert!(want.iter().any(|&n| n > 0), "fixture must actually match");
+}
+
 #[test]
 fn counts_for_prices_named_categories_exactly() {
     let en = bm(&[1, 2, BUCKET + 5, 3 * BUCKET + 9]);

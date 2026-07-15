@@ -162,6 +162,13 @@ impl FacetMeta {
         from_meta(meta)
     }
 
+    /// Wraps already-materialized fields (a parsed facet digest) as a fetchless meta —
+    /// the split-set digest path's constructor.
+    #[cfg(any(feature = "splits", test))]
+    pub(crate) fn from_fields(fields: Vec<Field>) -> FacetMeta {
+        FacetMeta { fields }
+    }
+
     /// Binds the per-query fetcher, producing a working [`FacetIndex`] (heads
     /// still empty until [`FacetIndex::load_heads`]).
     pub fn attach<F: RangeFetch>(self, fetch: F) -> FacetIndex<F> {
@@ -826,6 +833,124 @@ impl<F: RangeFetch> FacetIndex<F> {
             .map(|s| s.map(|i| priced[i]).unwrap_or(0))
             .collect())
     }
+}
+
+/// Builds the split-manifest **facet digest** (summary TLV tag 3) from an emitted `RRSF`
+/// sidecar's bytes: the top `k` categories per field by full-corpus count (ties broken by
+/// name, so the bytes are deterministic), each with its display name, count, and posting
+/// ranges. A split-set reader prices panel counts from this resident digest alone — no
+/// whole-meta boot, which for a high-cardinality sidecar is MBs per split. Deriving from
+/// the emitted bytes (not the open postings) guarantees the digest's ranges match the
+/// sidecar exactly. Layout (all LE, mirrored by Go `facetDigest`):
+/// `[k u16][fieldCount u16]`, per field `[nameLen u16][name][catCount u16]`, per category
+/// `[nameLen u16][name][count u32][headOff u64][headSize u32][tailSize u32]`.
+#[cfg(all(any(feature = "splits", test), not(target_arch = "wasm32")))]
+pub(crate) fn facet_digest(rrsf: &[u8], k: usize) -> Result<Vec<u8>, IndexError> {
+    let header = rrsf
+        .get(..HEADER_SIZE)
+        .ok_or(IndexError::Malformed("short RRSF header"))?;
+    let meta_len = rrsf_boot_len(header)?;
+    let meta = rrsf
+        .get(..meta_len)
+        .ok_or(IndexError::Malformed("RRSF meta region truncated"))?;
+    let fields = from_meta(meta.to_vec())?.fields;
+
+    let k16 = u16::try_from(k).unwrap_or(u16::MAX);
+    let mut out = Vec::new();
+    out.extend_from_slice(&k16.to_le_bytes());
+    let field_count = u16::try_from(fields.len())
+        .map_err(|_| IndexError::Malformed("facet digest field count exceeds u16"))?;
+    out.extend_from_slice(&field_count.to_le_bytes());
+    let push_name = |out: &mut Vec<u8>, name: &str| -> Result<(), IndexError> {
+        let len = u16::try_from(name.len())
+            .map_err(|_| IndexError::Malformed("facet digest name exceeds u16"))?;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        Ok(())
+    };
+    for f in &fields {
+        push_name(&mut out, &f.name)?;
+        let mut idx: Vec<usize> = (0..f.categories.len()).collect();
+        idx.sort_by(|&a, &b| {
+            let (ca, cb) = (&f.categories[a], &f.categories[b]);
+            cb.count.cmp(&ca.count).then_with(|| ca.name.cmp(&cb.name))
+        });
+        idx.truncate(k16 as usize);
+        out.extend_from_slice(&(idx.len() as u16).to_le_bytes());
+        for &ci in &idx {
+            let c = &f.categories[ci];
+            push_name(&mut out, &c.name)?;
+            out.extend_from_slice(&c.count.to_le_bytes());
+            out.extend_from_slice(&c.range.head_off.to_le_bytes());
+            out.extend_from_slice(&c.range.head_size.to_le_bytes());
+            out.extend_from_slice(&c.range.tail_size.to_le_bytes());
+        }
+    }
+    Ok(out)
+}
+
+/// Parses a facet digest (see [`facet_digest`]) back into skeleton fields — names, counts,
+/// and posting ranges present; heads empty (pricing fetches them per query). Returns the
+/// builder's per-field cap `k` and the fields. Every offset is bounds-checked: the digest
+/// travels in the manifest, which is untrusted input.
+#[cfg(any(feature = "splits", test))]
+pub(crate) fn parse_facet_digest(payload: &[u8]) -> Result<(usize, Vec<Field>), IndexError> {
+    struct Cur<'a>(&'a [u8], usize);
+    impl<'a> Cur<'a> {
+        fn take(&mut self, n: usize) -> Result<&'a [u8], IndexError> {
+            let s = self
+                .0
+                .get(self.1..self.1 + n)
+                .ok_or(IndexError::Malformed("facet digest truncated"))?;
+            self.1 += n;
+            Ok(s)
+        }
+        fn u16(&mut self) -> Result<u16, IndexError> {
+            Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+        }
+        fn u32(&mut self) -> Result<u32, IndexError> {
+            Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        }
+        fn u64(&mut self) -> Result<u64, IndexError> {
+            Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        }
+        fn name(&mut self) -> Result<String, IndexError> {
+            let len = self.u16()? as usize;
+            Ok(String::from_utf8_lossy(self.take(len)?).into_owned())
+        }
+    }
+    let mut c = Cur(payload, 0);
+    let k = c.u16()? as usize;
+    let field_count = c.u16()? as usize;
+    let mut fields = Vec::with_capacity(field_count);
+    for _ in 0..field_count {
+        let fname = c.name()?;
+        let cat_count = c.u16()? as usize;
+        let mut categories = Vec::with_capacity(cat_count);
+        for _ in 0..cat_count {
+            let cname = c.name()?;
+            let count = c.u32()?;
+            let head_off = c.u64()?;
+            let head_size = c.u32()?;
+            let tail_size = c.u32()?;
+            categories.push(Category {
+                name: cname,
+                count,
+                range: CatRange {
+                    head_off,
+                    head_size,
+                    tail_off: head_off.saturating_add(head_size as u64),
+                    tail_size,
+                },
+                head: RoaringBitmap::new(),
+            });
+        }
+        fields.push(Field {
+            name: fname,
+            categories,
+        });
+    }
+    Ok((k, fields))
 }
 
 /// The byte length of an `RRSF` sidecar's **boot region** — the resident meta

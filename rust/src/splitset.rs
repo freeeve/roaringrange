@@ -56,6 +56,12 @@ pub const FLAG_CASE_SENSITIVE: u16 = 1 << 4;
 /// [`SplitSet::facet_counts_for`].
 pub const FACET_COUNT_TOP_PER_FIELD: usize = 128;
 
+/// Summary TLV tag for a split's **facet digest** — the top-k categories per field (names,
+/// full-corpus counts, posting ranges; see `facet::facet_digest`). Resident in the manifest,
+/// so facet pricing boots from it with no sidecar meta read at all — for a high-cardinality
+/// sidecar the difference between KBs and MBs per split on first touch.
+pub(crate) const SUMMARY_TAG_FACET_DIGEST: u8 = 3;
+
 /// Per-split flag bit: this split carries a tombstone posting in its summary region.
 pub const SPLIT_FLAG_HAS_TOMBSTONE: u16 = 1 << 0;
 /// Per-split flag bit: the split stores **absolute global** doc IDs (`global = local`) rather
@@ -845,9 +851,13 @@ impl SplitSet {
         // deterministic.
         let entries = self.ids_by_split(ids);
         let futs = entries.iter().map(|(si, local)| {
-            let name = facet_file_name(&self.splits[*si].data_file);
+            let split = &self.splits[*si];
+            let name = facet_file_name(&split.data_file);
             async move {
-                let facets = FacetIndex::open_meta(resolver.fetch_named(&name)).await?;
+                let fetch = resolver.fetch_named(&name);
+                let facets = self
+                    .facet_pricing_meta(split, fetch, top_per_field, None)
+                    .await?;
                 let counts = facets.counts_full(local, top_per_field).await?;
                 Ok::<_, IndexError>((facets, counts))
             }
@@ -903,9 +913,13 @@ impl SplitSet {
     ) -> Result<Vec<u64>, IndexError> {
         let entries = self.ids_by_split(ids);
         let futs = entries.iter().map(|(si, local)| {
-            let name = facet_file_name(&self.splits[*si].data_file);
+            let split = &self.splits[*si];
+            let name = facet_file_name(&split.data_file);
             async move {
-                let facets = FacetIndex::open_meta(resolver.fetch_named(&name)).await?;
+                let fetch = resolver.fetch_named(&name);
+                let facets = self
+                    .facet_pricing_meta(split, fetch, 0, Some(pairs))
+                    .await?;
                 facets.counts_for(local, pairs).await
             }
         });
@@ -924,6 +938,55 @@ impl SplitSet {
             }
         }
         Ok(totals)
+    }
+
+    /// The pricing meta for one contributing split: parsed from the split's resident facet
+    /// digest (summary TLV tag 3) when it can serve the request — **zero sidecar meta
+    /// reads**, the whole point of the digest — else the sidecar's full meta region.
+    /// The digest serves a top-capped request when `top_per_field` is within the digest's
+    /// build-time `k`, and a named-pairs request (`pairs`) when every pair resolves inside
+    /// it; a miss (deeper cap, long-tail pair, unparsable digest) falls back to
+    /// [`FacetIndex::open_meta`], so results never depend on the digest being present.
+    async fn facet_pricing_meta<F: RangeFetch>(
+        &self,
+        split: &Split,
+        fetch: F,
+        top_per_field: usize,
+        pairs: Option<&[(String, String)]>,
+    ) -> Result<FacetIndex<F>, IndexError> {
+        if let Some(summary) = self.summary(split) {
+            if let Ok(Some(payload)) = find_tlv(summary, SUMMARY_TAG_FACET_DIGEST) {
+                if let Ok((k, fields)) = crate::facet::parse_facet_digest(payload) {
+                    let usable = match pairs {
+                        // Every requested pair must either resolve inside the digest, or be
+                        // provably absent from the whole sidecar per the facet-presence
+                        // summary (then the digest meta correctly prices it 0 without a
+                        // fetch). A pair that is present but past the digest's top-k is
+                        // genuine long tail — only the full meta can price it.
+                        Some(ps) => {
+                            let present = if self.flags & FLAG_FACET != 0 {
+                                self.facet_keys(split)?
+                            } else {
+                                None
+                            };
+                            ps.iter().all(|(f, c)| {
+                                fields.iter().any(|fl| {
+                                    &fl.name == f && fl.categories.iter().any(|cat| &cat.name == c)
+                                }) || present.as_ref().is_some_and(|keys| {
+                                    keys.binary_search(&facet_key(f, c, self.case_fold))
+                                        .is_err()
+                                })
+                            })
+                        }
+                        None => top_per_field != 0 && top_per_field <= k,
+                    };
+                    if usable {
+                        return Ok(crate::facet::FacetMeta::from_fields(fields).attach(fetch));
+                    }
+                }
+            }
+        }
+        FacetIndex::open_meta(fetch).await
     }
 
     /// Groups global result `ids` by the split they fall in, as split-local ID bitmaps — the
@@ -3011,6 +3074,213 @@ mod tests {
         assert_eq!(
             block_on(ss.facet_counts_for(&resolver, &ids[..6], &pairs)).unwrap(),
             vec![0, 0, 0]
+        );
+    }
+
+    /// A split whose manifest summary carries a facet digest (TLV tag 3) prices panel
+    /// counts with ZERO sidecar meta reads — no `.rrf` read at offset 0 — with counts equal
+    /// to the meta-boot path's; a request the digest can't serve (uncapped pricing, a
+    /// long-tail pair) falls back to the full meta transparently.
+    #[test]
+    fn facet_digest_prices_without_meta_reads() {
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::Tiered,
+            byte_cap: 250,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 0,
+            case_sensitive: false,
+        });
+        let f = |lang: &str| vec![("lang".to_string(), lang.to_string())];
+        b.add_faceted("abc en0", &f("en")).unwrap();
+        b.add_faceted("abc en1", &f("en")).unwrap();
+        b.add_faceted("abc fr0", &f("fr")).unwrap();
+        b.add_faceted("abc fr1", &f("fr")).unwrap();
+        let built = b.finish().unwrap();
+        assert_eq!(built.splits.len(), 2);
+
+        // Re-emit the manifest with a per-split facet digest in the summary region (the
+        // builder integration emits exactly this; here the manifest is rebuilt by hand so
+        // the reader path is testable on its own).
+        let base = open_built(&built);
+        let files: HashMap<String, Vec<u8>> = built
+            .splits
+            .iter()
+            .chain(built.facets.iter())
+            .cloned()
+            .collect();
+        let specs: Vec<crate::splitset_build::SplitSpec> = base
+            .splits()
+            .iter()
+            .map(|s| {
+                let rrf = &files[&facet_file_name(&s.data_file)];
+                let digest = crate::facet::facet_digest(rrf, 2).unwrap();
+                // The presence list (tag 2) alongside the digest, exactly as the builder
+                // emits both: derive the keys from the digest's own (field, cat) names
+                // (k=2 covers this fixture's whole vocabulary).
+                let (_, fields) = crate::facet::parse_facet_digest(&digest).unwrap();
+                let mut keys: Vec<u64> = fields
+                    .iter()
+                    .flat_map(|f| {
+                        f.categories
+                            .iter()
+                            .map(|c| facet_key(&f.name, &c.name, true))
+                    })
+                    .collect();
+                keys.sort_unstable();
+                let mut presence = (keys.len() as u32).to_le_bytes().to_vec();
+                for k in keys {
+                    presence.extend_from_slice(&k.to_le_bytes());
+                }
+                let mut summary = tlv_record(SUMMARY_TAG_FACET, &presence);
+                summary.extend_from_slice(&tlv_record(SUMMARY_TAG_FACET_DIGEST, &digest));
+                crate::splitset_build::SplitSpec {
+                    data_file: s.data_file.clone(),
+                    tier: s.tier,
+                    doc_count: s.doc_count,
+                    doc_id_lo: s.doc_id_lo,
+                    doc_id_hi: s.doc_id_hi,
+                    epoch: s.epoch,
+                    byte_size: s.byte_size,
+                    flags: 0,
+                    summary,
+                }
+            })
+            .collect();
+        let config = crate::splitset_build::SplitSetConfig {
+            policy: Policy::Tiered,
+            tier_count: specs.len() as u16,
+            base_count: specs.len() as u32,
+            byte_cap: 250,
+            gram_size: 3,
+            body_kind: BodyKind::Trigram,
+            sortcol: None,
+            flags: FLAG_FACET,
+        };
+        let mut manifest = Vec::new();
+        write_splitset(&mut manifest, &specs, &config).unwrap();
+
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let resolver = RecordingResolver {
+            files,
+            log: log.clone(),
+        };
+        let ss = block_on(SplitSet::open(MemoryFetch::new(manifest))).unwrap();
+        let lang = |counts: &[FieldCounts]| -> HashMap<String, u64> {
+            counts
+                .iter()
+                .find(|fc| fc.field == "lang")
+                .map(|fc| fc.categories.iter().cloned().collect())
+                .unwrap_or_default()
+        };
+        let meta_reads = || {
+            log.borrow()
+                .iter()
+                .filter(|(n, o, _)| n.ends_with(".rrf") && *o == 0)
+                .count()
+        };
+
+        // Digest-served pricing: correct counts, zero meta reads.
+        let counts = block_on(ss.facet_counts_top(&resolver, &[0, 1, 2, 3], 2)).unwrap();
+        let m = lang(&counts);
+        assert_eq!(m.get("en"), Some(&2));
+        assert_eq!(m.get("fr"), Some(&2));
+        assert_eq!(meta_reads(), 0, "digest pricing must not boot the meta");
+
+        // Digest-served named pairs: still zero meta reads.
+        let pairs = vec![("lang".to_string(), "fr".to_string())];
+        assert_eq!(
+            block_on(ss.facet_counts_for(&resolver, &[0, 1, 2, 3], &pairs)).unwrap(),
+            vec![2]
+        );
+        assert_eq!(meta_reads(), 0);
+
+        // Uncapped pricing (0 = everything) exceeds any digest: falls back to the meta.
+        let counts = block_on(ss.facet_counts_top(&resolver, &[0, 1, 2, 3], 0)).unwrap();
+        assert_eq!(lang(&counts).get("en"), Some(&2));
+        assert!(meta_reads() > 0, "uncapped pricing must boot the meta");
+
+        // A pair the presence summary rules out prices 0 straight from the digest —
+        // provably absent from the sidecar, so no meta boot either.
+        log.borrow_mut().clear();
+        let missing = vec![("lang".to_string(), "zz".to_string())];
+        assert_eq!(
+            block_on(ss.facet_counts_for(&resolver, &[0, 1], &missing)).unwrap(),
+            vec![0]
+        );
+        assert_eq!(meta_reads(), 0, "a provably-absent pair needs no meta");
+    }
+
+    /// The builder's `with_facet_digest` emits everything the digest pricing path needs:
+    /// a set built with the knob prices panel counts with zero sidecar meta reads, straight
+    /// from its own manifest.
+    #[test]
+    fn builder_facet_digest_serves_pricing_end_to_end() {
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::Tiered,
+            byte_cap: 250,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 0,
+            case_sensitive: false,
+        })
+        .with_facet_digest(2);
+        let f = |lang: &str| vec![("lang".to_string(), lang.to_string())];
+        b.add_faceted("abc en0", &f("en")).unwrap();
+        b.add_faceted("abc en1", &f("en")).unwrap();
+        b.add_faceted("abc fr0", &f("fr")).unwrap();
+        b.add_faceted("abc fr1", &f("fr")).unwrap();
+        let built = b.finish().unwrap();
+        assert!(built.splits.len() > 1);
+
+        let files: HashMap<String, Vec<u8>> = built
+            .splits
+            .iter()
+            .chain(built.facets.iter())
+            .cloned()
+            .collect();
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let resolver = RecordingResolver {
+            files,
+            log: log.clone(),
+        };
+        let ss = open_built(&built);
+        for split in ss.splits() {
+            assert!(
+                find_tlv(ss.summary(split).unwrap(), SUMMARY_TAG_FACET_DIGEST)
+                    .unwrap()
+                    .is_some(),
+                "every faceted split carries a digest"
+            );
+        }
+
+        let counts = block_on(ss.facet_counts_top(&resolver, &[0, 1, 2, 3], 2)).unwrap();
+        let m: HashMap<String, u64> = counts
+            .iter()
+            .find(|fc| fc.field == "lang")
+            .unwrap()
+            .categories
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(m.get("en"), Some(&2));
+        assert_eq!(m.get("fr"), Some(&2));
+        let meta_reads = log
+            .borrow()
+            .iter()
+            .filter(|(n, o, _)| n.ends_with(".rrf") && *o == 0)
+            .count();
+        assert_eq!(
+            meta_reads, 0,
+            "digest-built set must price without meta boots"
         );
     }
 

@@ -17,7 +17,7 @@ use crate::facet::facet_key;
 use crate::ngram::ngram_keys_with;
 use crate::splitset::{
     bloom_build, tlv_record, BodyKind, Policy, FLAG_BLOOM, FLAG_CASE_SENSITIVE, FLAG_FACET,
-    SORTCOL_FLAG_DESCENDING, SUMMARY_TAG_BLOOM, SUMMARY_TAG_FACET,
+    SORTCOL_FLAG_DESCENDING, SUMMARY_TAG_BLOOM, SUMMARY_TAG_FACET, SUMMARY_TAG_FACET_DIGEST,
 };
 #[cfg(feature = "terms")]
 use crate::terms::{Language, Tokenizer};
@@ -390,33 +390,48 @@ fn facet_fields(
 /// Seals a split's facet sidecar, shared by both split builders' `seal`: when the split
 /// indexed any facet values, appends the facet-presence TLV (tag 2) to `summary` (so a
 /// facet-filtered query can skip this split without a fetch), writes the `‹prefix›-s‹idx›.rrf`
-/// sidecar over the categories' local ids, and pushes it to `facet_blobs`. A no-op (leaving
-/// `summary` untouched) when the split has no facets. Byte-identical to the inline form.
+/// sidecar over the categories' local ids, and pushes it to `facet_blobs`. With
+/// `digest_top > 0` it also appends the facet-digest TLV (tag 3): the sidecar's top
+/// `digest_top` categories per field, so a reader prices panel counts from the resident
+/// manifest instead of booting the sidecar's whole meta (`0` keeps every existing manifest
+/// byte-identical). A no-op (leaving `summary` untouched) when the split has no facets.
 fn seal_facet_sidecar(
     open_facets: BTreeMap<String, BTreeMap<String, RoaringBitmap>>,
     summary: &mut Vec<u8>,
     facet_blobs: &mut NamedFiles,
-    name_prefix: &str,
-    idx: usize,
-    head_boundary: u32,
-    case_normalization: bool,
+    cfg: FacetSealCfg<'_>,
 ) -> io::Result<()> {
     if open_facets.is_empty() {
         return Ok(());
     }
     summary.extend_from_slice(&tlv_record(
         SUMMARY_TAG_FACET,
-        &facet_presence(&open_facets, case_normalization),
+        &facet_presence(&open_facets, cfg.case_normalization),
     ));
-    let facet_name = format!("{name_prefix}-s{idx:05}.rrf");
+    let facet_name = format!("{}-s{:05}.rrf", cfg.name_prefix, cfg.idx);
     let mut facet_bytes = Vec::new();
     write_facets_with(
         &mut facet_bytes,
-        facet_fields(open_facets, head_boundary),
-        case_normalization,
+        facet_fields(open_facets, cfg.head_boundary),
+        cfg.case_normalization,
     )?;
+    if cfg.digest_top > 0 {
+        let digest = crate::facet::facet_digest(&facet_bytes, cfg.digest_top)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        summary.extend_from_slice(&tlv_record(SUMMARY_TAG_FACET_DIGEST, &digest));
+    }
     facet_blobs.push((facet_name, facet_bytes));
     Ok(())
+}
+
+/// The per-split inputs [`seal_facet_sidecar`] takes from a builder: sidecar naming, the
+/// head/tail layout, the case mode, and the facet-digest knob.
+struct FacetSealCfg<'a> {
+    name_prefix: &'a str,
+    idx: usize,
+    head_boundary: u32,
+    case_normalization: bool,
+    digest_top: usize,
 }
 
 /// Appends a UTF-8 name to `blob` and returns its `(offset, length)` span, erroring if the
@@ -576,6 +591,9 @@ pub struct SplitSetBuilder {
     open_facets: BTreeMap<String, BTreeMap<String, RoaringBitmap>>,
     /// Whether any document has carried a facet (drives the per-split `RRSF` + header flag).
     has_facets: bool,
+    /// Top categories per field emitted into each split's facet-digest summary
+    /// (`0` = no digest). See [`Self::with_facet_digest`].
+    facet_digest_top: usize,
     /// Sealed split metadata, in seal order (all base — the batch builder writes no delta).
     specs: Vec<SplitSpec>,
     /// Sealed split blobs `(filename, bytes)`, parallel to `specs`.
@@ -640,10 +658,22 @@ impl SplitSetBuilder {
             postings_upper: 0,
             open_facets: BTreeMap::new(),
             has_facets: false,
+            facet_digest_top: 0,
             specs: Vec::new(),
             blobs: Vec::new(),
             facet_blobs: Vec::new(),
         }
+    }
+
+    /// Emits a **facet digest** into each sealed split's manifest summary (TLV tag 3): the
+    /// top `top_per_field` categories per field by full-corpus count, with names, counts,
+    /// and posting ranges. A reader then prices panel facet counts from the resident
+    /// manifest with no sidecar meta boot — for a high-cardinality sidecar the difference
+    /// between KBs and MBs per split on first touch. `0` (the default) emits no digest and
+    /// keeps every existing manifest byte-identical.
+    pub fn with_facet_digest(mut self, top_per_field: usize) -> Self {
+        self.facet_digest_top = top_per_field;
+        self
     }
 
     /// Tokenizes `text` into n-gram keys and appends it as one document — the convenience
@@ -765,10 +795,13 @@ impl SplitSetBuilder {
             open_facets,
             &mut summary,
             &mut self.facet_blobs,
-            &self.name_prefix,
-            idx,
-            self.head_boundary,
-            self.case_normalization,
+            FacetSealCfg {
+                name_prefix: &self.name_prefix,
+                idx,
+                head_boundary: self.head_boundary,
+                case_normalization: self.case_normalization,
+                digest_top: self.facet_digest_top,
+            },
         )?;
         self.specs.push(SplitSpec {
             data_file: name.clone(),
@@ -979,6 +1012,9 @@ pub struct TermSplitSetBuilder {
     open_facets: BTreeMap<String, BTreeMap<String, RoaringBitmap>>,
     /// Whether any document has carried a facet (drives the per-split `RRSF` + header flag).
     has_facets: bool,
+    /// Top categories per field emitted into each split's facet-digest summary
+    /// (`0` = no digest). See [`Self::with_facet_digest`].
+    facet_digest_top: usize,
     /// Sealed split metadata, in seal order (all base — the batch builder writes no delta).
     specs: Vec<SplitSpec>,
     /// Sealed split blobs `(filename, RRTI bytes)`, parallel to `specs`.
@@ -1020,6 +1056,7 @@ impl TermSplitSetBuilder {
             bytes_upper: 0,
             open_facets: BTreeMap::new(),
             has_facets: false,
+            facet_digest_top: 0,
             specs: Vec::new(),
             blobs: Vec::new(),
             facet_blobs: Vec::new(),
@@ -1041,6 +1078,14 @@ impl TermSplitSetBuilder {
         self.global_base = base;
         self.next_global_id = base;
         self.global_origin = base;
+        self
+    }
+
+    /// Emits a **facet digest** into each sealed split's manifest summary (TLV tag 3) — see
+    /// [`SplitSetBuilder::with_facet_digest`]; identical semantics for term splits. `0`
+    /// (the default) emits no digest and keeps every existing manifest byte-identical.
+    pub fn with_facet_digest(mut self, top_per_field: usize) -> Self {
+        self.facet_digest_top = top_per_field;
         self
     }
 
@@ -1145,10 +1190,13 @@ impl TermSplitSetBuilder {
             open_facets,
             &mut summary,
             &mut self.facet_blobs,
-            &self.name_prefix,
-            idx,
-            self.head_boundary,
-            self.case_normalization,
+            FacetSealCfg {
+                name_prefix: &self.name_prefix,
+                idx,
+                head_boundary: self.head_boundary,
+                case_normalization: self.case_normalization,
+                digest_top: self.facet_digest_top,
+            },
         )?;
         self.specs.push(SplitSpec {
             data_file: name.clone(),
