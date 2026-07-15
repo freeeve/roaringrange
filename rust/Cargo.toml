@@ -50,6 +50,12 @@ required-features = ["splits"]
 name = "splitset_demo_data"
 required-features = ["splits"]
 
+# Byte-accounting probe for the split-set facet pricing path (synthetic high-cardinality
+# sidecar + recording fetch) — the local repro for remote byte-volume reports.
+[[example]]
+name = "facet_wave_probe"
+required-features = ["splits"]
+
 # Slices the monolith .rrf into full per-split facet sidecars; needs `splits`.
 [[example]]
 name = "derive_split_facets"

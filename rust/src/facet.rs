@@ -606,7 +606,16 @@ impl<F: RangeFetch> FacetIndex<F> {
         head_needed: bool,
         tail_keys: &[u16],
     ) -> Result<Vec<u64>, IndexError> {
-        use crate::fetch::{read_coalesced, COALESCE_GAP};
+        use crate::fetch::read_coalesced;
+        /// The pricing waves' bridge gap. Deliberately far below the library-wide 16 KiB
+        /// [`crate::fetch::COALESCE_GAP`]: the priced categories are the top-by-count —
+        /// i.e. the LARGEST postings — and in a zipf-shaped sidecar consecutive large
+        /// postings are separated by runs of tiny ones, so a 16 KiB bridge chains across
+        /// category boundaries through hundreds of KB of dead bytes (measured 470 KB single
+        /// reads on a 20k-category field). Containers within one category are exactly
+        /// adjacent (gap 0), so a small bridge keeps intra-category merging while pure
+        /// cross-category waste stays capped at ~2 KiB per bridge.
+        const PRICING_GAP: u64 = 2048;
         use crate::posting::{assemble, needed_header_len, parse_dir, Container, HEADER_PREFIX};
 
         /// The directory entries whose high key the result actually spans.
@@ -639,7 +648,7 @@ impl<F: RangeFetch> FacetIndex<F> {
                 (0, 0)
             });
         }
-        let wave_a = read_coalesced(&self.fetch, &ranges, COALESCE_GAP).await?;
+        let wave_a = read_coalesced(&self.fetch, &ranges, PRICING_GAP).await?;
 
         /// A target's tail after wave A: counted, awaiting a wave-B re-read, or awaiting
         /// its wave-C container bodies.
@@ -705,7 +714,7 @@ impl<F: RangeFetch> FacetIndex<F> {
         }
 
         // Wave B: the re-reads wave A couldn't satisfy, coalesced.
-        let wave_b = read_coalesced(&self.fetch, &wave_b_ranges, COALESCE_GAP).await?;
+        let wave_b = read_coalesced(&self.fetch, &wave_b_ranges, PRICING_GAP).await?;
         for i in 0..targets.len() {
             let (wb, whole) = match &tails[i] {
                 Tail::Refetch { wb, whole } => (*wb, *whole),
@@ -741,7 +750,7 @@ impl<F: RangeFetch> FacetIndex<F> {
                 }
             }
         }
-        let bodies = read_coalesced(&self.fetch, &c_ranges, COALESCE_GAP).await?;
+        let bodies = read_coalesced(&self.fetch, &c_ranges, PRICING_GAP).await?;
         let mut k = 0usize;
         for (i, t) in tails.iter().enumerate() {
             let Tail::Containers(needed) = t else {
