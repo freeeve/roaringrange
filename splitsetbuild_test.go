@@ -46,7 +46,13 @@ func conformanceBuild(t *testing.T) *BuiltSplitSet {
 // builder in splitset_build::conformance_full_build) into name -> bytes.
 func loadGolden(t *testing.T) map[string][]byte {
 	t.Helper()
-	f, err := os.Open("testdata/rrss_build_golden.txt")
+	return loadGoldenFile(t, "testdata/rrss_build_golden.txt")
+}
+
+// loadGoldenFile parses a shared `name <hex>` golden file into name -> bytes.
+func loadGoldenFile(t *testing.T, path string) map[string][]byte {
+	t.Helper()
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("open golden: %v", err)
 	}
@@ -87,6 +93,58 @@ func TestSplitSetBuilderMatchesRustGolden(t *testing.T) {
 			hex.EncodeToString(got), hex.EncodeToString(want))
 	}
 	// Every split RRS and every facet RRSF sidecar must match the Rust golden byte-for-byte.
+	files := append(append([]NamedSplit{}, built.Splits...), built.Facets...)
+	if got, want := len(files), len(golden)-1; got != want {
+		t.Fatalf("split+facet count = %d, want %d", got, want)
+	}
+	for _, s := range files {
+		want, ok := golden[s.Name]
+		if !ok {
+			t.Fatalf("no golden for %q", s.Name)
+		}
+		if !bytesEqual(s.Bytes, want) {
+			t.Fatalf("%q bytes differ from the Rust golden:\n got %s\nwant %s",
+				s.Name, hex.EncodeToString(s.Bytes), hex.EncodeToString(want))
+		}
+	}
+}
+
+// TestSplitSetDigestMatchesRustGolden proves SetFacetDigest reproduces the Rust
+// with_facet_digest bytes exactly -- the digest TLV's category ordering (count desc,
+// name asc), name spans, and posting ranges, over the shared conformance corpus.
+func TestSplitSetDigestMatchesRustGolden(t *testing.T) {
+	golden := loadGoldenFile(t, "testdata/rrss_digest_build_golden.txt")
+	docs := []struct {
+		text   string
+		facets map[string][]string
+	}{
+		{"alpha beta", map[string][]string{"year": {"2020"}, "kind": {"a"}}},
+		{"beta gamma", map[string][]string{"year": {"2021"}, "kind": {"b"}}},
+		{"gamma delta", map[string][]string{"year": {"2020"}, "kind": {"a"}}},
+		{"delta alpha", map[string][]string{"year": {"2021"}, "kind": {"b"}}},
+		{"alpha gamma", map[string][]string{"year": {"2022"}, "kind": {"a"}}},
+	}
+	b := NewSplitSetBuilder(SplitBuildConfig{
+		Policy:          PolicyTiered,
+		ByteCap:         600,
+		GramSize:        3,
+		NamePrefix:      "corpus",
+		BloomBitsPerKey: 8,
+	})
+	b.SetFacetDigest(2)
+	for _, d := range docs {
+		if _, err := b.AddFaceted(d.text, d.facets); err != nil {
+			t.Fatalf("AddFaceted(%q): %v", d.text, err)
+		}
+	}
+	built, err := b.Finish()
+	if err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if got, want := built.Manifest, golden["manifest"]; !bytesEqual(got, want) {
+		t.Fatalf("digest manifest differs from the Rust golden:\n got %s\nwant %s",
+			hex.EncodeToString(got), hex.EncodeToString(want))
+	}
 	files := append(append([]NamedSplit{}, built.Splits...), built.Facets...)
 	if got, want := len(files), len(golden)-1; got != want {
 		t.Fatalf("split+facet count = %d, want %d", got, want)

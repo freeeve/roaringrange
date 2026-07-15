@@ -49,6 +49,7 @@ type TermSplitBuildConfig struct {
 type TermSplitSetBuilder struct {
 	cfg          TermSplitBuildConfig
 	headBoundary uint32
+	digestTop    int
 	tok          *TermTokenizer
 	open         map[string]*roaring.Bitmap
 	openCount    uint32
@@ -75,6 +76,12 @@ func NewTermSplitSetBuilder(cfg TermSplitBuildConfig) *TermSplitSetBuilder {
 		open:         make(map[string]*roaring.Bitmap),
 		openFacets:   make(map[string]map[string]*roaring.Bitmap),
 	}
+}
+
+// SetFacetDigest emits a facet digest into each sealed split's manifest summary (TLV
+// tag 3) -- see SplitSetBuilder.SetFacetDigest; identical semantics for term splits.
+func (b *TermSplitSetBuilder) SetFacetDigest(topPerField int) {
+	b.digestTop = topPerField
 }
 
 // AddText tokenizes text and appends it as one document, returning its global doc
@@ -172,7 +179,7 @@ func (b *TermSplitSetBuilder) seal() error {
 	}
 	// Summary = facet-presence (tag 2) only; the term Bloom (tag 1) is deferred
 	// for term bodies, matching Rust.
-	summary, ferr := sealFacetSidecar(b.openFacets, nil, &b.facetBlobs, b.cfg.NamePrefix, idx, !b.cfg.CaseSensitive)
+	summary, ferr := sealFacetSidecar(b.openFacets, nil, &b.facetBlobs, b.cfg.NamePrefix, idx, !b.cfg.CaseSensitive, b.digestTop)
 	if ferr != nil {
 		return ferr
 	}

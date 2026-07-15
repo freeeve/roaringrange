@@ -2,6 +2,7 @@ package roaringrange
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -29,6 +30,11 @@ const (
 	// summaryTagFacet is the summary TLV tag for a facet-presence list (== the
 	// reader's SUMMARY_TAG_FACET).
 	summaryTagFacet = 2
+	// summaryTagFacetDigest is the summary TLV tag for a facet digest -- the top-k
+	// categories per field with names, counts, and posting ranges (== the reader's
+	// SUMMARY_TAG_FACET_DIGEST). A reader prices panel facet counts from the resident
+	// digest instead of booting the sidecar's whole meta region.
+	summaryTagFacetDigest = 3
 )
 
 // SplitBuildConfig is the build-time configuration for a SplitSetBuilder.
@@ -85,6 +91,7 @@ type SplitSetBuilder struct {
 	cfg          SplitBuildConfig
 	headBoundary uint32
 	stride       int
+	digestTop    int
 	open         map[uint64]*roaring.Bitmap
 	openCount    uint32
 	globalBase   uint32
@@ -116,6 +123,15 @@ func NewSplitSetBuilder(cfg SplitBuildConfig) *SplitSetBuilder {
 		open:         make(map[uint64]*roaring.Bitmap),
 		openFacets:   make(map[string]map[string]*roaring.Bitmap),
 	}
+}
+
+// SetFacetDigest emits a facet digest into each sealed split's manifest summary (TLV
+// tag 3): the top topPerField categories per field by full-corpus count, with names,
+// counts, and posting ranges -- so a reader prices panel facet counts from the resident
+// manifest with no sidecar meta boot. 0 (the default) emits no digest and keeps every
+// existing manifest byte-identical. Mirrors the Rust with_facet_digest.
+func (b *SplitSetBuilder) SetFacetDigest(topPerField int) {
+	b.digestTop = topPerField
 }
 
 // AddText tokenizes text into n-gram keys and appends it as one document, returning
@@ -240,7 +256,7 @@ func (b *SplitSetBuilder) seal() error {
 	// Per-split facet sidecar (RRSF) + facet-presence summary (tag 2), when the split holds facets.
 	// Order matches Rust: the Bloom record (tag 1) first, then the facet-presence record (tag 2).
 	var ferr error
-	if summary, ferr = sealFacetSidecar(b.openFacets, summary, &b.facetBlobs, b.cfg.NamePrefix, idx, !b.cfg.CaseSensitive); ferr != nil {
+	if summary, ferr = sealFacetSidecar(b.openFacets, summary, &b.facetBlobs, b.cfg.NamePrefix, idx, !b.cfg.CaseSensitive, b.digestTop); ferr != nil {
 		return ferr
 	}
 	blob := buf.Bytes()
@@ -311,12 +327,69 @@ func openFacetFields(facets map[string]map[string]*roaring.Bitmap) []FacetField 
 	return fields
 }
 
+// facetDigest builds the facet-digest summary payload from an emitted RRSF sidecar's bytes,
+// byte-for-byte with the Rust facet::facet_digest: the top k categories per field by
+// full-corpus count (ties broken by name), each with its display name, count, and posting
+// ranges. Deriving from the emitted bytes guarantees the digest's ranges match the sidecar.
+// Layout (LE): [k u16][fieldCount u16], per field [nameLen u16][name][catCount u16], per
+// category [nameLen u16][name][count u32][headOff u64][headSize u32][tailSize u32].
+func facetDigest(rrsf []byte, k int) ([]byte, error) {
+	fi, err := OpenFacets(bytes.NewReader(rrsf))
+	if err != nil {
+		return nil, err
+	}
+	k16 := uint16(min(k, 0xFFFF))
+	var out []byte
+	out = binary.LittleEndian.AppendUint16(out, k16)
+	fields := fi.Fields()
+	if len(fields) > 0xFFFF {
+		return nil, fmt.Errorf("facet digest field count %d exceeds u16", len(fields))
+	}
+	out = binary.LittleEndian.AppendUint16(out, uint16(len(fields)))
+	pushName := func(name string) error {
+		if len(name) > 0xFFFF {
+			return fmt.Errorf("facet digest name %q exceeds u16", name)
+		}
+		out = binary.LittleEndian.AppendUint16(out, uint16(len(name)))
+		out = append(out, name...)
+		return nil
+	}
+	cats := fi.Categories()
+	for _, f := range fields {
+		if err := pushName(f.Name); err != nil {
+			return nil, err
+		}
+		fc := make([]FacetCatMeta, f.CatCount)
+		copy(fc, cats[f.CatStart:f.CatStart+f.CatCount])
+		slices.SortFunc(fc, func(a, b FacetCatMeta) int {
+			if a.Cardinality != b.Cardinality {
+				return cmp.Compare(b.Cardinality, a.Cardinality)
+			}
+			return cmp.Compare(a.Name, b.Name)
+		})
+		if len(fc) > int(k16) {
+			fc = fc[:k16]
+		}
+		out = binary.LittleEndian.AppendUint16(out, uint16(len(fc)))
+		for _, c := range fc {
+			if err := pushName(c.Name); err != nil {
+				return nil, err
+			}
+			out = binary.LittleEndian.AppendUint32(out, c.Cardinality)
+			out = binary.LittleEndian.AppendUint64(out, c.headOff)
+			out = binary.LittleEndian.AppendUint32(out, c.headSize)
+			out = binary.LittleEndian.AppendUint32(out, c.tailSize)
+		}
+	}
+	return out, nil
+}
+
 // sealFacetSidecar is the facet half of both split builders' seal: when the open split holds
 // facets it appends the facet-presence TLV (tag 2) to summary and writes the ‹prefix›-s‹idx›.rrf
 // sidecar (appended to facetBlobs), else it leaves both untouched. Returns the extended summary.
 // caseFold is !CaseSensitive. Byte-identical to the inline form (append to a nil summary equals
 // assignment, so it serves both the Bloom-prefixed trigram summary and the term summary).
-func sealFacetSidecar(openFacets map[string]map[string]*roaring.Bitmap, summary []byte, facetBlobs *[]NamedSplit, namePrefix string, idx int, caseFold bool) ([]byte, error) {
+func sealFacetSidecar(openFacets map[string]map[string]*roaring.Bitmap, summary []byte, facetBlobs *[]NamedSplit, namePrefix string, idx int, caseFold bool, digestTop int) ([]byte, error) {
 	if len(openFacets) == 0 {
 		return summary, nil
 	}
@@ -324,6 +397,13 @@ func sealFacetSidecar(openFacets map[string]map[string]*roaring.Bitmap, summary 
 	var fbuf bytes.Buffer
 	if err := WriteFacetsWith(&fbuf, openFacetFields(openFacets), caseFold); err != nil {
 		return nil, err
+	}
+	if digestTop > 0 {
+		digest, err := facetDigest(fbuf.Bytes(), digestTop)
+		if err != nil {
+			return nil, err
+		}
+		summary = append(summary, tlvRecord(summaryTagFacetDigest, digest)...)
 	}
 	*facetBlobs = append(*facetBlobs, NamedSplit{
 		Name:  fmt.Sprintf("%s-s%05d.rrf", namePrefix, idx),
