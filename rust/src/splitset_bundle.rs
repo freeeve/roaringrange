@@ -181,4 +181,49 @@ mod tests {
         let hc = block_on(Hotcache::open(MemoryFetch::new(rrhc))).unwrap();
         assert!(hc.members().is_empty());
     }
+
+    /// Serializes the bundle over the shared split-set conformance fixture — the corpus both
+    /// languages build byte-identically (`rrss_build_golden.txt`) — so the golden pins the
+    /// whole boot-slicing + hotcache layout cross-language.
+    fn shared_golden_bundle() -> Vec<u8> {
+        let built = crate::splitset_build::conformance_build();
+        let mut rrhc = Vec::new();
+        write_splitset_bundle(&mut rrhc, &built, 0, 1 << 20).unwrap();
+        rrhc
+    }
+
+    fn shared_golden_path() -> &'static str {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/rrhc_bundle_build_golden.txt"
+        )
+    }
+
+    /// Cross-language conformance: the Go `WriteSplitsetBundle` must reproduce these exact
+    /// bytes from the same fixture (`splitsetbundle_test.go` asserts the same golden).
+    #[test]
+    fn bundle_matches_shared_golden() {
+        let hex: String = shared_golden_bundle()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let text = std::fs::read_to_string(shared_golden_path()).expect("read bundle golden");
+        assert_eq!(
+            text.trim(),
+            format!("rrhc_bundle {hex}"),
+            "split-set bundle drifted from the shared golden"
+        );
+    }
+
+    /// Regenerate with `cargo test --features "splits hotcache" regen_bundle_golden -- --ignored`.
+    #[test]
+    #[ignore]
+    fn regen_bundle_golden() {
+        let hex: String = shared_golden_bundle()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        std::fs::write(shared_golden_path(), format!("rrhc_bundle {hex}\n"))
+            .expect("write bundle golden");
+    }
 }

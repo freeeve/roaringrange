@@ -93,6 +93,11 @@ func boundedRead(r io.ReaderAt, off int64, n uint64) ([]byte, error) {
 	if n > maxReadBytes {
 		return nil, ErrTruncated
 	}
+	// A zero-length region is valid (e.g. an RRHC bundle whose members are all
+	// referenced has an empty inline blob at EOF); ReadAt would report io.EOF there.
+	if n == 0 {
+		return nil, nil
+	}
 	buf := make([]byte, n)
 	if _, err := r.ReadAt(buf, off); err != nil {
 		return nil, err
