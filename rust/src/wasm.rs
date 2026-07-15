@@ -1049,7 +1049,7 @@ impl RrsRecords {
     /// wave, so a page hydration is a single coalesced `.bin` wave. Prefer
     /// `preloadIdxPrefix` when only the top of a rank-ordered corpus is hot.
     #[wasm_bindgen(js_name = preloadIdx)]
-    pub async fn preload_idx(&mut self) -> Result<(), JsError> {
+    pub async fn preload_idx(&self) -> Result<(), JsError> {
         self.inner
             .preload_idx()
             .await
@@ -1058,9 +1058,10 @@ impl RrsRecords {
 
     /// Makes the offset table resident for doc ids `[0, first)` (clamped to the store's
     /// length) — the hot prefix of a rank-ordered corpus, where doc id == rank and result
-    /// pages concentrate at low ids. Ids past the prefix fall back to ranged reads.
+    /// pages concentrate at low ids. Ids past the prefix fall back to ranged reads. Takes a
+    /// shared borrow, so firing it and hydrating (`getMany`) concurrently is safe.
     #[wasm_bindgen(js_name = preloadIdxPrefix)]
-    pub async fn preload_idx_prefix(&mut self, first: u32) -> Result<(), JsError> {
+    pub async fn preload_idx_prefix(&self, first: u32) -> Result<(), JsError> {
         self.inner
             .preload_idx_prefix(first)
             .await
@@ -1072,7 +1073,7 @@ impl RrsRecords {
     /// `preloadIdx` for bytes that arrived out of band (an RRHC bundle member, an
     /// application cache). The header must match the open store; throws on a mismatch.
     #[wasm_bindgen(js_name = setResidentIdx)]
-    pub fn set_resident_idx(&mut self, bytes: Vec<u8>) -> Result<(), JsError> {
+    pub fn set_resident_idx(&self, bytes: Vec<u8>) -> Result<(), JsError> {
         self.inner
             .set_resident_idx(bytes)
             .map_err(|e| JsError::new(&e.to_string()))
