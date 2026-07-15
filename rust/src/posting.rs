@@ -28,7 +28,7 @@ const NO_RUNCONTAINER_COOKIE: u32 = 12346;
 /// Bytes read up front to (usually) capture a posting's whole header in one
 /// read. Headers larger than this — postings with very many containers — trigger
 /// one exact re-read; the body containers are still fetched selectively.
-const HEADER_PREFIX: usize = 4096;
+pub(crate) const HEADER_PREFIX: usize = 4096;
 
 /// Needed containers within this many bytes of each other are fetched as one
 /// ranged read rather than separately, so a run of consecutive keys collapses to
@@ -39,11 +39,11 @@ const SPAN_GAP: usize = 16384;
 /// One container's location within a posting: its high key, cardinality (needed
 /// to re-frame it into a standalone bitmap), and byte range relative to the
 /// posting start.
-struct Container {
-    key: u16,
-    card: u32,
-    start: usize,
-    len: usize,
+pub(crate) struct Container {
+    pub(crate) key: u16,
+    pub(crate) card: u32,
+    pub(crate) start: usize,
+    pub(crate) len: usize,
 }
 
 /// Intersects a set of tail postings (`(offset, len)` byte ranges of standalone
@@ -231,7 +231,7 @@ async fn fetch_containers<F: RangeFetch>(
 /// The full header length (cookie + size + descriptive header + offset table) of
 /// a NO_RUNCONTAINER posting, read from its first 8 bytes, or `None` if the
 /// cookie is not that variant.
-fn needed_header_len(bytes: &[u8]) -> Option<usize> {
+pub(crate) fn needed_header_len(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < 8 || read_u32(bytes, 0) != NO_RUNCONTAINER_COOKIE {
         return None;
     }
@@ -245,7 +245,7 @@ fn needed_header_len(bytes: &[u8]) -> Option<usize> {
 /// must already span the whole header). `total` is the posting's byte length,
 /// used as the final container's end. Returns `None` if the offset table is
 /// absent or inconsistent, so the caller can fall back to a full read.
-fn parse_dir(header: &[u8], total: usize) -> Option<Vec<Container>> {
+pub(crate) fn parse_dir(header: &[u8], total: usize) -> Option<Vec<Container>> {
     if header.len() < 8 || read_u32(header, 0) != NO_RUNCONTAINER_COOKIE {
         return None;
     }
@@ -293,7 +293,7 @@ fn parse_dir(header: &[u8], total: usize) -> Option<Vec<Container>> {
 /// byte-for-byte the NO_RUNCONTAINER layout the `roaring` crate deserializes.
 /// `sel` is `(key, cardinality, body)` in ascending key order, as the format
 /// requires.
-fn assemble(sel: &[(u16, u32, &[u8])]) -> Vec<u8> {
+pub(crate) fn assemble(sel: &[(u16, u32, &[u8])]) -> Vec<u8> {
     let n = sel.len();
     let data_start = 8 + n * 4 + n * 4;
     let total: usize = sel.iter().map(|(_, _, b)| b.len()).sum();

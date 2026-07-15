@@ -374,6 +374,88 @@ fn filtered_counts_include_tail_not_just_head() {
     assert_eq!(head_only[0][idx("en")], 2); // only the head docs {1,2}
 }
 
+/// Exact pricing over many categories must batch into a handful of coalesced waves, not one
+/// round trip per category — the read-shape regression the per-category path caused on a
+/// high-RTT CDN (hundreds of container-sized GETs per query).
+#[test]
+fn counts_full_batches_reads_into_few_waves() {
+    use crate::fetch::{FetchError, RangeFetch};
+    // 40 categories across two fields, each with head AND tail docs, so every category
+    // needs head + tail pricing.
+    let cats: Vec<(String, RoaringBitmap)> = (0..40u32)
+        .map(|i| (format!("c{i:02}"), bm(&[i, BUCKET + i, 3 * BUCKET + i])))
+        .collect();
+    let half = 20usize;
+    let fields: Vec<(&str, Vec<(&str, RoaringBitmap)>)> = vec![
+        (
+            "a",
+            cats[..half]
+                .iter()
+                .map(|(n, b)| (n.as_str(), b.clone()))
+                .collect(),
+        ),
+        (
+            "b",
+            cats[half..]
+                .iter()
+                .map(|(n, b)| (n.as_str(), b.clone()))
+                .collect(),
+        ),
+    ];
+    let rrsf = build_rrsf(&fields);
+
+    #[derive(Clone)]
+    struct CountingFetch {
+        inner: MemoryFetch,
+        reads: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+    impl RangeFetch for CountingFetch {
+        async fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, FetchError> {
+            self.reads.set(self.reads.get() + 1);
+            self.inner.read(offset, len).await
+        }
+    }
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let facets = block_on(FacetIndex::open_meta(CountingFetch {
+        inner: MemoryFetch::new(rrsf),
+        reads: reads.clone(),
+    }))
+    .unwrap();
+
+    // A result spanning head and both tail buckets of every category.
+    let result: RoaringBitmap = (0..40u32)
+        .flat_map(|i| [i, BUCKET + i, 3 * BUCKET + i])
+        .collect();
+    reads.set(0);
+    let full = block_on(facets.counts_full(&result, 0)).unwrap();
+    assert_eq!(full.len(), 2);
+    for (fi, field) in full.iter().enumerate() {
+        assert_eq!(field.len(), half);
+        for (ci, &n) in field.iter().enumerate() {
+            assert_eq!(n, 3, "category {fi}/{ci} must price exactly");
+        }
+    }
+    assert!(
+        reads.get() <= 6,
+        "40 exactly-priced categories must batch into a few coalesced waves, got {} reads",
+        reads.get()
+    );
+
+    // counts_for over a handful of named pairs stays batched too.
+    reads.set(0);
+    let got = block_on(facets.counts_for(
+        &result,
+        &[
+            ("a".to_string(), "c00".to_string()),
+            ("b".to_string(), "c39".to_string()),
+            ("b".to_string(), "nope".to_string()),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(got, vec![3, 3, 0]);
+    assert!(reads.get() <= 4, "counts_for reads = {}", reads.get());
+}
+
 #[test]
 fn counts_for_prices_named_categories_exactly() {
     let en = bm(&[1, 2, BUCKET + 5, 3 * BUCKET + 9]);

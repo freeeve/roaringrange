@@ -2292,17 +2292,30 @@ impl RrssIndex {
     /// `‹split›.rrf` sidecar is opened and counted; counts are summed by category name (split sets
     /// carry no global category table). Categories the result never hits are omitted (the demo
     /// renders missing keys as `0`). Resolves to that array.
+    ///
+    /// `top_per_field` caps how many categories per field each split prices exactly (by
+    /// full-corpus frequency — what a facet panel shows). Omit it for the library default
+    /// (128); pass what the panel actually renders (e.g. 16) to shrink the per-split read
+    /// bytes proportionally, and price an expanded long-tail category via `countsFor`.
+    /// `0` prices every category — exact everywhere, ruinous on wide fields over HTTP.
     #[wasm_bindgen(js_name = facetCounts)]
-    pub async fn facet_counts(&self, ids: Vec<u32>) -> Result<JsValue, JsError> {
+    pub async fn facet_counts(
+        &self,
+        ids: Vec<u32>,
+        top_per_field: Option<u32>,
+    ) -> Result<JsValue, JsError> {
         let resolver = WasmSplitResolver {
             base: self.base.clone(),
             bloom: self.bloom.clone(),
             #[cfg(feature = "hotcache")]
             hc: self.hc.clone(),
         };
+        let top = top_per_field
+            .map(|n| n as usize)
+            .unwrap_or(crate::splitset::FACET_COUNT_TOP_PER_FIELD);
         let counts = self
             .inner
-            .facet_counts(&resolver, &ids)
+            .facet_counts_top(&resolver, &ids, top)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(field_counts_to_js(&counts))

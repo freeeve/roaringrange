@@ -581,60 +581,188 @@ impl<F: RangeFetch> FacetIndex<F> {
             }
         }
 
-        let tail_keys = &tail_keys;
-        let futs = targets.iter().map(|&(fi, ci)| {
-            let c = &self.fields[fi].categories[ci];
-            async move {
-                let n = self
-                    .count_category(c, result, head_needed, tail_keys)
-                    .await?;
-                Ok::<(usize, usize, u64), IndexError>((fi, ci, n))
-            }
-        });
-
-        for r in futures::future::join_all(futs).await {
-            let (fi, ci, n) = r?;
+        let priced = self
+            .count_categories_batched(&targets, result, head_needed, &tail_keys)
+            .await?;
+        for (&(fi, ci), n) in targets.iter().zip(priced) {
             counts[fi][ci] = n;
         }
         Ok(counts)
     }
 
-    /// Exact head+tail count of one category's posting within `result`: the resident
-    /// head (or a fetched one if a sized head was not resident-loaded) plus the tail,
-    /// fetched at container granularity (only the buckets `result` spans, derived
-    /// once by the caller as `head_needed` + `tail_keys`). Shared by
-    /// [`counts_full`](Self::counts_full) and [`counts_for`](Self::counts_for).
-    async fn count_category(
+    /// Prices each target category's exact head+tail count within `result`, batching the
+    /// whole sidecar's reads into **coalesced waves** instead of per-category round trips —
+    /// on a high-RTT origin the difference between hundreds of container-sized GETs and a
+    /// handful. Wave A fetches every needed head posting and tail header prefix; wave B the
+    /// rare exact tail-header re-reads and non-seekable whole-tail fallbacks; wave C every
+    /// needed tail container across all categories (adjacent categories' containers merge
+    /// across category boundaries). `targets` are `(field, category)` index pairs; returns
+    /// one exact count per target, in order. Shared by [`counts_full`](Self::counts_full)
+    /// and [`counts_for`](Self::counts_for).
+    async fn count_categories_batched(
         &self,
-        c: &Category,
+        targets: &[(usize, usize)],
         result: &RoaringBitmap,
         head_needed: bool,
         tail_keys: &[u16],
-    ) -> Result<u64, IndexError> {
-        let head_n = if head_needed && c.head.is_empty() && c.range.head_size > 0 {
-            let bytes = self
-                .fetch
-                .read(c.range.head_off, c.range.head_size as usize)
-                .await?;
-            let h = RoaringBitmap::deserialize_from(&bytes[..])
-                .map_err(|_| IndexError::Malformed("RRSF head posting"))?;
-            result.intersection_len(&h)
-        } else {
-            result.intersection_len(&c.head)
+    ) -> Result<Vec<u64>, IndexError> {
+        use crate::fetch::{read_coalesced, COALESCE_GAP};
+        use crate::posting::{assemble, needed_header_len, parse_dir, Container, HEADER_PREFIX};
+
+        /// The directory entries whose high key the result actually spans.
+        fn needed_of(dir: Vec<Container>, keys: &[u16]) -> Vec<Container> {
+            dir.into_iter()
+                .filter(|c| keys.binary_search(&c.key).is_ok())
+                .collect()
+        }
+        let cat = |t: &(usize, usize)| &self.fields[t.0].categories[t.1];
+        let bitmap = |bytes: &[u8], what: &'static str| {
+            RoaringBitmap::deserialize_from(bytes).map_err(|_| IndexError::Malformed(what))
         };
-        let tail_n = if !tail_keys.is_empty() && c.range.tail_size > 0 {
-            let t = crate::posting::read_posting_subset(
-                &self.fetch,
-                c.range.tail_off,
-                c.range.tail_size as usize,
-                tail_keys,
-            )
-            .await?;
-            result.intersection_len(&t)
-        } else {
-            0
-        };
-        Ok(head_n + tail_n)
+
+        // Wave A: per target, the head posting (when filtered head counts need one and no
+        // resident head is loaded) and the tail's header prefix (the whole tail, if small).
+        let mut ranges: Vec<(u64, usize)> = Vec::with_capacity(targets.len() * 2);
+        for t in targets {
+            let c = cat(t);
+            let need_head = head_needed && c.head.is_empty() && c.range.head_size > 0;
+            ranges.push(if need_head {
+                (c.range.head_off, c.range.head_size as usize)
+            } else {
+                (0, 0)
+            });
+            let need_tail = !tail_keys.is_empty() && c.range.tail_size > 0;
+            ranges.push(if need_tail {
+                let prefix = (c.range.tail_size as usize).min(HEADER_PREFIX);
+                (c.range.tail_off, prefix)
+            } else {
+                (0, 0)
+            });
+        }
+        let wave_a = read_coalesced(&self.fetch, &ranges, COALESCE_GAP).await?;
+
+        /// A target's tail after wave A: counted, awaiting a wave-B re-read, or awaiting
+        /// its wave-C container bodies.
+        enum Tail {
+            Done,
+            Refetch { wb: usize, whole: bool },
+            Containers(Vec<Container>),
+        }
+        let mut counts = vec![0u64; targets.len()];
+        let mut tails: Vec<Tail> = Vec::with_capacity(targets.len());
+        let mut wave_b_ranges: Vec<(u64, usize)> = Vec::new();
+        for (i, t) in targets.iter().enumerate() {
+            let c = cat(t);
+            let head_bytes = &wave_a[2 * i];
+            counts[i] += if head_bytes.is_empty() {
+                result.intersection_len(&c.head)
+            } else {
+                result.intersection_len(&bitmap(head_bytes, "RRSF head posting")?)
+            };
+
+            let tail_len = c.range.tail_size as usize;
+            let prefix = &wave_a[2 * i + 1];
+            if prefix.is_empty() {
+                tails.push(Tail::Done);
+                continue;
+            }
+            if prefix.len() >= tail_len {
+                // The whole (small) tail arrived in the prefix read.
+                counts[i] += result.intersection_len(&bitmap(prefix, "RRSF tail posting")?);
+                tails.push(Tail::Done);
+                continue;
+            }
+            match needed_header_len(prefix) {
+                // Directory in hand: select this target's containers for wave C, falling
+                // back to the whole posting when the layout isn't seekable after all.
+                Some(hl) if hl <= prefix.len() => match parse_dir(prefix, tail_len) {
+                    Some(dir) => tails.push(Tail::Containers(needed_of(dir, tail_keys))),
+                    None => {
+                        tails.push(Tail::Refetch {
+                            wb: wave_b_ranges.len(),
+                            whole: true,
+                        });
+                        wave_b_ranges.push((c.range.tail_off, tail_len));
+                    }
+                },
+                // A directory larger than the prefix: one exact header re-read.
+                Some(hl) => {
+                    tails.push(Tail::Refetch {
+                        wb: wave_b_ranges.len(),
+                        whole: false,
+                    });
+                    wave_b_ranges.push((c.range.tail_off, hl));
+                }
+                // Not the seekable NO_RUNCONTAINER layout: read the posting whole.
+                None => {
+                    tails.push(Tail::Refetch {
+                        wb: wave_b_ranges.len(),
+                        whole: true,
+                    });
+                    wave_b_ranges.push((c.range.tail_off, tail_len));
+                }
+            }
+        }
+
+        // Wave B: the re-reads wave A couldn't satisfy, coalesced.
+        let wave_b = read_coalesced(&self.fetch, &wave_b_ranges, COALESCE_GAP).await?;
+        for i in 0..targets.len() {
+            let (wb, whole) = match &tails[i] {
+                Tail::Refetch { wb, whole } => (*wb, *whole),
+                _ => continue,
+            };
+            let bytes = &wave_b[wb];
+            if whole {
+                counts[i] += result.intersection_len(&bitmap(bytes, "RRSF tail posting")?);
+                tails[i] = Tail::Done;
+                continue;
+            }
+            let c = cat(&targets[i]);
+            let tail_len = c.range.tail_size as usize;
+            match parse_dir(bytes, tail_len) {
+                Some(dir) => tails[i] = Tail::Containers(needed_of(dir, tail_keys)),
+                None => {
+                    // Header re-read still unparsable (corruption-shaped): last-resort
+                    // whole read, the pre-batch behavior for this posting.
+                    let raw = self.fetch.read(c.range.tail_off, tail_len).await?;
+                    counts[i] += result.intersection_len(&bitmap(&raw, "RRSF tail posting")?);
+                    tails[i] = Tail::Done;
+                }
+            }
+        }
+
+        // Wave C: every needed container across all categories, coalesced.
+        let mut c_ranges: Vec<(u64, usize)> = Vec::new();
+        for (i, t) in tails.iter().enumerate() {
+            if let Tail::Containers(needed) = t {
+                let off = cat(&targets[i]).range.tail_off;
+                for c in needed {
+                    c_ranges.push((off + c.start as u64, c.len));
+                }
+            }
+        }
+        let bodies = read_coalesced(&self.fetch, &c_ranges, COALESCE_GAP).await?;
+        let mut k = 0usize;
+        for (i, t) in tails.iter().enumerate() {
+            let Tail::Containers(needed) = t else {
+                continue;
+            };
+            if needed.is_empty() {
+                continue;
+            }
+            // Re-frame this target's fetched containers into a standalone bitmap.
+            let sel: Vec<(u16, u32, &[u8])> = needed
+                .iter()
+                .map(|c| {
+                    let b = bodies[k].as_slice();
+                    k += 1;
+                    (c.key, c.card, b)
+                })
+                .collect();
+            let bm = crate::index::deserialize(&assemble(&sel))?;
+            counts[i] += result.intersection_len(&bm);
+        }
+        Ok(counts)
     }
 
     /// Exact head+tail counts within `result` for specific named `(field, category)`
@@ -660,21 +788,34 @@ impl<F: RangeFetch> FacetIndex<F> {
             }
         }
 
-        let tail_keys = &tail_keys;
-        let futs = pairs.iter().map(|(fname, cname)| {
-            let cat = self
+        // Resolve the named pairs to category indices (unknown pairs price to 0), then batch
+        // the found targets through the same coalesced waves as `counts_full`.
+        let mut targets: Vec<(usize, usize)> = Vec::new();
+        let mut slot: Vec<Option<usize>> = Vec::with_capacity(pairs.len());
+        for (fname, cname) in pairs {
+            let found = self
                 .fields
                 .iter()
-                .find(|f| &f.name == fname)
-                .and_then(|f| f.categories.iter().find(|c| &c.name == cname));
-            async move {
-                match cat {
-                    Some(c) => self.count_category(c, result, head_needed, tail_keys).await,
-                    None => Ok(0),
-                }
-            }
-        });
-        futures::future::join_all(futs).await.into_iter().collect()
+                .enumerate()
+                .find(|(_, f)| &f.name == fname)
+                .and_then(|(fi, f)| {
+                    f.categories
+                        .iter()
+                        .position(|c| &c.name == cname)
+                        .map(|ci| (fi, ci))
+                });
+            slot.push(found.map(|t| {
+                targets.push(t);
+                targets.len() - 1
+            }));
+        }
+        let priced = self
+            .count_categories_batched(&targets, result, head_needed, &tail_keys)
+            .await?;
+        Ok(slot
+            .into_iter()
+            .map(|s| s.map(|i| priced[i]).unwrap_or(0))
+            .collect())
     }
 }
 
