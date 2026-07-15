@@ -2552,7 +2552,9 @@
           // Facet counts over the result set from the split set's own sidecars.
           const fcR0 = reqs, fcB0 = bytes, fcT0 = performance.now();
           let fc = null;
-          try { fc = await rrss.facetCounts(Uint32Array.from(sids)); } catch (_) {}
+          /* topPerField=100 matches the panel's rendered top-100, so each split prices only
+             what the sidebar can show; long-tail categories stay fetchable via countsFor. */
+          try { fc = await rrss.facetCounts(Uint32Array.from(sids), 100); } catch (_) {}
           if (mySeq !== searchSeq) return;
           cur = null;
           rankedIds = sids;
@@ -2724,6 +2726,12 @@
           } else {
             records = await RrsRecords.open(IDX_URL, BIN_URL);
           }
+          /* CloudFront RTTs: widen the getMany wave-merge gap (bridged bytes land in the
+             range cache), and make the top-100k ranks' offset table resident (~800 KB, one
+             read) so page hydrations skip the .idx wave. Awaited: overlapping calls on one
+             RrsRecords throw (the wasm object is exclusively borrowed across an await). */
+          records.setCoalesceGap(262144);
+          await records.preloadIdxPrefix(100_000);
         } catch (e) { els.mSummary.textContent = `failed to open record store: ${e}`; return; }
         const recstore = seg();
 
@@ -2818,6 +2826,7 @@
           splitRecords = (SPLIT.rec === DATASETS[DS].rec)
             ? records
             : await RrsRecords.open(SPLIT_REC_IDX_URL, SPLIT_REC_BIN_URL);
+          if (splitRecords !== records) splitRecords.setCoalesceGap(262144);
           rrss = opened;   // publish last
         } catch (_) { rrss = null; splitRecords = null; return; }
         // Reveal the toggle (trigram mode only — syncModeUi recomputes from rrss),

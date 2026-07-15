@@ -54,6 +54,34 @@ feature) with no core changes between the two. Reads are issued in concurrent
 waves, so a query costs a near-constant number of round-trips regardless of how
 many n-grams it has.
 
+## Browser fetch layer & high-RTT knobs
+
+The wasm reader schedules its own network reads rather than dumping them on the
+browser's per-origin queue:
+
+- every ranged read carries `priority: "high"`, deduplicates against identical
+  in-flight reads (singleflight), and passes a bounded FIFO **fetch window**
+  (default 8; `setFetchWindow(n)`, `0` = unbounded; `fetchWindowStats()` returns
+  `[limit, active, parked]`);
+- a shared LRU **range cache** memoizes completed reads (`setRangeCacheMb`,
+  `rangeCacheStats`).
+
+Per-store/CDN tuning, all optional:
+
+- `RrsRecords.setCoalesceGap(bytes)` widens `getMany`'s wave-merge gap (fewer,
+  larger reads on high-RTT origins); `preloadIdxPrefix(n)` / `preloadIdx()` /
+  `setResidentIdx(bytes)` make the offset table resident so page hydrations skip
+  the `.idx` wave entirely (doc id == rank, so a prefix covers the hot pages).
+- `RrssIndex.facetCounts(ids, topPerField?)` prices only what a facet panel
+  renders; `countsFor(ids, pairs)` prices expanded long-tail categories exactly.
+  Split sets built with `with_facet_digest(k)` / Go `SetFacetDigest(k)` carry a
+  per-split **facet digest** in the manifest, so pricing reads no sidecar meta
+  at all (see `SPLITSET.md`, summary tag 3).
+- `RrssIndex.openBundle(manifest, base, rrhc)` boots every split — trigram
+  **and** term (`RRTI`) — from one inlined-boot bundle emitted by
+  `write_splitset_bundle` / Go `WriteSplitsetBundle`, collapsing per-split
+  cold-open round trips into a single GET.
+
 ## Build & test
 
 Native (host target) — the `wasm-bindgen` deps are optional, so it builds and
