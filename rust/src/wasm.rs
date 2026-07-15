@@ -29,7 +29,7 @@ use crate::sortcols::SortCols;
 use crate::terms::TermIndex;
 #[cfg(feature = "vector")]
 use crate::vector::VectorIndex;
-use futures::future::{LocalBoxFuture, Shared};
+use futures::future::{LocalBoxFuture, Shared, WeakShared};
 use futures::FutureExt;
 use js_sys::{Array, ArrayBuffer, Float64Array, Object, Reflect, Uint32Array, Uint8Array};
 use roaring::RoaringBitmap;
@@ -40,8 +40,10 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
 
+/// The boxed network read behind a singleflight entry.
+type InFlightInner = LocalBoxFuture<'static, Result<Vec<u8>, FetchError>>;
 /// A ranged read in flight, shareable by every concurrent caller of the same range.
-type InFlightRead = Shared<LocalBoxFuture<'static, Result<Vec<u8>, FetchError>>>;
+type InFlightRead = Shared<InFlightInner>;
 
 thread_local! {
     /// Process-wide range cache shared by every [`WasmFetch`]. `None` until the client opts in via
@@ -52,8 +54,12 @@ thread_local! {
     static FETCH_GATE: Rc<FetchGate> = FetchGate::new(DEFAULT_FETCH_WINDOW);
     /// Singleflight table: identical concurrent `(url, offset, len)` misses share ONE network
     /// fetch instead of each hitting the origin (the range cache only memoizes *completed*
-    /// reads, so without this two overlapping waves double-fetch the same range).
-    static IN_FLIGHT: RefCell<HashMap<(String, u64, usize), InFlightRead>> =
+    /// reads, so without this two overlapping waves double-fetch the same range). Entries are
+    /// **weak**: only the awaiting readers keep the shared fetch alive, so an abandoned read
+    /// (every handle dropped) drops the inner future — releasing its fetch-window permit —
+    /// instead of pinning it here forever, alive but never polled, with a permit trapped
+    /// inside (the task-088 hang).
+    static IN_FLIGHT: RefCell<HashMap<(String, u64, usize), WeakShared<InFlightInner>>> =
         RefCell::new(HashMap::new());
     /// One reused `Headers` object for every ranged read: the `Range` value is set and the
     /// `Request` snapshotted synchronously (no await between), so sharing it is race-free on
@@ -217,12 +223,14 @@ impl RangeFetch for WasmFetch {
         }
         // Singleflight: a concurrent identical miss joins the read already in flight instead
         // of double-fetching it. The completing poll retires the table entry; by then the
-        // range cache holds the bytes, so later identical reads hit the cache path above.
+        // range cache holds the bytes, so later identical reads hit the cache path above. A
+        // dead weak entry (the read was abandoned by every awaiter) is replaced with a
+        // fresh fetch.
         let key = (self.url.clone(), offset, len);
-        let shared = IN_FLIGHT.with(|m| {
+        let shared: InFlightRead = IN_FLIGHT.with(|m| {
             let mut m = m.borrow_mut();
-            if let Some(f) = m.get(&key) {
-                return f.clone();
+            if let Some(f) = m.get(&key).and_then(WeakShared::upgrade) {
+                return f;
             }
             let owner_key = key.clone();
             let fut = async move {
@@ -232,11 +240,29 @@ impl RangeFetch for WasmFetch {
             }
             .boxed_local()
             .shared();
-            m.insert(key.clone(), fut.clone());
+            if let Some(weak) = fut.downgrade() {
+                // Dead entries normally retire on completion or overwrite; sweep the rare
+                // abandoned leftovers so the table cannot grow without bound.
+                if m.len() >= 1024 {
+                    m.retain(|_, w| w.upgrade().is_some());
+                }
+                m.insert(key.clone(), weak);
+            }
             fut
         });
         shared.await
     }
+}
+
+/// `[limit, active, parked]` for the fetch window — a JS-side readout for diagnosing read
+/// scheduling (`parked` stuck non-zero while `active` is 0 would mean lost wakeups; see
+/// `setFetchWindow`).
+#[wasm_bindgen(js_name = fetchWindowStats)]
+pub fn fetch_window_stats() -> Vec<f64> {
+    FETCH_GATE.with(|g| {
+        let (limit, active, parked) = g.stats();
+        vec![limit as f64, active as f64, parked as f64]
+    })
 }
 
 /// The network half of a [`WasmFetch`] read — singleflight-shared and window-gated: waits for
