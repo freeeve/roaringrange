@@ -462,7 +462,9 @@ fn counts_full_batches_reads_into_few_waves() {
 /// read.
 #[test]
 fn facet_digest_round_trips_and_prices_like_the_full_meta() {
-    use crate::facet::{facet_digest, parse_facet_digest, FacetMeta};
+    use crate::facet::{
+        facet_digest, facet_digest_v2, parse_facet_digest, parse_facet_digest_v2, FacetMeta,
+    };
     // "tag": five categories with distinct sizes (t0 densest, head+tail docs); "y": two.
     let cat = |seed: u32, n: u32| -> RoaringBitmap {
         (0..n).flat_map(|i| [seed + i, BUCKET + seed + i]).collect()
@@ -503,7 +505,7 @@ fn facet_digest_round_trips_and_prices_like_the_full_meta() {
         .chain([600, BUCKET + 601])
         .collect();
     let from_digest = FacetMeta::from_fields(fields).attach(MemoryFetch::new(rrsf.clone()));
-    let full = block_on(FacetIndex::open_meta(MemoryFetch::new(rrsf))).unwrap();
+    let full = block_on(FacetIndex::open_meta(MemoryFetch::new(rrsf.clone()))).unwrap();
     let pairs: Vec<(String, String)> = [("tag", "t0"), ("tag", "t2"), ("y", "2020")]
         .iter()
         .map(|(f, c)| (f.to_string(), c.to_string()))
@@ -512,6 +514,14 @@ fn facet_digest_round_trips_and_prices_like_the_full_meta() {
     let want = block_on(full.counts_for(&result, &pairs)).unwrap();
     assert_eq!(got, want);
     assert!(want.iter().any(|&n| n > 0), "fixture must actually match");
+
+    // The v2 digest (tail directory resident) parses to the same skeleton and prices identically
+    // — a wider `k` fixture and multi-bucket win are covered in splitset.rs / facet_wave_probe.
+    let (k2, fields2) = parse_facet_digest_v2(&facet_digest_v2(&rrsf, 3).unwrap()).unwrap();
+    assert_eq!(k2, 3);
+    assert_eq!(fields2.len(), 2);
+    let from_v2 = FacetMeta::from_fields(fields2).attach(MemoryFetch::new(rrsf.clone()));
+    assert_eq!(block_on(from_v2.counts_for(&result, &pairs)).unwrap(), want);
 }
 
 #[test]
