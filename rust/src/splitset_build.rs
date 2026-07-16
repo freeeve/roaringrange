@@ -303,6 +303,42 @@ pub(crate) fn conformance_build() -> BuiltSplitSet {
     b.finish().unwrap()
 }
 
+/// Digest-enabled conformance fixture: the shared 5-doc corpus built with
+/// `with_facet_digest(2)`, pinning the facet-digest TLV bytes (category ordering, name
+/// spans, posting ranges) cross-language via `testdata/rrss_digest_build_golden.txt` —
+/// the Go `SetFacetDigest` must reproduce every byte (`splitsetbuild_test.go`).
+#[cfg(test)]
+pub(crate) fn digest_conformance_build() -> BuiltSplitSet {
+    let docs: [(&str, &[(&str, &str)]); 5] = [
+        ("alpha beta", &[("year", "2020"), ("kind", "a")]),
+        ("beta gamma", &[("year", "2021"), ("kind", "b")]),
+        ("gamma delta", &[("year", "2020"), ("kind", "a")]),
+        ("delta alpha", &[("year", "2021"), ("kind", "b")]),
+        ("alpha gamma", &[("year", "2022"), ("kind", "a")]),
+    ];
+    let mut b = SplitSetBuilder::new(SplitBuildConfig {
+        byte_cap_max: 0,
+        policy: Policy::Tiered,
+        byte_cap: 600,
+        gram_size: 3,
+        head_boundary: 0,
+        stride: 0,
+        name_prefix: "corpus".to_string(),
+        sortcol: None,
+        bloom_bits_per_key: 8,
+        case_sensitive: false,
+    })
+    .with_facet_digest(2);
+    for (text, facets) in docs {
+        let pairs: Vec<(String, String)> = facets
+            .iter()
+            .map(|(f, c)| (f.to_string(), c.to_string()))
+            .collect();
+        b.add_faceted(text, &pairs).unwrap();
+    }
+    b.finish().unwrap()
+}
+
 /// Geometric-tiering conformance fixture: the same corpus repeated enough that the
 /// doubling caps (`byte_cap 300 → byte_cap_max 1200`) place several seal boundaries —
 /// each tier visibly larger than the last. Shared with Go via
@@ -1795,6 +1831,38 @@ mod term_conformance {
             "/../testdata/rrti_term_split_cs_golden.txt"
         );
         std::fs::write(path, super::golden_text(&built)).expect("write shared term cs golden");
+    }
+}
+
+/// Facet-digest conformance: the digest TLV bytes shared with Go.
+#[cfg(test)]
+mod digest_conformance {
+    use super::digest_conformance_build;
+
+    fn golden_path() -> &'static str {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/rrss_digest_build_golden.txt"
+        )
+    }
+
+    #[test]
+    fn digest_build_matches_shared_golden() {
+        let built = digest_conformance_build();
+        let text = std::fs::read_to_string(golden_path()).expect("read digest golden");
+        assert_eq!(
+            text,
+            super::golden_text(&built),
+            "digest-enabled split build drifted from the shared golden"
+        );
+    }
+
+    /// Regenerate with `cargo test --features splits regen_digest_golden -- --ignored`.
+    #[test]
+    #[ignore]
+    fn regen_digest_golden() {
+        let built = digest_conformance_build();
+        std::fs::write(golden_path(), super::golden_text(&built)).expect("write digest golden");
     }
 }
 
