@@ -13,7 +13,69 @@
 use crate::fetch::RangeFetch;
 use crate::index::{read_u16, read_u32, read_u64, CatRange, IndexError, ResolvedFilter};
 use roaring::RoaringBitmap;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+
+/// One pricing wave's read fan-out, captured when tracing is on (see [`set_facet_trace`]).
+/// A facet-count over a split set issues these per contributing split; a caller can total
+/// them to see how many dependent round trips and how many coalesced reads a `facetCounts`
+/// call really costs, and whether the cost is per-category serial (it is not) or a handful
+/// of concurrent waves (it is).
+#[derive(Clone, Debug)]
+pub struct WaveStat {
+    /// The wave: `"A"` (head + tail-header prefixes), `"B"` (rare header re-reads / whole
+    /// tails), or `"C"` (needed tail containers) — issued in that dependent order per split.
+    pub wave: &'static str,
+    /// Coalesced reads this wave actually issues (what the transport sees, after empty
+    /// ranges drop and near ranges merge) — the number that shows up as network requests.
+    pub reads: usize,
+    /// Bytes requested across those reads.
+    pub bytes: usize,
+    /// Categories this split priced in the call the wave belongs to (constant across its
+    /// three waves) — lets a reader group waves back into their split.
+    pub targets: usize,
+}
+
+thread_local! {
+    /// Pricing-wave recorder. `None` = off (the default; the only cost when off is this
+    /// borrow-and-match). `set_facet_trace(true)` installs an empty buffer that
+    /// [`FacetIndex::count_categories_batched`] appends a [`WaveStat`] to per wave;
+    /// `take_facet_trace()` drains it. Single-threaded (wasm and `block_on`), so a
+    /// thread-local `RefCell` is all the sharing this needs.
+    static PRICING_TRACE: RefCell<Option<Vec<WaveStat>>> = const { RefCell::new(None) };
+}
+
+/// Turns pricing-wave tracing on (fresh empty buffer) or off (drops any buffer). Off by
+/// default and zero-cost when off. See [`take_facet_trace`].
+pub fn set_facet_trace(on: bool) {
+    PRICING_TRACE.with(|t| *t.borrow_mut() = if on { Some(Vec::new()) } else { None });
+}
+
+/// Drains the recorded pricing waves since tracing was enabled (or the last drain), leaving
+/// tracing on with an empty buffer. Empty when tracing is off. See [`set_facet_trace`].
+pub fn take_facet_trace() -> Vec<WaveStat> {
+    PRICING_TRACE.with(|t| {
+        let mut slot = t.borrow_mut();
+        match slot.as_mut() {
+            Some(buf) => std::mem::take(buf),
+            None => Vec::new(),
+        }
+    })
+}
+
+/// Records one wave if tracing is on; a no-op otherwise.
+fn record_wave(wave: &'static str, reads: usize, bytes: usize, targets: usize) {
+    PRICING_TRACE.with(|t| {
+        if let Some(buf) = t.borrow_mut().as_mut() {
+            buf.push(WaveStat {
+                wave,
+                reads,
+                bytes,
+                targets,
+            });
+        }
+    });
+}
 
 /// `RRSF` magic.
 const MAGIC: &[u8; 4] = b"RRSF";
@@ -613,7 +675,7 @@ impl<F: RangeFetch> FacetIndex<F> {
         head_needed: bool,
         tail_keys: &[u16],
     ) -> Result<Vec<u64>, IndexError> {
-        use crate::fetch::read_coalesced;
+        use crate::fetch::{coalesced_span_count, read_coalesced};
         /// The pricing waves' bridge gap. Deliberately far below the library-wide 16 KiB
         /// [`crate::fetch::COALESCE_GAP`]: the priced categories are the top-by-count —
         /// i.e. the LARGEST postings — and in a zipf-shaped sidecar consecutive large
@@ -655,6 +717,12 @@ impl<F: RangeFetch> FacetIndex<F> {
                 (0, 0)
             });
         }
+        record_wave(
+            "A",
+            coalesced_span_count(&ranges, PRICING_GAP),
+            ranges.iter().map(|&(_, l)| l).sum(),
+            targets.len(),
+        );
         let wave_a = read_coalesced(&self.fetch, &ranges, PRICING_GAP).await?;
 
         /// A target's tail after wave A: counted, awaiting a wave-B re-read, or awaiting
@@ -721,6 +789,12 @@ impl<F: RangeFetch> FacetIndex<F> {
         }
 
         // Wave B: the re-reads wave A couldn't satisfy, coalesced.
+        record_wave(
+            "B",
+            coalesced_span_count(&wave_b_ranges, PRICING_GAP),
+            wave_b_ranges.iter().map(|&(_, l)| l).sum(),
+            targets.len(),
+        );
         let wave_b = read_coalesced(&self.fetch, &wave_b_ranges, PRICING_GAP).await?;
         for i in 0..targets.len() {
             let (wb, whole) = match &tails[i] {
@@ -785,6 +859,12 @@ impl<F: RangeFetch> FacetIndex<F> {
                 }
             }
         }
+        record_wave(
+            "C",
+            coalesced_span_count(&spans, PRICING_GAP),
+            spans.iter().map(|&(_, l)| l).sum(),
+            targets.len(),
+        );
         let bodies = read_coalesced(&self.fetch, &spans, PRICING_GAP).await?;
         for (i, t) in tails.iter().enumerate() {
             let Tail::Containers(needed) = t else {

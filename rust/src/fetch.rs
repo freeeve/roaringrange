@@ -151,6 +151,31 @@ pub(crate) const COALESCE_GAP: u64 = 16 * 1024;
 /// record slices, one field's facet postings) otherwise costs one round trip
 /// each. The bridged gap bytes land in the shared range cache, so they are not
 /// wasted on a warm client. A zero-length range yields an empty vec, no fetch.
+/// How many coalesced reads [`read_coalesced`] would issue for `ranges` at `gap` — the
+/// span count after empty ranges are dropped and near ranges merged. Cheap (a sort plus a
+/// linear merge, no I/O); used to trace the pricing waves' real read fan-out without
+/// re-deriving the merge at each call site.
+pub(crate) fn coalesced_span_count(ranges: &[(u64, usize)], gap: u64) -> usize {
+    let mut offsets: Vec<(u64, u64)> = ranges
+        .iter()
+        .filter(|&&(_, len)| len != 0)
+        .map(|&(off, len)| (off, off.saturating_add(len as u64)))
+        .collect();
+    offsets.sort_by_key(|&(off, _)| off);
+    let mut spans = 0usize;
+    let mut last_end: Option<u64> = None;
+    for (off, end) in offsets {
+        match last_end {
+            Some(e) if off <= e.saturating_add(gap) => last_end = Some(end.max(e)),
+            _ => {
+                spans += 1;
+                last_end = Some(end);
+            }
+        }
+    }
+    spans
+}
+
 pub(crate) async fn read_coalesced<F: RangeFetch>(
     fetch: &F,
     ranges: &[(u64, usize)],

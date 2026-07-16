@@ -66,6 +66,17 @@ browser's per-origin queue:
 - a shared LRU **range cache** memoizes completed reads (`setRangeCacheMb`,
   `rangeCacheStats`).
 
+To diagnose a slow facet price, `setFacetTrace(true)` records the pricing
+**wave structure** and `facetTrace()` drains it: an `Array<{wave, reads, bytes,
+targets}>` with one `A`/`B`/`C` triple per contributing split. The waves are two
+dependent round trips (A = head + tail-header prefixes, then C = the needed tail
+containers; B is a rare header re-read), all splits concurrent — *not* a
+per-category serial chain. Wave A dominates: it issues ~one scattered
+tail-header read per priced category per split, so its read count scales with
+`topPerField × fields × contributing splits`, capped by the fetch window rather
+than reduced by it. If the traced reads land quickly but the panel updates
+slowly, the delay is downstream of the fetch (dwell/render), not the waves.
+
 Per-store/CDN tuning, all optional:
 
 - `RrsRecords.setCoalesceGap(bytes)` widens `getMany`'s wave-merge gap (fewer,

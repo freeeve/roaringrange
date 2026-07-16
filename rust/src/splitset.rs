@@ -3077,6 +3077,56 @@ mod tests {
         );
     }
 
+    /// The pricing-wave trace records one A/B/C triple per contributing split (the wave
+    /// structure a `facetCounts` diagnostic samples), and is inert unless enabled.
+    #[test]
+    fn facet_trace_records_pricing_waves_per_split() {
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::Tiered,
+            byte_cap: 1 << 20,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 0,
+            case_sensitive: false,
+        });
+        for t in 0..4u32 {
+            for _ in 0..(4 - t) {
+                b.add_faceted("abc", &[("tag".to_string(), format!("t{t}"))])
+                    .unwrap();
+            }
+        }
+        let built = b.finish().unwrap();
+        let files: HashMap<String, Vec<u8>> = built
+            .splits
+            .iter()
+            .chain(built.facets.iter())
+            .cloned()
+            .collect();
+        let resolver = MapResolver(files);
+        let ss = open_built(&built);
+        let ids: Vec<u32> = (0..10).collect();
+
+        // Off by default: no waves recorded even though the price runs.
+        let _ = block_on(ss.facet_counts_top(&resolver, &ids, 3)).unwrap();
+        assert!(crate::facet::take_facet_trace().is_empty());
+
+        // Enabled: one A/B/C triple for the single contributing split, in that order.
+        crate::facet::set_facet_trace(true);
+        let _ = block_on(ss.facet_counts_top(&resolver, &ids, 3)).unwrap();
+        let waves = crate::facet::take_facet_trace();
+        crate::facet::set_facet_trace(false);
+        assert_eq!(
+            waves.iter().map(|w| w.wave).collect::<Vec<_>>(),
+            vec!["A", "B", "C"],
+        );
+        // A drain leaves the buffer empty (tracing was turned back off).
+        assert!(crate::facet::take_facet_trace().is_empty());
+    }
+
     /// A split whose manifest summary carries a facet digest (TLV tag 3) prices panel
     /// counts with ZERO sidecar meta reads — no `.rrf` read at offset 0 — with counts equal
     /// to the meta-boot path's; a request the digest can't serve (uncapped pricing, a

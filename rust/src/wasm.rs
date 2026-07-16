@@ -265,6 +265,37 @@ pub fn fetch_window_stats() -> Vec<f64> {
     })
 }
 
+/// Turns facet-pricing wave tracing on or off. Off by default and zero-cost when off. With it
+/// on, each `facetCounts` / `countsFor` call records one entry per pricing wave per contributing
+/// split; read them with `facetTrace()`. Use it to see how many dependent round trips (and how
+/// many coalesced reads) a facet price really costs — if the recorded reads land fast but the UI
+/// facet counts update slowly, the delay is downstream of the fetch (dwell/render), not the wave
+/// structure.
+#[wasm_bindgen(js_name = setFacetTrace)]
+pub fn set_facet_trace(on: bool) {
+    crate::facet::set_facet_trace(on);
+}
+
+/// Drains the pricing waves recorded since `setFacetTrace(true)` (or the last drain), as a JS
+/// `Array<{ wave, reads, bytes, targets }>` in issue order — `wave` is `"A"`/`"B"`/`"C"`, `reads`
+/// the coalesced network requests that wave issued, `bytes` the total requested, and `targets` the
+/// categories that split priced (the three waves of one split share a `targets`). Empty when
+/// tracing is off. The waves of all contributing splits run concurrently, so this is a structural
+/// readout (count and size of reads), not a serial timeline.
+#[wasm_bindgen(js_name = facetTrace)]
+pub fn facet_trace() -> Array {
+    let out = Array::new();
+    for w in crate::facet::take_facet_trace() {
+        let obj = Object::new();
+        let _ = Reflect::set(&obj, &"wave".into(), &w.wave.into());
+        let _ = Reflect::set(&obj, &"reads".into(), &(w.reads as f64).into());
+        let _ = Reflect::set(&obj, &"bytes".into(), &(w.bytes as f64).into());
+        let _ = Reflect::set(&obj, &"targets".into(), &(w.targets as f64).into());
+        out.push(&obj);
+    }
+    out
+}
+
 /// The network half of a [`WasmFetch`] read — singleflight-shared and window-gated: waits for
 /// a fetch slot, issues the ranged GET, enforces the exact-length contract, and populates the
 /// shared range cache.

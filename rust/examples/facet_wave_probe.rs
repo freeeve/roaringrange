@@ -117,7 +117,9 @@ fn main() {
         .map(|_| (next(&mut state) % docs as u64) as u32)
         .collect();
 
+    roaringrange::set_facet_trace(true);
     let counts = block_on(ss.facet_counts_top(&resolver, &ids, top)).unwrap();
+    let waves = roaringrange::take_facet_trace();
     let priced: usize = counts.iter().map(|f| f.categories.len()).sum();
 
     let reads = log.borrow();
@@ -145,4 +147,21 @@ fn main() {
         (total - meta) as f64 / (1024.0 * 1024.0),
     );
     println!("largest reads: {:?}", &sizes[..sizes.len().min(12)]);
+
+    // Pricing-wave structure: one A/B/C triple per contributing split, all splits'
+    // waves issued concurrently. `reads` is the coalesced requests the wave fires.
+    let (mut wa, mut wb, mut wc) = (0usize, 0usize, 0usize);
+    for w in &waves {
+        match w.wave {
+            "A" => wa += w.reads,
+            "B" => wb += w.reads,
+            "C" => wc += w.reads,
+            _ => {}
+        }
+    }
+    println!(
+        "pricing waves: {} splits x (A,B,C) | reads A={wa} B={wb} C={wc} | dependent depth {}",
+        waves.len() / 3,
+        if waves.is_empty() { 0 } else { 3 },
+    );
 }
