@@ -6,10 +6,9 @@
 > benchmark, a Go builder (manifest + split `RRS` incl. per-split `RRSF` facets, byte-for-byte
 > conformance), and a wasm binding. The geometric split sets are the demo's **default**
 > client-side trigram/term backends (geometric per-tier byte caps; see Geometric tiering below).
-> Remaining: the per-split **time min/max** summary (tag 5), and Go parity for the opt-in
-> **facet digest v2** (tag 6 — Rust reader+writer shipped). The Bloom, facet-presence,
-> facet-digest (v1), and tombstone summaries and the demo split-set mode have shipped. This
-> document is the frozen byte layout the readers/writers agree on.
+> Remaining: only the per-split **time min/max** summary (tag 5). The Bloom, facet-presence,
+> facet-digest (v1 and the opt-in v2, tag 6), and tombstone summaries and the demo split-set
+> mode have shipped. This document is the frozen byte layout the readers/writers agree on.
 
 A **split set** — an additive member of the roaringrange family (next to the trigram
 `RRS`, term `RRTI`, facet `RRSF`, vector `RRVI`, record `RRSR`, lookup `RRIL`, sort
@@ -106,7 +105,7 @@ split's region the summaries are **TLV** records `[tag u8][len u32 LE][bytes]`:
 | `3` | facet digest | `[k u16][fieldCount u16]`, per field `[nameLen u16][name][catCount u16]`, per category `[nameLen u16][name][count u32][headOff u64][headSize u32][tailSize u32]` — the top-`k` categories per field by full-corpus count, so facet pricing boots from the resident manifest with no sidecar meta read | **implemented** |
 | `4` | tombstone posting | a portable RoaringBitmap of superseded base doc IDs (delta-over-base) | **implemented** |
 | `5` | time min/max | two `i64` (or the app's epoch unit) for time-range pruning | reserved |
-| `6` | facet digest v2 | the tag-3 layout with each category extended by `[containerCount u16]` then per container `[key u16][cardMinus1 u16][start u32]` — the category's tail container directory (`start` relative to the tail posting, last length implied by `tailSize`), so pricing skips the per-category tail-header read (facet wave A) for a large tail. A reader prefers tag 6, else tag 3, else the sidecar meta. **Opt-in** (`with_facet_digest_v2`): a conditional win (only tail-only priced categories benefit) and larger, so v1 stays default | **implemented (Rust)** |
+| `6` | facet digest v2 | the tag-3 layout with each category extended by `[containerCount u16]` then per container `[key u16][cardMinus1 u16][start u32]` — the category's tail container directory (`start` relative to the tail posting, last length implied by `tailSize`), so pricing skips the per-category tail-header read (facet wave A) for a large tail. A reader prefers tag 6, else tag 3, else the sidecar meta. **Opt-in** (`with_facet_digest_v2` / Go `SetFacetDigestV2`): a conditional win (only tail-only priced categories benefit) and larger, so v1 stays default | **implemented** |
 
 The **term Bloom filter** (tag 1) is the biggest fan-out reducer: built over the split's
 n-gram vocabulary with `bloom_bits_per_key` bits per key (`~10` ≈ 1% false positives), it lets

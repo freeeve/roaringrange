@@ -340,6 +340,42 @@ pub(crate) fn digest_conformance_build() -> BuiltSplitSet {
     b.finish().unwrap()
 }
 
+/// The [`digest_conformance_build`] corpus built with `with_facet_digest_v2(2)` — pins the
+/// **v2** facet-digest TLV bytes (tag 6: the v1 layout plus each category's tail container
+/// directory) cross-language via `testdata/rrss_digest_v2_build_golden.txt`; the Go
+/// `SetFacetDigestV2` must reproduce every byte (`splitsetbuild_test.go`).
+#[cfg(test)]
+pub(crate) fn digest_v2_conformance_build() -> BuiltSplitSet {
+    let docs: [(&str, &[(&str, &str)]); 5] = [
+        ("alpha beta", &[("year", "2020"), ("kind", "a")]),
+        ("beta gamma", &[("year", "2021"), ("kind", "b")]),
+        ("gamma delta", &[("year", "2020"), ("kind", "a")]),
+        ("delta alpha", &[("year", "2021"), ("kind", "b")]),
+        ("alpha gamma", &[("year", "2022"), ("kind", "a")]),
+    ];
+    let mut b = SplitSetBuilder::new(SplitBuildConfig {
+        byte_cap_max: 0,
+        policy: Policy::Tiered,
+        byte_cap: 600,
+        gram_size: 3,
+        head_boundary: 0,
+        stride: 0,
+        name_prefix: "corpus".to_string(),
+        sortcol: None,
+        bloom_bits_per_key: 8,
+        case_sensitive: false,
+    })
+    .with_facet_digest_v2(2);
+    for (text, facets) in docs {
+        let pairs: Vec<(String, String)> = facets
+            .iter()
+            .map(|(f, c)| (f.to_string(), c.to_string()))
+            .collect();
+        b.add_faceted(text, &pairs).unwrap();
+    }
+    b.finish().unwrap()
+}
+
 /// Geometric-tiering conformance fixture: the same corpus repeated enough that the
 /// doubling caps (`byte_cap 300 → byte_cap_max 1200`) place several seal boundaries —
 /// each tier visibly larger than the last. Shared with Go via
@@ -1909,6 +1945,33 @@ mod digest_conformance {
     fn regen_digest_golden() {
         let built = digest_conformance_build();
         std::fs::write(golden_path(), super::golden_text(&built)).expect("write digest golden");
+    }
+
+    fn v2_golden_path() -> &'static str {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/rrss_digest_v2_build_golden.txt"
+        )
+    }
+
+    #[test]
+    fn digest_v2_build_matches_shared_golden() {
+        let built = super::digest_v2_conformance_build();
+        let text = std::fs::read_to_string(v2_golden_path()).expect("read v2 digest golden");
+        assert_eq!(
+            text,
+            super::golden_text(&built),
+            "v2 digest-enabled split build drifted from the shared golden"
+        );
+    }
+
+    /// Regenerate with `cargo test --features splits regen_digest_v2_golden -- --ignored`.
+    #[test]
+    #[ignore]
+    fn regen_digest_v2_golden() {
+        let built = super::digest_v2_conformance_build();
+        std::fs::write(v2_golden_path(), super::golden_text(&built))
+            .expect("write v2 digest golden");
     }
 }
 

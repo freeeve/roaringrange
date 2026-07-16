@@ -50,6 +50,7 @@ type TermSplitSetBuilder struct {
 	cfg          TermSplitBuildConfig
 	headBoundary uint32
 	digestTop    int
+	digestV2     bool
 	tok          *TermTokenizer
 	open         map[string]*roaring.Bitmap
 	openCount    uint32
@@ -82,6 +83,14 @@ func NewTermSplitSetBuilder(cfg TermSplitBuildConfig) *TermSplitSetBuilder {
 // tag 3) -- see SplitSetBuilder.SetFacetDigest; identical semantics for term splits.
 func (b *TermSplitSetBuilder) SetFacetDigest(topPerField int) {
 	b.digestTop = topPerField
+	b.digestV2 = false
+}
+
+// SetFacetDigestV2 emits the v2 facet digest (tag 6, with tail container directory) -- see
+// SplitSetBuilder.SetFacetDigestV2; identical semantics for term splits. Opt-in; v1 default.
+func (b *TermSplitSetBuilder) SetFacetDigestV2(topPerField int) {
+	b.digestTop = topPerField
+	b.digestV2 = true
 }
 
 // AddText tokenizes text and appends it as one document, returning its global doc
@@ -179,7 +188,7 @@ func (b *TermSplitSetBuilder) seal() error {
 	}
 	// Summary = facet-presence (tag 2) only; the term Bloom (tag 1) is deferred
 	// for term bodies, matching Rust.
-	summary, ferr := sealFacetSidecar(b.openFacets, nil, &b.facetBlobs, b.cfg.NamePrefix, idx, !b.cfg.CaseSensitive, b.digestTop)
+	summary, ferr := sealFacetSidecar(b.openFacets, nil, &b.facetBlobs, b.cfg.NamePrefix, idx, !b.cfg.CaseSensitive, b.digestTop, b.digestV2)
 	if ferr != nil {
 		return ferr
 	}

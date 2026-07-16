@@ -35,6 +35,15 @@ const (
 	// SUMMARY_TAG_FACET_DIGEST). A reader prices panel facet counts from the resident
 	// digest instead of booting the sidecar's whole meta region.
 	summaryTagFacetDigest = 3
+	// summaryTagFacetDigestV2 is the summary TLV tag for a v2 facet digest -- the v1
+	// digest plus each top-k category's tail container directory (== the reader's
+	// SUMMARY_TAG_FACET_DIGEST_V2), so pricing skips the per-category tail-header read
+	// for a large tail. Opt-in; the reader prefers it over tag 3.
+	summaryTagFacetDigestV2 = 6
+	// noRunContainerCookie is the portable-RoaringBitmap NO_RUNCONTAINER serial cookie;
+	// a tail posting in that (seekable, offset-table) layout is what facetDigestV2's
+	// container directory is parsed from. Mirrors the Rust posting reader.
+	noRunContainerCookie = 12346
 )
 
 // SplitBuildConfig is the build-time configuration for a SplitSetBuilder.
@@ -92,6 +101,7 @@ type SplitSetBuilder struct {
 	headBoundary uint32
 	stride       int
 	digestTop    int
+	digestV2     bool
 	open         map[uint64]*roaring.Bitmap
 	openCount    uint32
 	globalBase   uint32
@@ -132,6 +142,16 @@ func NewSplitSetBuilder(cfg SplitBuildConfig) *SplitSetBuilder {
 // existing manifest byte-identical. Mirrors the Rust with_facet_digest.
 func (b *SplitSetBuilder) SetFacetDigest(topPerField int) {
 	b.digestTop = topPerField
+	b.digestV2 = false
+}
+
+// SetFacetDigestV2 is like SetFacetDigest but emits the v2 digest (tag 6), which additionally
+// carries each top-k category's tail container directory so a reader can skip the per-category
+// tail-header read for a large tail. Opt-in; v1 stays the default. Mirrors the Rust
+// with_facet_digest_v2.
+func (b *SplitSetBuilder) SetFacetDigestV2(topPerField int) {
+	b.digestTop = topPerField
+	b.digestV2 = true
 }
 
 // AddText tokenizes text into n-gram keys and appends it as one document, returning
@@ -256,7 +276,7 @@ func (b *SplitSetBuilder) seal() error {
 	// Per-split facet sidecar (RRSF) + facet-presence summary (tag 2), when the split holds facets.
 	// Order matches Rust: the Bloom record (tag 1) first, then the facet-presence record (tag 2).
 	var ferr error
-	if summary, ferr = sealFacetSidecar(b.openFacets, summary, &b.facetBlobs, b.cfg.NamePrefix, idx, !b.cfg.CaseSensitive, b.digestTop); ferr != nil {
+	if summary, ferr = sealFacetSidecar(b.openFacets, summary, &b.facetBlobs, b.cfg.NamePrefix, idx, !b.cfg.CaseSensitive, b.digestTop, b.digestV2); ferr != nil {
 		return ferr
 	}
 	blob := buf.Bytes()
@@ -384,12 +404,137 @@ func facetDigest(rrsf []byte, k int) ([]byte, error) {
 	return out, nil
 }
 
+// facetTailContainer is one tail-posting container's directory entry: its high key,
+// cardinality, and byte offset within the tail posting. Mirrors the Rust posting Container
+// (len is implied by the next start / the tail length, so it is not carried in the digest).
+type facetTailContainer struct {
+	key   uint16
+	card  uint32
+	start uint32
+}
+
+// facetTailDir parses a tail posting's NO_RUNCONTAINER container directory from tail (which
+// must span the whole posting; total is its length), byte-for-byte with the Rust posting
+// parse_dir. Returns nil when the posting is not the seekable offset-table layout, so the
+// caller emits an empty directory exactly as Rust does. A zero-container posting returns a
+// non-nil empty slice.
+func facetTailDir(tail []byte, total int) []facetTailContainer {
+	if len(tail) < 8 || binary.LittleEndian.Uint32(tail[0:]) != noRunContainerCookie {
+		return nil
+	}
+	size := int(binary.LittleEndian.Uint32(tail[4:]))
+	if size == 0 {
+		return []facetTailContainer{}
+	}
+	const desc = 8
+	offs := size*4 + desc
+	data := size*4 + offs
+	if len(tail) < data || data > total {
+		return nil
+	}
+	// The first container must begin right after the offset table, else this is not the
+	// offset-table layout we can seek into.
+	if int(binary.LittleEndian.Uint32(tail[offs:])) != data {
+		return nil
+	}
+	out := make([]facetTailContainer, size)
+	for i := range size {
+		key := binary.LittleEndian.Uint16(tail[desc+i*4:])
+		card := uint32(binary.LittleEndian.Uint16(tail[desc+i*4+2:])) + 1
+		start := binary.LittleEndian.Uint32(tail[offs+i*4:])
+		end := total
+		if i+1 < size {
+			end = int(binary.LittleEndian.Uint32(tail[offs+(i+1)*4:]))
+		}
+		if end < int(start) || end > total {
+			return nil
+		}
+		out[i] = facetTailContainer{key: key, card: card, start: start}
+	}
+	return out
+}
+
+// facetDigestV2 builds the v2 facet-digest summary payload (tag 6), byte-for-byte with the
+// Rust facet::facet_digest_v2: the v1 digest with each top-k category extended by its tail
+// container directory [containerCount u16] then per container [key u16][cardMinus1 u16]
+// [start u32]. A category whose tail is empty or not the seekable layout emits containerCount 0.
+func facetDigestV2(rrsf []byte, k int) ([]byte, error) {
+	fi, err := OpenFacets(bytes.NewReader(rrsf))
+	if err != nil {
+		return nil, err
+	}
+	k16 := uint16(min(k, 0xFFFF))
+	var out []byte
+	out = binary.LittleEndian.AppendUint16(out, k16)
+	fields := fi.Fields()
+	if len(fields) > 0xFFFF {
+		return nil, fmt.Errorf("facet digest field count %d exceeds u16", len(fields))
+	}
+	out = binary.LittleEndian.AppendUint16(out, uint16(len(fields)))
+	pushName := func(name string) error {
+		if len(name) > 0xFFFF {
+			return fmt.Errorf("facet digest name %q exceeds u16", name)
+		}
+		out = binary.LittleEndian.AppendUint16(out, uint16(len(name)))
+		out = append(out, name...)
+		return nil
+	}
+	cats := fi.Categories()
+	for _, f := range fields {
+		if err := pushName(f.Name); err != nil {
+			return nil, err
+		}
+		fc := make([]FacetCatMeta, f.CatCount)
+		copy(fc, cats[f.CatStart:f.CatStart+f.CatCount])
+		slices.SortFunc(fc, func(a, b FacetCatMeta) int {
+			if a.Cardinality != b.Cardinality {
+				return cmp.Compare(b.Cardinality, a.Cardinality)
+			}
+			return cmp.Compare(a.Name, b.Name)
+		})
+		if len(fc) > int(k16) {
+			fc = fc[:k16]
+		}
+		out = binary.LittleEndian.AppendUint16(out, uint16(len(fc)))
+		for _, c := range fc {
+			if err := pushName(c.Name); err != nil {
+				return nil, err
+			}
+			out = binary.LittleEndian.AppendUint32(out, c.Cardinality)
+			out = binary.LittleEndian.AppendUint64(out, c.headOff)
+			out = binary.LittleEndian.AppendUint32(out, c.headSize)
+			out = binary.LittleEndian.AppendUint32(out, c.tailSize)
+
+			// The tail container directory, when the tail is present and seekable.
+			var dir []facetTailContainer
+			if c.tailSize > 0 {
+				tailOff := c.headOff + uint64(c.headSize)
+				end := tailOff + uint64(c.tailSize)
+				if end > uint64(len(rrsf)) {
+					return nil, fmt.Errorf("RRSF tail out of range")
+				}
+				dir = facetTailDir(rrsf[tailOff:end], int(c.tailSize))
+			}
+			if len(dir) > 0xFFFF {
+				return nil, fmt.Errorf("tail container count %d exceeds u16", len(dir))
+			}
+			out = binary.LittleEndian.AppendUint16(out, uint16(len(dir)))
+			for _, con := range dir {
+				out = binary.LittleEndian.AppendUint16(out, con.key)
+				out = binary.LittleEndian.AppendUint16(out, uint16(con.card-1))
+				out = binary.LittleEndian.AppendUint32(out, con.start)
+			}
+		}
+	}
+	return out, nil
+}
+
 // sealFacetSidecar is the facet half of both split builders' seal: when the open split holds
 // facets it appends the facet-presence TLV (tag 2) to summary and writes the ‹prefix›-s‹idx›.rrf
 // sidecar (appended to facetBlobs), else it leaves both untouched. Returns the extended summary.
 // caseFold is !CaseSensitive. Byte-identical to the inline form (append to a nil summary equals
 // assignment, so it serves both the Bloom-prefixed trigram summary and the term summary).
-func sealFacetSidecar(openFacets map[string]map[string]*roaring.Bitmap, summary []byte, facetBlobs *[]NamedSplit, namePrefix string, idx int, caseFold bool, digestTop int) ([]byte, error) {
+func sealFacetSidecar(openFacets map[string]map[string]*roaring.Bitmap, summary []byte, facetBlobs *[]NamedSplit, namePrefix string, idx int, caseFold bool, digestTop int, digestV2 bool) ([]byte, error) {
 	if len(openFacets) == 0 {
 		return summary, nil
 	}
@@ -399,11 +544,21 @@ func sealFacetSidecar(openFacets map[string]map[string]*roaring.Bitmap, summary 
 		return nil, err
 	}
 	if digestTop > 0 {
-		digest, err := facetDigest(fbuf.Bytes(), digestTop)
+		// v1 (default) is the directory-less digest; v2 additionally carries each top-k
+		// category's tail container directory. v2 is opt-in, so v1 stays the default.
+		var digest []byte
+		var err error
+		var tag byte = summaryTagFacetDigest
+		if digestV2 {
+			digest, err = facetDigestV2(fbuf.Bytes(), digestTop)
+			tag = summaryTagFacetDigestV2
+		} else {
+			digest, err = facetDigest(fbuf.Bytes(), digestTop)
+		}
 		if err != nil {
 			return nil, err
 		}
-		summary = append(summary, tlvRecord(summaryTagFacetDigest, digest)...)
+		summary = append(summary, tlvRecord(tag, digest)...)
 	}
 	*facetBlobs = append(*facetBlobs, NamedSplit{
 		Name:  fmt.Sprintf("%s-s%05d.rrf", namePrefix, idx),
