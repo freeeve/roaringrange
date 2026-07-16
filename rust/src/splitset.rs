@@ -62,6 +62,13 @@ pub const FACET_COUNT_TOP_PER_FIELD: usize = 128;
 /// sidecar the difference between KBs and MBs per split on first touch.
 pub(crate) const SUMMARY_TAG_FACET_DIGEST: u8 = 3;
 
+/// Summary TLV tag for a split's **v2 facet digest** — the v1 digest plus each top-k category's
+/// tail container directory (see `facet::facet_digest_v2`), so facet pricing skips the
+/// per-category tail-header read (wave A) as well as the sidecar meta read. The reader prefers
+/// this tag and falls back to [`SUMMARY_TAG_FACET_DIGEST`] (v1) then the full sidecar meta, so a
+/// manifest built by an older writer still prices. Reserved tag 5 sits between (time min/max).
+pub(crate) const SUMMARY_TAG_FACET_DIGEST_V2: u8 = 6;
+
 /// Per-split flag bit: this split carries a tombstone posting in its summary region.
 pub const SPLIT_FLAG_HAS_TOMBSTONE: u16 = 1 << 0;
 /// Per-split flag bit: the split stores **absolute global** doc IDs (`global = local`) rather
@@ -955,34 +962,41 @@ impl SplitSet {
         pairs: Option<&[(String, String)]>,
     ) -> Result<FacetIndex<F>, IndexError> {
         if let Some(summary) = self.summary(split) {
-            if let Ok(Some(payload)) = find_tlv(summary, SUMMARY_TAG_FACET_DIGEST) {
-                if let Ok((k, fields)) = crate::facet::parse_facet_digest(payload) {
-                    let usable = match pairs {
-                        // Every requested pair must either resolve inside the digest, or be
-                        // provably absent from the whole sidecar per the facet-presence
-                        // summary (then the digest meta correctly prices it 0 without a
-                        // fetch). A pair that is present but past the digest's top-k is
-                        // genuine long tail — only the full meta can price it.
-                        Some(ps) => {
-                            let present = if self.flags & FLAG_FACET != 0 {
-                                self.facet_keys(split)?
-                            } else {
-                                None
-                            };
-                            ps.iter().all(|(f, c)| {
-                                fields.iter().any(|fl| {
-                                    &fl.name == f && fl.categories.iter().any(|cat| &cat.name == c)
-                                }) || present.as_ref().is_some_and(|keys| {
-                                    keys.binary_search(&facet_key(f, c, self.case_fold))
-                                        .is_err()
-                                })
+            // Prefer the v2 digest (tail directory resident → wave A skips per-category header
+            // reads), then the v1 digest, then fall through to the full sidecar meta.
+            let digest = match find_tlv(summary, SUMMARY_TAG_FACET_DIGEST_V2) {
+                Ok(Some(payload)) => crate::facet::parse_facet_digest_v2(payload).ok(),
+                _ => match find_tlv(summary, SUMMARY_TAG_FACET_DIGEST) {
+                    Ok(Some(payload)) => crate::facet::parse_facet_digest(payload).ok(),
+                    _ => None,
+                },
+            };
+            if let Some((k, fields)) = digest {
+                let usable = match pairs {
+                    // Every requested pair must either resolve inside the digest, or be
+                    // provably absent from the whole sidecar per the facet-presence
+                    // summary (then the digest meta correctly prices it 0 without a
+                    // fetch). A pair that is present but past the digest's top-k is
+                    // genuine long tail — only the full meta can price it.
+                    Some(ps) => {
+                        let present = if self.flags & FLAG_FACET != 0 {
+                            self.facet_keys(split)?
+                        } else {
+                            None
+                        };
+                        ps.iter().all(|(f, c)| {
+                            fields.iter().any(|fl| {
+                                &fl.name == f && fl.categories.iter().any(|cat| &cat.name == c)
+                            }) || present.as_ref().is_some_and(|keys| {
+                                keys.binary_search(&facet_key(f, c, self.case_fold))
+                                    .is_err()
                             })
-                        }
-                        None => top_per_field != 0 && top_per_field <= k,
-                    };
-                    if usable {
-                        return Ok(crate::facet::FacetMeta::from_fields(fields).attach(fetch));
+                        })
                     }
+                    None => top_per_field != 0 && top_per_field <= k,
+                };
+                if usable {
+                    return Ok(crate::facet::FacetMeta::from_fields(fields).attach(fetch));
                 }
             }
         }
@@ -2990,6 +3004,114 @@ mod tests {
                 "a {len}-byte .rrf read spans the whole {region_len}-byte postings region"
             );
         }
+    }
+
+    /// The **v2 facet digest** (tail container directory resident) must price identically to v1
+    /// and never fetch more bytes: for a large tail-only category it skips v1's per-category
+    /// tail-header read. (The read *count* win is layout-dependent — skipping a header can break
+    /// a coalesced wave — so it is demonstrated in `facet_wave_probe`, not asserted here; the
+    /// robust invariants are equal counts and no-more-bytes.) Directly exercises the `FacetIndex`
+    /// pricing path off a hand-built digest of each version.
+    #[test]
+    fn v2_digest_prices_identically_and_reads_no_more_bytes() {
+        use crate::facet::{
+            facet_digest, facet_digest_v2, parse_facet_digest, parse_facet_digest_v2, FacetMeta,
+        };
+        // One split, doc id == rank == insertion order, so bucket 0 is the head and bucket 1
+        // the tail. "head" lives only in bucket 0 (head-present); "tail" only in bucket 1
+        // (head_size == 0 -> tail-only); "mid" spans both.
+        let mut b = SplitSetBuilder::new(SplitBuildConfig {
+            byte_cap_max: 0,
+            policy: Policy::Tiered,
+            byte_cap: 64 << 20,
+            gram_size: 3,
+            head_boundary: 0,
+            stride: 0,
+            name_prefix: "corpus".to_string(),
+            sortcol: None,
+            bloom_bits_per_key: 0,
+            case_sensitive: false,
+        });
+        let total = 70_000u32;
+        for i in 0..total {
+            // "tail" is tail-only (bucket 1, no head) AND large: ~2500 docs make its tail
+            // posting exceed HEADER_PREFIX, so the v2 resident directory saves a real header
+            // read (a small tail would be grabbed whole by wave A and gain nothing).
+            let cat = if i < 1000 {
+                "head"
+            } else if (65_536..68_000).contains(&i) {
+                "tail"
+            } else {
+                "mid"
+            };
+            b.add_faceted("abc", &[("f".to_string(), cat.to_string())])
+                .unwrap();
+        }
+        let built = b.finish().unwrap();
+        assert_eq!(built.splits.len(), 1);
+        let rrf = built
+            .facets
+            .iter()
+            .find(|(n, _)| n.ends_with(".rrf"))
+            .map(|(_, b)| b.clone())
+            .expect("facet sidecar");
+
+        // Result spans bucket 0 and bucket 1, hitting every category: 0/500 -> head,
+        // 66000 -> tail (bucket 1), 69999 -> mid (bucket 1).
+        let result: RoaringBitmap = [0u32, 500, 66_000, 69_999].into_iter().collect();
+
+        // Price the same result off a v1 digest and a v2 digest, recording every read.
+        let price = |payload_v2: bool| {
+            let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let fetch = RecordingFetch {
+                inner: MemoryFetch::new(rrf.clone()),
+                name: "corpus-s00000.rrf".to_string(),
+                log: log.clone(),
+            };
+            let fields = if payload_v2 {
+                parse_facet_digest_v2(&facet_digest_v2(&rrf, 8).unwrap())
+                    .unwrap()
+                    .1
+            } else {
+                parse_facet_digest(&facet_digest(&rrf, 8).unwrap())
+                    .unwrap()
+                    .1
+            };
+            let fi = FacetMeta::from_fields(fields).attach(fetch);
+            let counts = block_on(fi.counts_full(&result, 8)).unwrap();
+            let reads = log.borrow().clone();
+            (counts, reads)
+        };
+        let (counts_v1, reads_v1) = price(false);
+        let (counts_v2, reads_v2) = price(true);
+
+        // Identical counts: head 2 (ids 0,500), tail 1 (id 66000), mid 1 (id 69999).
+        assert_eq!(
+            counts_v1, counts_v2,
+            "v2 digest must price identically to v1"
+        );
+        let named: HashMap<String, u64> = {
+            let (_, fields) = parse_facet_digest_v2(&facet_digest_v2(&rrf, 8).unwrap()).unwrap();
+            fields[0]
+                .categories
+                .iter()
+                .enumerate()
+                .map(|(ci, c)| (c.name.clone(), counts_v2[0][ci]))
+                .collect()
+        };
+        assert_eq!(named.get("tail"), Some(&1));
+        assert_eq!(named.get("head"), Some(&2));
+        assert_eq!(named.get("mid"), Some(&1));
+
+        // v2 serves the large tail-only category's directory from the digest instead of reading
+        // its tail header, so it fetches no more bytes than v1 (here strictly fewer).
+        let bytes = |v: &[(String, u64, usize)]| -> usize { v.iter().map(|(_, _, l)| l).sum() };
+        assert!(
+            bytes(&reads_v2) <= bytes(&reads_v1),
+            "v2 must fetch no more bytes than v1 (v1={}, v2={})",
+            bytes(&reads_v1),
+            bytes(&reads_v2),
+        );
     }
 
     /// The per-field pricing cap and its on-demand companion: `facet_counts_top` prices only

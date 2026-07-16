@@ -147,6 +147,11 @@ pub struct Category {
     /// Head posting (docs `[0,65536)`) held in memory so `counts` can intersect
     /// it with a query's head result without further fetches.
     head: RoaringBitmap,
+    /// The tail posting's container directory, resident when a split-set **v2 facet
+    /// digest** (summary tag 6) carried it — so pricing skips the per-category
+    /// tail-header read that would otherwise open the directory (facet wave A). `None`
+    /// on a full-meta boot or a v1 digest: the directory is fetched per query as before.
+    tail_dir: Option<Vec<crate::posting::Container>>,
 }
 
 /// One facet field with its categories.
@@ -347,6 +352,7 @@ fn from_meta(buf: Vec<u8>) -> Result<FacetMeta, IndexError> {
                 tail_size,
             },
             head: RoaringBitmap::new(),
+            tail_dir: None,
         });
     }
 
@@ -697,6 +703,14 @@ impl<F: RangeFetch> FacetIndex<F> {
         let bitmap = |bytes: &[u8], what: &'static str| {
             RoaringBitmap::deserialize_from(bytes).map_err(|_| IndexError::Malformed(what))
         };
+        // A resident tail directory (v2 digest) is worth using only for a LARGE tail. A tail
+        // that fits in one header-prefix read is grabbed WHOLE by wave A anyway (and coalesces
+        // with its neighbors), so skipping that read to serve the directory from the digest only
+        // forces an extra, often overlapping, wave-C container fetch — a loss. Above the prefix,
+        // wave A would read just the header and wave C fetches containers selectively, so the
+        // resident directory saves that header read outright.
+        let use_resident =
+            |c: &Category| c.tail_dir.is_some() && c.range.tail_size as usize > HEADER_PREFIX;
 
         // Wave A: per target, the head posting (when filtered head counts need one and no
         // resident head is loaded) and the tail's header prefix (the whole tail, if small).
@@ -709,8 +723,11 @@ impl<F: RangeFetch> FacetIndex<F> {
             } else {
                 (0, 0)
             });
+            // The tail header prefix opens the container directory — UNLESS a v2 digest made
+            // that directory resident for a large tail (`use_resident`), in which case wave A
+            // skips this read and wave C fetches the containers straight from the digest.
             let need_tail = !tail_keys.is_empty() && c.range.tail_size > 0;
-            ranges.push(if need_tail {
+            ranges.push(if need_tail && !use_resident(c) {
                 let prefix = (c.range.tail_size as usize).min(HEADER_PREFIX);
                 (c.range.tail_off, prefix)
             } else {
@@ -745,6 +762,20 @@ impl<F: RangeFetch> FacetIndex<F> {
             };
 
             let tail_len = c.range.tail_size as usize;
+
+            // Resident directory (v2 digest, large tail): select this target's containers
+            // straight from it, no header read. `wave_a[2*i+1]` is empty here (wave A skipped
+            // it); a small tail_dir falls through to the whole-tail prefix path below.
+            if use_resident(c) {
+                let need_tail = !tail_keys.is_empty() && tail_len > 0;
+                tails.push(if need_tail {
+                    Tail::Containers(needed_of(c.tail_dir.clone().unwrap(), tail_keys))
+                } else {
+                    Tail::Done
+                });
+                continue;
+            }
+
             let prefix = &wave_a[2 * i + 1];
             if prefix.is_empty() {
                 tails.push(Tail::Done);
@@ -1047,6 +1078,192 @@ pub(crate) fn parse_facet_digest(payload: &[u8]) -> Result<(usize, Vec<Field>), 
                     tail_size,
                 },
                 head: RoaringBitmap::new(),
+                tail_dir: None,
+            });
+        }
+        fields.push(Field {
+            name: fname,
+            categories,
+        });
+    }
+    Ok((k, fields))
+}
+
+/// Builds the **v2 facet digest** (summary TLV tag 6): the v1 digest ([`facet_digest`])
+/// plus each top-`k` category's **tail container directory**, so the split-set reader prices
+/// the tail without the per-category tail-header read that opens that directory (facet wave A).
+/// Derived from the emitted `RRSF` bytes so the ranges match the sidecar exactly. Layout (LE,
+/// mirrored by Go `facetDigestV2`): `[k u16][fieldCount u16]`, per field
+/// `[nameLen u16][name][catCount u16]`, per category
+/// `[nameLen u16][name][count u32][headOff u64][headSize u32][tailSize u32]`
+/// `[containerCount u16]` then per container `[key u16][cardMinus1 u16][start u32]` — `start`
+/// relative to the tail posting, the last container's length implied by `tailSize`. A category
+/// whose tail is empty or not the seekable NO_RUNCONTAINER-with-offsets layout emits
+/// `containerCount 0`, and the reader fetches its header per query as on a v1 digest.
+#[cfg(all(any(feature = "splits", test), not(target_arch = "wasm32")))]
+pub(crate) fn facet_digest_v2(rrsf: &[u8], k: usize) -> Result<Vec<u8>, IndexError> {
+    let header = rrsf
+        .get(..HEADER_SIZE)
+        .ok_or(IndexError::Malformed("short RRSF header"))?;
+    let meta_len = rrsf_boot_len(header)?;
+    let meta = rrsf
+        .get(..meta_len)
+        .ok_or(IndexError::Malformed("RRSF meta region truncated"))?;
+    let fields = from_meta(meta.to_vec())?.fields;
+
+    let k16 = u16::try_from(k).unwrap_or(u16::MAX);
+    let mut out = Vec::new();
+    out.extend_from_slice(&k16.to_le_bytes());
+    let field_count = u16::try_from(fields.len())
+        .map_err(|_| IndexError::Malformed("facet digest field count exceeds u16"))?;
+    out.extend_from_slice(&field_count.to_le_bytes());
+    let push_name = |out: &mut Vec<u8>, name: &str| -> Result<(), IndexError> {
+        let len = u16::try_from(name.len())
+            .map_err(|_| IndexError::Malformed("facet digest name exceeds u16"))?;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        Ok(())
+    };
+    for f in &fields {
+        push_name(&mut out, &f.name)?;
+        let mut idx: Vec<usize> = (0..f.categories.len()).collect();
+        idx.sort_by(|&a, &b| {
+            let (ca, cb) = (&f.categories[a], &f.categories[b]);
+            cb.count.cmp(&ca.count).then_with(|| ca.name.cmp(&cb.name))
+        });
+        idx.truncate(k16 as usize);
+        out.extend_from_slice(&(idx.len() as u16).to_le_bytes());
+        for &ci in &idx {
+            let c = &f.categories[ci];
+            push_name(&mut out, &c.name)?;
+            out.extend_from_slice(&c.count.to_le_bytes());
+            out.extend_from_slice(&c.range.head_off.to_le_bytes());
+            out.extend_from_slice(&c.range.head_size.to_le_bytes());
+            out.extend_from_slice(&c.range.tail_size.to_le_bytes());
+
+            // The tail container directory, when the tail is present and seekable.
+            let tail_size = c.range.tail_size as usize;
+            let dir = if tail_size > 0 {
+                let off = c.range.tail_off as usize;
+                let end = off
+                    .checked_add(tail_size)
+                    .filter(|&e| e <= rrsf.len())
+                    .ok_or(IndexError::Malformed("RRSF tail out of range"))?;
+                crate::posting::parse_dir(&rrsf[off..end], tail_size)
+            } else {
+                None
+            };
+            match dir {
+                Some(dir) => {
+                    let n = u16::try_from(dir.len())
+                        .map_err(|_| IndexError::Malformed("tail container count exceeds u16"))?;
+                    out.extend_from_slice(&n.to_le_bytes());
+                    for con in &dir {
+                        out.extend_from_slice(&con.key.to_le_bytes());
+                        out.extend_from_slice(&((con.card - 1) as u16).to_le_bytes());
+                        out.extend_from_slice(&(con.start as u32).to_le_bytes());
+                    }
+                }
+                None => out.extend_from_slice(&0u16.to_le_bytes()),
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Parses a **v2 facet digest** (see [`facet_digest_v2`]) into skeleton fields whose
+/// categories carry a resident [`tail_dir`](Category::tail_dir) when the digest supplied one.
+/// Every offset is bounds-checked (the digest travels in the untrusted manifest). Returns the
+/// builder's per-field cap `k` and the fields.
+#[cfg(any(feature = "splits", test))]
+pub(crate) fn parse_facet_digest_v2(payload: &[u8]) -> Result<(usize, Vec<Field>), IndexError> {
+    use crate::posting::Container;
+    struct Cur<'a>(&'a [u8], usize);
+    impl<'a> Cur<'a> {
+        fn take(&mut self, n: usize) -> Result<&'a [u8], IndexError> {
+            let end = self
+                .1
+                .checked_add(n)
+                .filter(|&e| e <= self.0.len())
+                .ok_or(IndexError::Malformed("facet digest truncated"))?;
+            let s = &self.0[self.1..end];
+            self.1 = end;
+            Ok(s)
+        }
+        fn u16(&mut self) -> Result<u16, IndexError> {
+            Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+        }
+        fn u32(&mut self) -> Result<u32, IndexError> {
+            Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        }
+        fn u64(&mut self) -> Result<u64, IndexError> {
+            Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        }
+        fn name(&mut self) -> Result<String, IndexError> {
+            let len = self.u16()? as usize;
+            Ok(String::from_utf8_lossy(self.take(len)?).into_owned())
+        }
+    }
+    let mut c = Cur(payload, 0);
+    let k = c.u16()? as usize;
+    let field_count = c.u16()? as usize;
+    let mut fields = Vec::with_capacity(field_count);
+    for _ in 0..field_count {
+        let fname = c.name()?;
+        let cat_count = c.u16()? as usize;
+        let mut categories = Vec::with_capacity(cat_count);
+        for _ in 0..cat_count {
+            let cname = c.name()?;
+            let count = c.u32()?;
+            let head_off = c.u64()?;
+            let head_size = c.u32()?;
+            let tail_size = c.u32()?;
+
+            // The resident tail directory: `n` containers, each `[key][card-1][start]`,
+            // with the last container's length implied by `tail_size`.
+            let n = c.u16()? as usize;
+            let tail_dir = if n == 0 {
+                None
+            } else {
+                let mut raw: Vec<(u16, u32, usize)> = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let key = c.u16()?;
+                    let card = c.u16()? as u32 + 1;
+                    let start = c.u32()? as usize;
+                    raw.push((key, card, start));
+                }
+                let mut dir = Vec::with_capacity(n);
+                for i in 0..n {
+                    let (key, card, start) = raw[i];
+                    let end = if i + 1 < n {
+                        raw[i + 1].2
+                    } else {
+                        tail_size as usize
+                    };
+                    if end < start || end > tail_size as usize {
+                        return Err(IndexError::Malformed("facet digest tail container range"));
+                    }
+                    dir.push(Container {
+                        key,
+                        card,
+                        start,
+                        len: end - start,
+                    });
+                }
+                Some(dir)
+            };
+
+            categories.push(Category {
+                name: cname,
+                count,
+                range: CatRange {
+                    head_off,
+                    head_size,
+                    tail_off: head_off.saturating_add(head_size as u64),
+                    tail_size,
+                },
+                head: RoaringBitmap::new(),
+                tail_dir,
             });
         }
         fields.push(Field {

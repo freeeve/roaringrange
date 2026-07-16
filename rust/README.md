@@ -87,7 +87,11 @@ Per-store/CDN tuning, all optional:
   renders; `countsFor(ids, pairs)` prices expanded long-tail categories exactly.
   Split sets built with `with_facet_digest(k)` / Go `SetFacetDigest(k)` carry a
   per-split **facet digest** in the manifest, so pricing reads no sidecar meta
-  at all (see `SPLITSET.md`, summary tag 3).
+  at all (see `SPLITSET.md`, summary tag 3). The opt-in `with_facet_digest_v2(k)`
+  additionally resides each category's tail container directory (tag 6), letting
+  pricing skip the per-category tail-header read (facet wave A) for a large tail
+  — a conditional win (only tail-only priced categories benefit), measurable
+  with `facetTrace()`.
 - `RrssIndex.openBundle(manifest, base, rrhc)` boots every split — trigram
   **and** term (`RRTI`) — from one inlined-boot bundle emitted by
   `write_splitset_bundle` / Go `WriteSplitsetBundle`, collapsing per-split

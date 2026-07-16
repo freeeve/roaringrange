@@ -18,6 +18,7 @@ use crate::ngram::ngram_keys_with;
 use crate::splitset::{
     bloom_build, tlv_record, BodyKind, Policy, FLAG_BLOOM, FLAG_CASE_SENSITIVE, FLAG_FACET,
     SORTCOL_FLAG_DESCENDING, SUMMARY_TAG_BLOOM, SUMMARY_TAG_FACET, SUMMARY_TAG_FACET_DIGEST,
+    SUMMARY_TAG_FACET_DIGEST_V2,
 };
 #[cfg(feature = "terms")]
 use crate::terms::{Language, Tokenizer};
@@ -452,9 +453,23 @@ fn seal_facet_sidecar(
         cfg.case_normalization,
     )?;
     if cfg.digest_top > 0 {
-        let digest = crate::facet::facet_digest(&facet_bytes, cfg.digest_top)
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        summary.extend_from_slice(&tlv_record(SUMMARY_TAG_FACET_DIGEST, &digest));
+        // v1 (default) is the directory-less digest; v2 additionally carries each top-k
+        // category's tail container directory so a reader can skip the per-category tail-header
+        // read (facet wave A) for a large tail. v2 is opt-in: it is a conditional win (only
+        // tail-only priced categories benefit) and larger, so the default stays v1.
+        let (digest, tag) = if cfg.digest_v2 {
+            (
+                crate::facet::facet_digest_v2(&facet_bytes, cfg.digest_top),
+                SUMMARY_TAG_FACET_DIGEST_V2,
+            )
+        } else {
+            (
+                crate::facet::facet_digest(&facet_bytes, cfg.digest_top),
+                SUMMARY_TAG_FACET_DIGEST,
+            )
+        };
+        let digest = digest.map_err(|e| io::Error::other(e.to_string()))?;
+        summary.extend_from_slice(&tlv_record(tag, &digest));
     }
     facet_blobs.push((facet_name, facet_bytes));
     Ok(())
@@ -468,6 +483,7 @@ struct FacetSealCfg<'a> {
     head_boundary: u32,
     case_normalization: bool,
     digest_top: usize,
+    digest_v2: bool,
 }
 
 /// Appends a UTF-8 name to `blob` and returns its `(offset, length)` span, erroring if the
@@ -630,6 +646,8 @@ pub struct SplitSetBuilder {
     /// Top categories per field emitted into each split's facet-digest summary
     /// (`0` = no digest). See [`Self::with_facet_digest`].
     facet_digest_top: usize,
+    /// Emit the v2 digest (with tail container directory) instead of the default v1 — opt-in.
+    facet_digest_v2: bool,
     /// Sealed split metadata, in seal order (all base — the batch builder writes no delta).
     specs: Vec<SplitSpec>,
     /// Sealed split blobs `(filename, bytes)`, parallel to `specs`.
@@ -695,6 +713,7 @@ impl SplitSetBuilder {
             open_facets: BTreeMap::new(),
             has_facets: false,
             facet_digest_top: 0,
+            facet_digest_v2: false,
             specs: Vec::new(),
             blobs: Vec::new(),
             facet_blobs: Vec::new(),
@@ -709,6 +728,19 @@ impl SplitSetBuilder {
     /// keeps every existing manifest byte-identical.
     pub fn with_facet_digest(mut self, top_per_field: usize) -> Self {
         self.facet_digest_top = top_per_field;
+        self.facet_digest_v2 = false;
+        self
+    }
+
+    /// Like [`with_facet_digest`](Self::with_facet_digest) but emits the **v2** digest (tag 6),
+    /// which additionally carries each top-k category's tail container directory so a reader can
+    /// skip the per-category tail-header read (facet wave A) for a large tail. Opt-in: the win is
+    /// conditional (only tail-only priced categories benefit — a category whose top-ranked docs
+    /// don't include it) and the digest is larger, so v1 stays the default. Measure with the
+    /// wasm `facetTrace()` before adopting.
+    pub fn with_facet_digest_v2(mut self, top_per_field: usize) -> Self {
+        self.facet_digest_top = top_per_field;
+        self.facet_digest_v2 = true;
         self
     }
 
@@ -837,6 +869,7 @@ impl SplitSetBuilder {
                 head_boundary: self.head_boundary,
                 case_normalization: self.case_normalization,
                 digest_top: self.facet_digest_top,
+                digest_v2: self.facet_digest_v2,
             },
         )?;
         self.specs.push(SplitSpec {
@@ -1051,6 +1084,8 @@ pub struct TermSplitSetBuilder {
     /// Top categories per field emitted into each split's facet-digest summary
     /// (`0` = no digest). See [`Self::with_facet_digest`].
     facet_digest_top: usize,
+    /// Emit the v2 digest (with tail container directory) instead of the default v1 — opt-in.
+    facet_digest_v2: bool,
     /// Sealed split metadata, in seal order (all base — the batch builder writes no delta).
     specs: Vec<SplitSpec>,
     /// Sealed split blobs `(filename, RRTI bytes)`, parallel to `specs`.
@@ -1093,6 +1128,7 @@ impl TermSplitSetBuilder {
             open_facets: BTreeMap::new(),
             has_facets: false,
             facet_digest_top: 0,
+            facet_digest_v2: false,
             specs: Vec::new(),
             blobs: Vec::new(),
             facet_blobs: Vec::new(),
@@ -1122,6 +1158,15 @@ impl TermSplitSetBuilder {
     /// (the default) emits no digest and keeps every existing manifest byte-identical.
     pub fn with_facet_digest(mut self, top_per_field: usize) -> Self {
         self.facet_digest_top = top_per_field;
+        self.facet_digest_v2 = false;
+        self
+    }
+
+    /// The **v2** digest (tag 6, tail container directory) for term splits — see
+    /// [`SplitSetBuilder::with_facet_digest_v2`]. Opt-in; v1 stays the default.
+    pub fn with_facet_digest_v2(mut self, top_per_field: usize) -> Self {
+        self.facet_digest_top = top_per_field;
+        self.facet_digest_v2 = true;
         self
     }
 
@@ -1232,6 +1277,7 @@ impl TermSplitSetBuilder {
                 head_boundary: self.head_boundary,
                 case_normalization: self.case_normalization,
                 digest_top: self.facet_digest_top,
+                digest_v2: self.facet_digest_v2,
             },
         )?;
         self.specs.push(SplitSpec {

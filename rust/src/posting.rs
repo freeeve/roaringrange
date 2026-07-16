@@ -39,6 +39,7 @@ const SPAN_GAP: usize = 16384;
 /// One container's location within a posting: its high key, cardinality (needed
 /// to re-frame it into a standalone bitmap), and byte range relative to the
 /// posting start.
+#[derive(Clone)]
 pub(crate) struct Container {
     pub(crate) key: u16,
     pub(crate) card: u32,
